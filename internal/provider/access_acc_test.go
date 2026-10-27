@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"testing"
+	"time"
 
 	acc "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -100,6 +102,20 @@ func testAccSignIn(credentials func(*pbsclient.Options), who string, works bool)
 		return fmt.Errorf("signing in as %s failed, but not for its credentials: %w", who, err)
 	}
 	return nil
+}
+
+// testAccWaitForACLCache waits until PBS applies ACL changes. Before 4.2.6,
+// PBS caches privileges for up to 5 seconds and does not drop them when
+// acl.cfg changes (proxmox-backup commit 0b24f4da), so privileges read right
+// after a grant may not include it yet. A stand whose version is unknown is
+// waited for too.
+func testAccWaitForACLCache() {
+	var major, minor, release int
+	if n, _ := fmt.Sscanf(os.Getenv(envAccVersion), "%d.%d.%d", &major, &minor, &release); n == 3 &&
+		(pbsclient.Version{Version: fmt.Sprintf("%d.%d", major, minor), Release: strconv.Itoa(release)}).AtLeast(4, 2, 6) {
+		return
+	}
+	time.Sleep(6 * time.Second)
 }
 
 // testAccMustGrant grants a role outside Terraform.
@@ -424,8 +440,14 @@ data "pbs_permissions" "token" {
 				Check: acc.ComposeAggregateTestCheckFunc(
 					acc.TestCheckResourceAttr("pbs_acl.token", "id", path+"|"+tokenID+"|DatastoreBackup"),
 					acc.TestCheckResourceAttr("pbs_acl.token", "propagate", "true"),
-					acc.TestCheckResourceAttrSet("data.pbs_permissions.token", "permissions."+path+".Datastore.Backup"),
 				),
+			},
+			{
+				// The same configuration again, which reads the data source
+				// anew once PBS applies the new entries.
+				PreConfig: testAccWaitForACLCache,
+				Config:    config("true"),
+				Check:     acc.TestCheckResourceAttrSet("data.pbs_permissions.token", "permissions."+path+".Datastore.Backup"),
 			},
 			{
 				Config: config("false"),

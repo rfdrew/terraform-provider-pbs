@@ -84,6 +84,9 @@ func (r *aclResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"other roles: granting `NoAccess` removes its other roles there, and granting another role removes " +
 			"`NoAccess`. The provider warns when that happens. Do not manage both kinds for the same path and " +
 			"user or token, or each apply removes what the previous one granted.\n\n" +
+			"-> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an entry " +
+			"changes, so a new role may take that long to work after the apply, and a removed one to stop " +
+			"working.\n\n" +
 			"Creating an entry that already exists fails, so that Terraform does not take over, and later delete, " +
 			"an entry it did not create: import it instead. Managing ACL entries needs " + aclModifyPrivilege +
 			", and reading them all " + aclReadPrivilege + "; without it, PBS shows only the entries of the " +

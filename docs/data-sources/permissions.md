@@ -4,11 +4,14 @@ page_title: "pbs_permissions Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access.
+  -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an ACL entry changes. Read in the same apply that changes pbs_acl resources, this data source may then still show the privileges from before.
 ---
 
 # pbs_permissions (Data Source)
 
 Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access.
+
+-> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an ACL entry changes. Read in the same apply that changes `pbs_acl` resources, this data source may then still show the privileges from before.
 
 ## Example Usage
 

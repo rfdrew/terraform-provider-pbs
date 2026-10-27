@@ -6,6 +6,7 @@ description: |-
   Grants a role to a Proxmox Backup Server user or API token on an ACL path: one entry of the server's access control list. Several roles on the same path for the same user or token are separate entries, and separate resources.
   An API token acts with the intersection of its user's privileges and its own, so it needs entries for its token ID besides those of its user. Deleting a user or token deletes the entries of its tokens; the user's own entries are removed by pbs_user when it destroys the user.
   ~> NoAccess excludes every other role. On one path, a user or token has either NoAccess or other roles: granting NoAccess removes its other roles there, and granting another role removes NoAccess. The provider warns when that happens. Do not manage both kinds for the same path and user or token, or each apply removes what the previous one granted.
+  -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an entry changes, so a new role may take that long to work after the apply, and a removed one to stop working.
   Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead. Managing ACL entries needs Permissions.Modify on /access/acl, and reading them all Sys.Audit on /access/acl; without it, PBS shows only the entries of the caller's own API tokens, and the others would appear deleted.
 ---
 
@@ -16,6 +17,8 @@ Grants a role to a Proxmox Backup Server user or API token on an ACL path: one e
 An API token acts with the intersection of its user's privileges and its own, so it needs entries for its token ID besides those of its user. Deleting a user or token deletes the entries of its tokens; the user's own entries are removed by `pbs_user` when it destroys the user.
 
 ~> **`NoAccess` excludes every other role.** On one path, a user or token has either `NoAccess` or other roles: granting `NoAccess` removes its other roles there, and granting another role removes `NoAccess`. The provider warns when that happens. Do not manage both kinds for the same path and user or token, or each apply removes what the previous one granted.
+
+-> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an entry changes, so a new role may take that long to work after the apply, and a removed one to stop working.
 
 Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead. Managing ACL entries needs Permissions.Modify on /access/acl, and reading them all Sys.Audit on /access/acl; without it, PBS shows only the entries of the caller's own API tokens, and the others would appear deleted.
 
