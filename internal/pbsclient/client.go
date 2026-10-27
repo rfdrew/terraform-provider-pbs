@@ -50,10 +50,22 @@ const apiPrefix = "/api2/json"
 // Client talks to a single PBS. It is safe for concurrent use, which matters
 // because Terraform calls resources in parallel.
 type Client struct {
-	baseURL     string
-	apiToken    string
-	username    string
-	password    string
+	baseURL string
+	// tokenAuth and authID say how the client signs in and as whom; they
+	// never change.
+	tokenAuth bool
+	authID    string
+	username  string
+	// credMu guards apiToken and password, which change when the provider
+	// regenerates its own token's secret or changes its own password.
+	credMu   sync.Mutex
+	apiToken string
+	password string
+	// passwordChange serialises ChangePassword, whose confirmation is the
+	// client's own password: a change of that password must not overtake a
+	// confirmation already on its way.
+	passwordChange sync.Mutex
+
 	node        string
 	userAgent   string
 	taskTimeout time.Duration
@@ -183,8 +195,15 @@ func New(opts Options) (*Client, error) {
 		ua = "terraform-provider-pbs"
 	}
 
+	authID := opts.Username
+	if opts.APIToken != "" {
+		authID, _, _ = SplitAPIToken(opts.APIToken)
+	}
+
 	return &Client{
 		baseURL:     base,
+		tokenAuth:   opts.APIToken != "",
+		authID:      authID,
 		apiToken:    opts.APIToken,
 		username:    opts.Username,
 		password:    opts.Password,
@@ -222,17 +241,30 @@ func (c *Client) BaseURL() string { return c.baseURL }
 func (c *Client) Node() string { return c.node }
 
 // AuthID returns who the client acts as: the token ID, or the username.
-func (c *Client) AuthID() string {
-	if c.apiToken != "" {
-		id, _, _ := SplitAPIToken(c.apiToken)
-		return id
-	}
-	return c.username
-}
+func (c *Client) AuthID() string { return c.authID }
 
 // UsesAPIToken reports whether the client authenticates with an API token
 // rather than a password. Some calls are closed to API tokens.
-func (c *Client) UsesAPIToken() bool { return c.apiToken != "" }
+func (c *Client) UsesAPIToken() bool { return c.tokenAuth }
+
+// credentials returns the current API token and password.
+func (c *Client) credentials() (apiToken, password string) {
+	c.credMu.Lock()
+	defer c.credMu.Unlock()
+	return c.apiToken, c.password
+}
+
+// UseAPITokenSecret replaces the secret of the API token the client signs in
+// with, after PBS regenerated it: the old one stopped working at once. It
+// does nothing for a password session.
+func (c *Client) UseAPITokenSecret(secret string) {
+	if !c.tokenAuth {
+		return
+	}
+	c.credMu.Lock()
+	defer c.credMu.Unlock()
+	c.apiToken = c.authID + ":" + secret
+}
 
 // Envelope is the wrapper of every /api2/json answer. Digest is the
 // configuration file's digest where PBS sends one: next to data for most
@@ -270,9 +302,16 @@ func (c *Client) Delete(ctx context.Context, path string, params url.Values, out
 // it, before the handler ran, so the request is signed in again and retried
 // once, whatever its method.
 func (c *Client) Call(ctx context.Context, method, path string, params url.Values, out any) (*Envelope, error) {
+	return c.call(ctx, method, path, params, out, true)
+}
+
+// call is Call, with the retry after a 401 optional: PUT /access/password
+// answers 401 itself when the confirmation is wrong, and signing in again
+// would only hide that.
+func (c *Client) call(ctx context.Context, method, path string, params url.Values, out any, retryUnauthorized bool) (*Envelope, error) {
 	for attempt := 0; ; attempt++ {
 		var t *ticket
-		if c.apiToken == "" {
+		if !c.tokenAuth {
 			var err error
 			if t, err = c.ticketNewerThan(ctx, 0); err != nil {
 				return nil, err
@@ -284,7 +323,7 @@ func (c *Client) Call(ctx context.Context, method, path string, params url.Value
 			return nil, err
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized && t != nil && attempt == 0 {
+		if resp.StatusCode == http.StatusUnauthorized && t != nil && attempt == 0 && retryUnauthorized {
 			tflog.Debug(ctx, "PBS rejected the ticket; signing in again", map[string]any{"method": method, "path": path})
 			if _, err := c.ticketNewerThan(ctx, t.gen); err != nil {
 				return nil, fmt.Errorf("%s %s: PBS rejected the ticket, and signing in again failed: %w", method, path, err)
@@ -326,7 +365,8 @@ func (c *Client) send(ctx context.Context, method, path string, params url.Value
 		// every call is harmless.
 		req.Header.Set(csrfHeader, t.csrf)
 	} else {
-		req.Header.Set("Authorization", "PBSAPIToken="+c.apiToken)
+		apiToken, _ := c.credentials()
+		req.Header.Set("Authorization", "PBSAPIToken="+apiToken)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -375,11 +415,12 @@ func (c *Client) decode(method, path string, resp *http.Response, raw []byte, ou
 
 // secrets returns the credentials the client holds, for Redact.
 func (c *Client) secrets() []string {
-	if c.apiToken != "" {
-		_, secret, _ := SplitAPIToken(c.apiToken)
+	apiToken, password := c.credentials()
+	if c.tokenAuth {
+		_, secret, _ := SplitAPIToken(apiToken)
 		return []string{secret}
 	}
-	return []string{c.password}
+	return []string{password}
 }
 
 // Path joins path segments into an API path, escaping each one: names such as

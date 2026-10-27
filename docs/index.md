@@ -33,14 +33,47 @@ never returns.
 
 ## What it manages
 
-This release is the provider's foundation:
-
+* **Access** — users (`pbs_user`), their API tokens (`pbs_api_token`) and
+  the roles they have on ACL paths (`pbs_acl`); to read them,
+  `pbs_user`, `pbs_users`, `pbs_api_tokens`, `pbs_acl`, `pbs_roles` and
+  `pbs_permissions`, which shows what a user or token may actually do.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Users, API tokens, ACLs, datastores, namespaces, remotes, sync, verify and
-prune jobs and notifications follow in the next releases.
+Datastores, namespaces, remotes, sync, verify and prune jobs and
+notifications follow in the next releases.
+
+The usual first step is access for a Proxmox VE cluster: a user, an API
+token for it, and the role to back up to a datastore, for the token and its
+user both.
+
+```terraform
+resource "pbs_user" "pve" {
+  userid  = "pve@pbs"
+  comment = "PVE cluster"
+}
+
+resource "pbs_api_token" "pve" {
+  userid     = pbs_user.pve.userid
+  token_name = "cluster1"
+}
+
+resource "pbs_acl" "pve_user" {
+  path    = "/datastore/store1"
+  auth_id = pbs_user.pve.userid
+  role    = "DatastoreBackup"
+}
+
+resource "pbs_acl" "pve_token" {
+  path    = "/datastore/store1"
+  auth_id = pbs_api_token.pve.tokenid
+  role    = "DatastoreBackup"
+}
+```
+
+Proxmox VE then signs in to PBS with the token ID, `pve@pbs!cluster1`, as the
+user name and the token's secret, `pbs_api_token.pve.value`, as the password.
 
 ## Authentication
 

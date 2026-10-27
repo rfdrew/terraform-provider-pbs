@@ -118,6 +118,15 @@ func IsNotFound(err error) bool {
 		strings.HasSuffix(message, " not found")
 }
 
+// IsAlreadyExists reports whether PBS refused to create an object because one
+// with the same ID exists: 400 "user 'x' already exists." or "token 'x' for
+// user 'y' already exists.".
+func IsAlreadyExists(err error) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.HasSuffix(strings.TrimSuffix(strings.ToLower(apiErr.Message), "."), " already exists")
+}
+
 // IsEndpointMissing reports whether the API path does not exist on this
 // server — a route a release does not have, or a method the route does not
 // accept: 404 "Path '/api2/json/...' not found.".

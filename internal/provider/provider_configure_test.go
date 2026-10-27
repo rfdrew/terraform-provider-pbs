@@ -11,6 +11,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	acc "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
@@ -38,6 +39,19 @@ func TestProviderHasNoDuplicateTypeNames(t *testing.T) {
 	}
 	if !seen["pbs_version"] || !seen["pbs_fingerprint"] {
 		t.Fatalf("data sources = %v", seen)
+	}
+
+	seen = map[string]bool{}
+	for _, newResource := range p.Resources(context.Background()) {
+		var resp resource.MetadataResponse
+		newResource().Metadata(context.Background(), resource.MetadataRequest{ProviderTypeName: "pbs"}, &resp)
+		if seen[resp.TypeName] {
+			t.Errorf("resource %s is registered twice", resp.TypeName)
+		}
+		seen[resp.TypeName] = true
+	}
+	if !seen["pbs_user"] || !seen["pbs_api_token"] || !seen["pbs_acl"] {
+		t.Fatalf("resources = %v", seen)
 	}
 }
 
