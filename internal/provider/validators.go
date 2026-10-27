@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 
 	"github.com/rfdrew/terraform-provider-pbs/internal/pbsclient"
@@ -15,6 +18,74 @@ import (
 // userIDPattern is PBS's user ID: a name without white space, colons,
 // slashes or control characters, then "@" and the realm.
 var userIDPattern = regexp.MustCompile(`^[^\s:/\p{Cc}]+@[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
+// realmPattern is the name of a realm, such as pbs or pam.
+var realmPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
+// tokenNamePattern is the name part of an API token ID, after the "!".
+var tokenNamePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
+// authIDPattern is a user ID or an API token ID, "<user ID>!<token name>": what
+// an ACL entry is for.
+var authIDPattern = regexp.MustCompile(`^[^\s:/\p{Cc}]+@[A-Za-z0-9_][A-Za-z0-9._-]*(![A-Za-z0-9_][A-Za-z0-9._-]*)?$`)
+
+// aclPathPattern is an ACL path: "/" or slash-separated names such as
+// /datastore/store1.
+var aclPathPattern = regexp.MustCompile(`^(/|(/[A-Za-z0-9_][A-Za-z0-9._-]*)+)$`)
+
+// PBS limits on the lengths of IDs and texts.
+const (
+	maxAuthIDLength  = 64
+	maxACLPathLength = 128
+	maxCommentLength = 128
+	// A user's names and email address are 2 to 64 characters.
+	minNameLength = 2
+	maxNameLength = 64
+)
+
+// userIDValidators check a user ID.
+func userIDValidators() []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(3, maxAuthIDLength),
+		stringvalidator.RegexMatches(userIDPattern, "must be a user ID such as alice@pbs or root@pam"),
+	}
+}
+
+// authIDValidators check a user ID or an API token ID.
+func authIDValidators() []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(3, maxAuthIDLength),
+		stringvalidator.RegexMatches(authIDPattern, "must be a user ID such as alice@pbs or an API token ID such as alice@pbs!ci"),
+	}
+}
+
+// aclPathValidators check the form of an ACL path. Whether PBS knows the path
+// — /datastore/<name>, /remote/<name>, /system/network and so on — it checks
+// itself, answering "invalid acl path".
+func aclPathValidators() []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(1, maxACLPathLength),
+		stringvalidator.RegexMatches(aclPathPattern, "must be / or a path of names separated by slashes, such as /datastore/store1, without a trailing slash"),
+	}
+}
+
+// textValidators check a single-line text PBS stores as given, such as a
+// comment: minLength to maxLength characters, no control characters such as
+// line breaks, and no white space at either end. PBS trims a comment when it
+// updates one, so leading or trailing white space would come back changed,
+// and it treats an empty text as none, so leaving the attribute out rather
+// than empty is how to have none.
+func textValidators(minLength, maxLength int) []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(minLength, maxLength),
+		stringCheck{
+			description: "must be a single line without control characters, and must not begin or end with white space",
+			check: func(s string) bool {
+				return !strings.ContainsFunc(s, unicode.IsControl) && strings.TrimSpace(s) == s
+			},
+		},
+	}
+}
 
 // stringCheck adapts a predicate into a string validator. A failing value is
 // reported as "Attribute <path> <description>, got: <value>".

@@ -478,13 +478,23 @@ func connectErrorDetail(client *pbsclient.Client, err error) string {
 }
 
 func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		NewUserResource,
+		NewAPITokenResource,
+		NewACLResource,
+	}
 }
 
 func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewVersionDataSource,
 		NewFingerprintDataSource,
+		NewUserDataSource,
+		NewUsersDataSource,
+		NewAPITokensDataSource,
+		NewACLDataSource,
+		NewRolesDataSource,
+		NewPermissionsDataSource,
 	}
 }
 

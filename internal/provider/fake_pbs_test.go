@@ -24,8 +24,9 @@ import (
 //     the PBSAuthCookie ticket, plus the CSRFPreventionToken header on every
 //     method but GET; anything else is 401 "authentication failed - ...";
 //   - routes are matched by "METHOD /path", the path after /api2/json and
-//     without the query string; an unrouted path is 404 "Path '...' not
-//     found.", as PBS answers for routes and methods it does not have;
+//     without the query string, or by a prefix of it (handlePrefix); an
+//     unrouted path is 404 "Path '...' not found.", as PBS answers for
+//     routes and methods it does not have;
 //   - GET /version answers 4.2.8 until a test routes it differently.
 //
 // Successes are the {"data": ...} envelope. Errors are plain text, sent with
@@ -50,7 +51,10 @@ type fakePBS struct {
 	logins    int
 
 	handlers map[string]http.HandlerFunc
-	calls    []fakeCall
+	// prefixHandlers answer the routes that start with their key and have
+	// no handler of their own; the longest prefix wins.
+	prefixHandlers map[string]http.HandlerFunc
+	calls          []fakeCall
 }
 
 // fakeCall is one request the fake received.
@@ -78,6 +82,8 @@ func newFakePBS() *fakePBS {
 		password:    fakePassword,
 		tickets:     map[string]string{},
 		handlers:    map[string]http.HandlerFunc{},
+
+		prefixHandlers: map[string]http.HandlerFunc{},
 	}
 	f.reply("GET /version", http.StatusOK, fakeVersionJSON)
 	return f
@@ -87,6 +93,14 @@ func (f *fakePBS) handle(route string, h http.HandlerFunc) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.handlers[route] = h
+}
+
+// handlePrefix answers every route that starts with prefix, such as
+// "GET /access/users/", unless a route of its own answers it.
+func (f *fakePBS) handlePrefix(prefix string, h http.HandlerFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prefixHandlers[prefix] = h
 }
 
 // reply answers route with a fixed status and body: the body is the whole
@@ -153,8 +167,17 @@ func (f *fakePBS) serve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	route := req.Method + " " + path
 	f.mu.Lock()
-	h := f.handlers[req.Method+" "+path]
+	h := f.handlers[route]
+	if h == nil {
+		longest := ""
+		for prefix, ph := range f.prefixHandlers {
+			if strings.HasPrefix(route, prefix) && len(prefix) > len(longest) {
+				longest, h = prefix, ph
+			}
+		}
+	}
 	f.mu.Unlock()
 	if h == nil {
 		writeFakeResponse(w, http.StatusNotFound, "Path '"+req.URL.Path+"' not found.")

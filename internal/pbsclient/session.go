@@ -117,7 +117,8 @@ func (c *Client) runLogin(ctx context.Context, call *loginCall) (*ticket, error)
 
 // login exchanges the username and password for a ticket.
 func (c *Client) login(ctx context.Context) (*ticket, error) {
-	form := url.Values{"username": {c.username}, "password": {c.password}}
+	_, password := c.credentials()
+	form := url.Values{"username": {c.username}, "password": {password}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+apiPrefix+"/access/ticket", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("building the sign-in request: %w", err)
@@ -139,8 +140,8 @@ func (c *Client) login(ctx context.Context) (*ticket, error) {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		apiErr := newError(http.MethodPost, "/access/ticket", resp.StatusCode, resp.Header, raw)
-		apiErr.Message = Redact(apiErr.Message, c.password)
-		apiErr.Body = Redact(apiErr.Body, c.password)
+		apiErr.Message = Redact(apiErr.Message, password)
+		apiErr.Body = Redact(apiErr.Body, password)
 		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, fmt.Errorf("%w: %w", ErrBadCredentials, apiErr)
 		}

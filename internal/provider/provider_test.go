@@ -48,12 +48,25 @@ const (
 	envAccPassword = "PBS_ACC_PASSWORD"
 	// envAccVersion is the server's version, e.g. 4.2.8.
 	envAccVersion = "PBS_ACC_VERSION"
+	// envAccAdminUsername and envAccAdminPassword are the stand's admin:
+	// root@pam on the packages stand, admin@pbs — an Admin, but not the
+	// superuser — on the image stand.
+	envAccAdminUsername = "PBS_ACC_ADMIN_USERNAME"
+	envAccAdminPassword = "PBS_ACC_ADMIN_PASSWORD"
+	// envAccDatastore is a datastore the tests may grant roles on.
+	envAccDatastore = "PBS_ACC_DATASTORE"
 )
 
 // testAccClient connects to the acceptance server the way the provider does,
 // from the same PBS_* environment variables and through the same settings
 // code, for checks the provider itself does not make.
 func testAccClient() (*pbsclient.Client, error) {
+	return testAccClientAs(nil)
+}
+
+// testAccClientAs is testAccClient with other credentials: an API token, or a
+// username and password, set by credentials on the options.
+func testAccClientAs(credentials func(*pbsclient.Options)) (*pbsclient.Client, error) {
 	var diags diag.Diagnostics
 	s := providerModel{}.settings(&diags)
 	if diags.HasError() {
@@ -63,5 +76,10 @@ func testAccClient() (*pbsclient.Client, error) {
 		}
 		return nil, errors.Join(errs...)
 	}
-	return pbsclient.New(s.clientOptions())
+	opts := s.clientOptions()
+	if credentials != nil {
+		opts.APIToken, opts.Username, opts.Password = "", "", ""
+		credentials(&opts)
+	}
+	return pbsclient.New(opts)
 }
