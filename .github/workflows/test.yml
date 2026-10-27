@@ -1,0 +1,224 @@
+# Build, lint and test on every push and pull request.
+#
+# The unit tests fake PBS in process and need nothing else. The docs job
+# regenerates docs/ twice — through Terraform, as tfplugindocs normally does,
+# and offline from the schema tools/providerschema dumps — and fails when
+# either result differs from what is committed, so the offline path that
+# sandboxed development relies on cannot drift from the real one.
+#
+# The acceptance job boots a throwaway Proxmox Backup Server with
+# scripts/bootstrap-test-pbs.sh, so the provider is exercised against the real
+# API rather than a fake. Proxmox publishes no container image, so the stand
+# is the official proxmox-backup-server package in a Debian trixie container
+# with systemd: the newest 4.2 on the oldest supported Terraform (1.11, the
+# first with write-only attributes) and the newest, the oldest supported line
+# (4.0), and the newest OpenTofu. One more run uses the community image
+# ayufan/proxmox-backup-server, so that the quick local stand keeps working.
+#
+# Building the packages image takes about half a minute, so it is cached per
+# release line and week: a new PBS release is picked up within a week, and
+# any change to the bootstrap script rebuilds it at once.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build, lint and unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go build ./...
+
+      # Pinned, so that a new golangci-lint release cannot fail CI on its own.
+      # golangci-lint refuses to lint a module whose Go version (major.minor
+      # of the toolchain line in go.mod, or else of the go directive) is newer
+      # than the Go it was built with. v2.15.0 was built with Go 1.27, so raise
+      # the pin before go.mod moves past 1.27, and expect new findings from the
+      # standard linters when you do.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+
+      - name: Check the bootstrap script
+        run: shellcheck -S warning scripts/bootstrap-test-pbs.sh
+
+      - name: Unit tests
+        run: make test
+
+  docs:
+    name: docs are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Regenerate docs through Terraform
+        run: make docs
+
+      - name: Fail if docs are stale
+        run: |
+          if ! git diff --exit-code -- docs/; then
+            echo "docs/ is out of date - run 'make docs' and commit the result."
+            exit 1
+          fi
+
+      - name: Regenerate docs offline
+        run: make docs-offline
+
+      - name: Fail if the offline docs differ
+        run: |
+          if ! git diff --exit-code -- docs/; then
+            echo "make docs-offline renders docs/ differently from make docs - tools/providerschema needs fixing."
+            exit 1
+          fi
+
+      - name: Validate docs and examples
+        run: make docs-validate
+
+  acceptance:
+    name: acceptance tests (PBS ${{ matrix.pbs }}${{ matrix.variant == 'image' && ' image' || '' }}, ${{ matrix.cli }} ${{ matrix.cli_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PBS_TEST_VARIANT: ${{ matrix.variant }}
+      PBS_TEST_PBS_VERSION: ${{ matrix.variant == 'packages' && matrix.pbs || '' }}
+      PBS_TEST_IMAGE: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pbs: ["4.2"]
+        variant: [packages]
+        image: [""]
+        cli: [terraform]
+        cli_version: ["1.11.*", "1.14.*"]
+        include:
+          - pbs: "4.0"
+            variant: packages
+            image: ""
+            cli: terraform
+            cli_version: "1.14.*"
+          - pbs: "4.2"
+            variant: packages
+            image: ""
+            cli: tofu
+            cli_version: latest
+          - pbs: "4.2"
+            variant: image
+            image: ayufan/proxmox-backup-server:v4.2.0-1
+            cli: terraform
+            cli_version: "1.14.*"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: hashicorp/setup-terraform@v4
+        if: matrix.cli == 'terraform'
+        with:
+          terraform_version: ${{ matrix.cli_version }}
+          terraform_wrapper: false
+
+      - uses: opentofu/setup-opentofu@v2
+        if: matrix.cli == 'tofu'
+        with:
+          tofu_version: ${{ matrix.cli_version }}
+          tofu_wrapper: false
+
+      # terraform-plugin-testing runs whatever TF_ACC_TERRAFORM_PATH names.
+      # OpenTofu resolves the provider under its own registry host, so the
+      # in-process provider has to be registered under that host too.
+      - name: Run the tests with OpenTofu
+        if: matrix.cli == 'tofu'
+        run: |
+          echo "TF_ACC_TERRAFORM_PATH=$(command -v tofu)" >> "$GITHUB_ENV"
+          echo "TF_ACC_PROVIDER_HOST=registry.opentofu.org" >> "$GITHUB_ENV"
+
+      - name: Cache key for the PBS image
+        id: image-key
+        if: matrix.variant == 'packages'
+        run: echo "key=pbs-packages-${{ matrix.pbs }}-$(date -u +%G-%V)-${{ hashFiles('scripts/bootstrap-test-pbs.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the PBS image
+        id: image-cache
+        if: matrix.variant == 'packages'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/pbs-image.tar
+          key: ${{ steps.image-key.outputs.key }}
+
+      - name: Load the PBS image
+        if: matrix.variant == 'packages' && steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load -i "$RUNNER_TEMP/pbs-image.tar"
+
+      - name: Boot PBS
+        run: |
+          scripts/bootstrap-test-pbs.sh > "$RUNNER_TEMP/pbs.env"
+          # The script prints shell `export` lines quoted with %q (a token ID
+          # contains "!"), so they are evaluated rather than copied, and the
+          # secrets are masked before anything prints them.
+          eval "$(cat "$RUNNER_TEMP/pbs.env")"
+          echo "::add-mask::${PBS_API_TOKEN#*:}"
+          echo "::add-mask::${PBS_ACC_PASSWORD}"
+          echo "::add-mask::${PBS_ACC_ADMIN_PASSWORD}"
+          for name in "${!PBS_@}"; do
+            echo "${name}=${!name}" >> "$GITHUB_ENV"
+          done
+          echo "PBS ${PBS_ACC_VERSION} (${PBS_ACC_VARIANT}) at ${PBS_ENDPOINT}"
+
+      - name: Save the PBS image for the cache
+        if: matrix.variant == 'packages' && steps.image-cache.outputs.cache-hit != 'true'
+        run: docker save -o "$RUNNER_TEMP/pbs-image.tar" "$(docker inspect -f '{{.Config.Image}}' pbs-tfprovider-test)"
+
+      - name: Acceptance tests
+        env:
+          TF_ACC: "1"
+        run: go test ./... -v -timeout 30m
+
+      - name: PBS logs on failure
+        if: failure()
+        run: |
+          docker logs --tail 200 pbs-tfprovider-test || true
+          if [ "$PBS_TEST_VARIANT" = packages ]; then
+            docker exec pbs-tfprovider-test journalctl --no-pager -n 200 \
+              -u proxmox-backup.service -u proxmox-backup-proxy.service || true
+          fi
+
+      - name: Tear down PBS
+        if: always()
+        run: scripts/bootstrap-test-pbs.sh --teardown || true

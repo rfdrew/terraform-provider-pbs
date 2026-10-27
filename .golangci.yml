@@ -1,0 +1,18 @@
+# golangci-lint configuration (format version 2).
+#
+# The standard linter set — errcheck, govet, ineffassign, staticcheck and
+# unused — with its default settings, plus a gofmt check, which CI also runs on
+# its own. Test files are linted too: the harness in internal/provider is
+# shared by every resource test and deserves the same scrutiny.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+
+formatters:
+  enable:
+    - gofmt
