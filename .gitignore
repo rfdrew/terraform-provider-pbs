@@ -1,0 +1,22 @@
+# Build artefacts
+terraform-provider-pbs
+dist/
+
+# Terraform working files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+.terraformrc
+terraform.rc
+
+# Local development overrides
+dev.tfrc
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store

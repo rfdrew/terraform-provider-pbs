@@ -1,0 +1,78 @@
+---
+page_title: "Provider: Proxmox Backup Server"
+description: |-
+  Manage the configuration of a Proxmox Backup Server through its REST API.
+---
+
+# Proxmox Backup Server Provider
+
+Manages the configuration of a
+[Proxmox Backup Server](https://www.proxmox.com/en/products/proxmox-backup-server/overview)
+(PBS) through its REST API.
+
+-> **Proxmox Backup Server, not PBS Professional.** Several providers on the
+registries are called `pbs`. This one, `rfdrew/pbs`, is an independent
+implementation for Proxmox Backup Server: it is not a fork of
+`mcfitz2/pbs` or `yavasura/pbs` and does not share state with them, and it
+has nothing to do with `DaveTCode/pbs`, which manages Altair PBS Professional.
+
+## Compatibility
+
+The provider is built and verified against **PBS 4.2.8**, and tested against
+the 4.0 and 4.2 release lines. PBS 4.0 and newer are supported; the provider
+warns when the server reports an older release. PBS 3 reached its end of life
+in August 2026.
+
+| Supported PBS | Terraform | OpenTofu |
+| --- | --- | --- |
+| 4.0 and newer | 1.11+ | 1.11+ |
+
+Terraform and OpenTofu 1.11 are the first releases with write-only
+attributes, which the provider uses for passwords and other secrets that PBS
+never returns.
+
+## What it manages
+
+This release is the provider's foundation:
+
+* **Read-only information** — `pbs_version`, the server's release, and
+  `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
+  Proxmox VE and other PBS servers pin it by.
+
+Users, API tokens, ACLs, datastores, namespaces, remotes, sync, verify and
+prune jobs and notifications follow in the next releases.
+
+## Authentication
+
+The provider signs in either with an **API token**, the usual choice, or
+with a **username and password**.
+
+* **An API token has no privileges of its own.** Besides its user's ACL
+  entries, it needs entries for the token ID (`user@realm!name`) itself —
+  for instance `Admin` on `/` for a token that manages the whole server.
+* **A few calls are closed to API tokens** — changing a user's password, and
+  creating network interfaces, which only `root@pam` may do. The resources
+  that make them say so.
+* **A user with two-factor authentication cannot sign in with a password**:
+  the provider cannot complete the second factor. Use an API token instead.
+
+Prefer the environment over configuration, so that the token stays out of
+your configuration and version control:
+
+```shell
+export PBS_ENDPOINT="https://pbs.example.com:8007"
+export PBS_API_TOKEN="terraform@pbs!provider:3f0c6c1e-8a0e-4bd2-9c7e-0c5f8b5a7f11"
+export PBS_TLS_FINGERPRINT="2f:f2:f7:e9:8b:a5:62:fe:bb:6d:63:40:33:8b:4a:97:e6:d4:80:5d:f9:96:b9:63:ee:4c:08:31:c2:d0:00:5c"
+```
+
+PBS generates a self-signed certificate at installation. Its fingerprint is
+on the dashboard ("Show Fingerprint") and in
+`proxmox-backup-manager cert info`; `tls_cert_fingerprint` trusts exactly
+that certificate. For a certificate from a private CA, use `ca_cert_file`
+instead.
+
+## Example Usage
+
+{{ tffile "examples/provider/provider.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
