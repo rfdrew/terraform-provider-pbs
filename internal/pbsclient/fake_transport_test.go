@@ -126,6 +126,14 @@ func writeFakeResponse(w http.ResponseWriter, status int, body string) {
 }
 
 func (f *fakePBS) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.record(req)
+	rec := httptest.NewRecorder()
+	f.serve(rec, req)
+	return rec.Result(), nil
+}
+
+// record adds req to the calls the fake received.
+func (f *fakePBS) record(req *http.Request) {
 	call := fakeCall{route: req.Method + " " + strings.TrimPrefix(req.URL.Path, apiPrefix), query: req.URL.Query(), header: req.Header.Clone()}
 	if req.Body != nil {
 		raw, _ := io.ReadAll(req.Body)
@@ -133,14 +141,16 @@ func (f *fakePBS) RoundTrip(req *http.Request) (*http.Response, error) {
 		call.form, _ = url.ParseQuery(string(raw))
 		req.Body = io.NopCloser(strings.NewReader(string(raw)))
 	}
-
 	f.mu.Lock()
 	f.calls = append(f.calls, call)
 	f.mu.Unlock()
+}
 
-	rec := httptest.NewRecorder()
-	f.serve(rec, req)
-	return rec.Result(), nil
+// serveRecorded serves req as a server would, recording it as RoundTrip
+// does: for tests that serve the fake over real TLS.
+func (f *fakePBS) serveRecorded(w http.ResponseWriter, req *http.Request) {
+	f.record(req)
+	f.serve(w, req)
 }
 
 func (f *fakePBS) serve(w http.ResponseWriter, req *http.Request) {

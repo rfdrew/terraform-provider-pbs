@@ -25,12 +25,18 @@
 #   * the user tfacc@pbs with a password, and its API token tfacc@pbs!acc,
 #   * an Admin ACL on / for both (a token has no privileges of its own),
 #
-# then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
+# and starts Pebble, Let's Encrypt's test CA, in the PBS container's network
+# namespace, as the ACME directory https://localhost:14000/dir for PBS. Pebble
+# validates every challenge without looking (PEBBLE_VA_ALWAYS_VALID), so
+# ordering a certificate needs neither DNS nor a reachable port 80.
+#
+# It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
-# variant and the PBS version. The test user's credentials are not exported
-# as PBS_USERNAME and PBS_PASSWORD, which the provider would read alongside
-# the token.
+# variant, the PBS version, the ACME directory, and the files of PBS's own
+# certificate and key, which the certificate tests put back when they end.
+# The test user's credentials are not exported as PBS_USERNAME and
+# PBS_PASSWORD, which the provider would read alongside the token.
 #
 # Things this script has to get right for PBS:
 #
@@ -52,6 +58,13 @@
 #   * Docker bind-mounts /etc/resolv.conf, and PBS writes it by renaming a
 #     new file over it, which fails on a mount point. The packages stand
 #     unmounts it, keeping its content, so that DNS settings can be tested.
+#   * PBS talks to an ACME directory over HTTPS and verifies it against the
+#     system's CAs. Pebble's image ships a certificate for its directory that
+#     expires in October 2027, so the script gives Pebble a certificate of its
+#     own, signed by a throwaway CA, which goes into the PBS container's trust
+#     store; Pebble shares the PBS container's network, where the
+#     certificate's name, localhost, is right. Pebble rejects 5% of nonces
+#     unless told not to, which PBS retries only three times.
 #
 # Usage:
 #   eval "$(scripts/bootstrap-test-pbs.sh)"                         # official packages
@@ -70,6 +83,8 @@
 #   PBS_TEST_DATASTORE       datastore to create (default tfacc)
 #   PBS_TEST_WAIT_SECONDS    how long to wait for the API (default 180)
 #   PBS_TEST_STATE_DIR       where credentials are kept
+#   PBS_TEST_PEBBLE          set to 0 to start no Pebble; the ACME tests then skip
+#   PBS_TEST_PEBBLE_IMAGE    Pebble image (default ghcr.io/letsencrypt/pebble:2.10.1)
 #
 # The script logs "timing: <phase> <seconds>s" lines on stderr, so that CI can
 # report how long the stand takes to come up.
@@ -93,6 +108,10 @@ DATASTORE_DIR="/datastore"
 WAIT_SECONDS="${PBS_TEST_WAIT_SECONDS:-180}"
 STATE_DIR="${PBS_TEST_STATE_DIR:-${TMPDIR:-/tmp}/${CONTAINER}}"
 VOLUMES=("${CONTAINER}-etc" "${CONTAINER}-lib" "${CONTAINER}-log" "${CONTAINER}-datastore")
+PEBBLE="${PBS_TEST_PEBBLE:-1}"
+PEBBLE_IMAGE="${PBS_TEST_PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1}"
+PEBBLE_CONTAINER="${CONTAINER}-pebble"
+ACME_DIRECTORY="https://localhost:14000/dir"
 
 TEST_USER="tfacc@pbs"
 TEST_TOKEN_NAME="acc"
@@ -113,10 +132,11 @@ T0="$(date +%s)"
 timing() { log "timing: $1 $(($(date +%s) - $2))s"; }
 
 if [[ "${1:-}" == "--teardown" ]]; then
+  docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR"
-  log "removed $CONTAINER, its volumes and $STATE_DIR"
+  log "removed $CONTAINER, $PEBBLE_CONTAINER, the volumes and $STATE_DIR"
   exit 0
 fi
 
@@ -124,6 +144,9 @@ trap 'status=$?; if [[ $status -ne 0 ]]; then echo false; fi' EXIT
 
 command -v docker >/dev/null || { log "docker not found"; exit 1; }
 command -v jq >/dev/null || { log "jq not found"; exit 1; }
+if [[ "$PEBBLE" != "0" ]]; then
+  command -v openssl >/dev/null || { log "openssl not found; it makes Pebble's certificate (PBS_TEST_PEBBLE=0 starts no Pebble)"; exit 1; }
+fi
 
 case "$VARIANT" in
   image)
@@ -148,6 +171,10 @@ container_running() {
 dump_logs() {
   log "--- docker logs $CONTAINER (tail)"
   docker logs --tail 100 "$CONTAINER" >&2 2>&1 || true
+  if docker inspect "$PEBBLE_CONTAINER" >/dev/null 2>&1; then
+    log "--- docker logs $PEBBLE_CONTAINER (tail)"
+    docker logs --tail 50 "$PEBBLE_CONTAINER" >&2 2>&1 || true
+  fi
   if [[ "$VARIANT" == "packages" ]]; then
     log "--- journal of the PBS services (tail)"
     docker exec "$CONTAINER" journalctl --no-pager -n 100 \
@@ -348,6 +375,106 @@ setup() {
   timing "setup" "$t"
 }
 
+# pebble_files writes, to dir, Pebble's configuration and the certificate it
+# serves its directory with, for localhost and 127.0.0.1, signed by a CA of
+# its own, which PBS is to trust: the certificate in the Pebble image expires
+# in October 2027. Nothing reaches stdout, which is evaluated.
+pebble_files() {
+  local dir="$1"
+  mkdir -p "$dir"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$dir/ca.key" >&2
+  openssl req -x509 -new -key "$dir/ca.key" -sha256 -days 30 -subj "/CN=terraform-provider-pbs test CA" \
+    -config <(printf '[req]\ndistinguished_name = dn\nx509_extensions = ca\n[dn]\n[ca]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\nsubjectKeyIdentifier = hash\n') \
+    -out "$dir/ca.pem" >&2
+  openssl ecparam -name prime256v1 -genkey -noout -out "$dir/key.pem" >&2
+  openssl req -new -key "$dir/key.pem" -subj "/CN=localhost" \
+    -config <(printf '[req]\ndistinguished_name = dn\n[dn]\n') -out "$dir/cert.csr" >&2
+  openssl x509 -req -in "$dir/cert.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" -set_serial "0x$(rand_hex)" \
+    -sha256 -days 30 -out "$dir/cert.pem" \
+    -extfile <(printf 'basicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:localhost, IP:127.0.0.1\nauthorityKeyIdentifier = keyid\n') >&2
+  # Pebble's own test configuration, with the certificate above and one
+  # profile, so that every order gets a 90-day certificate.
+  cat >"$dir/pebble-config.json" <<'JSON'
+{
+  "pebble": {
+    "listenAddress": "0.0.0.0:14000",
+    "managementListenAddress": "0.0.0.0:15000",
+    "certificate": "/cfg/cert.pem",
+    "privateKey": "/cfg/key.pem",
+    "httpPort": 5002,
+    "tlsPort": 5001,
+    "ocspResponderURL": "",
+    "externalAccountBindingRequired": false,
+    "retryAfter": { "authz": 3, "order": 5 },
+    "keyAlgorithm": "ecdsa",
+    "profiles": {
+      "default": { "description": "90-day certificates", "validityPeriod": 7776000 }
+    }
+  }
+}
+JSON
+}
+
+# start_pebble starts Pebble in the PBS container's network namespace, has
+# PBS trust the CA of Pebble's certificate, and waits until PBS reads the
+# directory: GET /config/acme/tos makes PBS fetch it.
+start_pebble() {
+  local t deadline dir body
+  t="$(date +%s)"
+  dir="${STATE_DIR}/pebble"
+  pebble_files "$dir"
+  docker image inspect "$PEBBLE_IMAGE" >/dev/null 2>&1 || docker pull -q "$PEBBLE_IMAGE" >&2
+  # The files are copied in rather than mounted, so that this works with any
+  # Docker daemon, whatever host paths it sees.
+  docker create \
+    --name "$PEBBLE_CONTAINER" \
+    --network "container:${CONTAINER}" \
+    -e PEBBLE_VA_ALWAYS_VALID=1 \
+    -e PEBBLE_VA_NOSLEEP=1 \
+    -e PEBBLE_WFE_NONCEREJECT=0 \
+    "$PEBBLE_IMAGE" -config /cfg/pebble-config.json >/dev/null
+  docker cp "${dir}/." "${PEBBLE_CONTAINER}:/cfg" >&2
+  docker start "$PEBBLE_CONTAINER" >/dev/null
+
+  docker exec "$CONTAINER" mkdir -p /usr/local/share/ca-certificates
+  docker cp "${dir}/ca.pem" "${CONTAINER}:/usr/local/share/ca-certificates/terraform-provider-pbs-test.crt" >&2
+  docker exec "$CONTAINER" sh -c '
+    if command -v update-ca-certificates >/dev/null 2>&1; then
+      update-ca-certificates >/dev/null
+    else
+      mkdir -p /etc/ssl/certs
+      cat /usr/local/share/ca-certificates/terraform-provider-pbs-test.crt >>/etc/ssl/certs/ca-certificates.crt
+    fi' >&2
+
+  deadline=$(($(date +%s) + WAIT_SECONDS))
+  while :; do
+    body="$(api GET "/config/acme/tos?directory=$(jq -rn --arg d "$ACME_DIRECTORY" '$d|@uri')" 2>/dev/null)" || true
+    if [[ "$(jq -r '.data // empty' <<<"$body" 2>/dev/null)" == data:* ]]; then
+      break
+    fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$PEBBLE_CONTAINER" 2>/dev/null || echo false)" != "true" ]]; then
+      log "$PEBBLE_CONTAINER stopped"
+      dump_logs
+      exit 1
+    fi
+    check_deadline "$deadline" "PBS could not read the ACME directory $ACME_DIRECTORY"
+    sleep 1
+  done
+  timing "pebble" "$t"
+}
+
+# save_certificate keeps PBS's own certificate and key, which the
+# certificate tests put back, so that PBS_TLS_FINGERPRINT holds again. The
+# key is written through the shell, so that it gets the umask's mode.
+save_certificate() {
+  (
+    umask 077
+    mkdir -p "$STATE_DIR"
+    docker exec "$CONTAINER" cat /etc/proxmox-backup/proxy.pem >"${STATE_DIR}/proxy.pem"
+    docker exec "$CONTAINER" cat /etc/proxmox-backup/proxy.key >"${STATE_DIR}/proxy.key"
+  )
+}
+
 # fingerprint prints the SHA-256 fingerprint of proxy.pem as PBS reports it,
 # after checking it against the certificate the port serves.
 fingerprint() {
@@ -381,9 +508,9 @@ check_token() {
 }
 
 save_state() {
-  mkdir -p "$STATE_DIR"
   (
     umask 077
+    mkdir -p "$STATE_DIR"
     {
       printf 'VARIANT=%q\nIMAGE=%q\nPORT=%q\n' "$VARIANT" "$IMAGE" "$PORT"
       printf 'ADMIN_USER=%q\nADMIN_PASS=%q\n' "$ADMIN_USER" "$ADMIN_PASS"
@@ -405,9 +532,18 @@ print_exports() {
   printf 'export PBS_ACC_CONTAINER=%q\n' "$CONTAINER"
   printf 'export PBS_ACC_VARIANT=%q\n' "$VARIANT"
   printf 'export PBS_ACC_VERSION=%q\n' "$2"
+  printf 'export PBS_ACC_PROXY_CERT_FILE=%q\n' "${STATE_DIR}/proxy.pem"
+  printf 'export PBS_ACC_PROXY_KEY_FILE=%q\n' "${STATE_DIR}/proxy.key"
+  if [[ "$PEBBLE" != "0" ]]; then
+    printf 'export PBS_ACC_ACME_DIRECTORY=%q\n' "$ACME_DIRECTORY"
+  else
+    # Clear what an earlier run exported in the same shell.
+    printf 'unset PBS_ACC_ACME_DIRECTORY\n'
+  fi
 }
 
 # Always a fresh server, so that every test run starts from the same state.
+docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
 rm -rf "$STATE_DIR"
@@ -434,6 +570,10 @@ wait_ready
 setup
 save_state
 check_token
+if [[ "$PEBBLE" != "0" ]]; then
+  start_pebble
+fi
+save_certificate
 FINGERPRINT="$(fingerprint)"
 VERSION="$(api GET /version | jq -r '.data | "\(.version).\(.release)"')"
 log "PBS $VERSION ($VARIANT) is ready at $(base_url) with datastore $DATASTORE"

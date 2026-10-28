@@ -85,8 +85,15 @@ func (c *Client) ticketNewerThan(ctx context.Context, stale uint64) (*ticket, er
 		if call.err != nil {
 			// The caller that signed in may have been cancelled while this
 			// one still has time; it then tries again itself rather than
-			// inherit someone else's cancellation.
+			// inherit someone else's cancellation. Likewise a caller on the
+			// connection of a certificate change, which the client trusted
+			// before the change, does not inherit a certificate the other
+			// sign-in's new connection met.
 			if isContextError(call.err) && ctx.Err() == nil {
+				continue
+			}
+			var untrusted *UntrustedCertificateError
+			if _, dedicated := ctx.Value(connectionKey{}).(*http.Client); dedicated && errors.As(call.err, &untrusted) {
 				continue
 			}
 			return nil, call.err
@@ -128,7 +135,7 @@ func (c *Client) login(ctx context.Context) (*ticket, error) {
 	req.Header.Set("User-Agent", c.userAgent)
 
 	tflog.Debug(ctx, "signing in to PBS", map[string]any{"username": c.username})
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClientFor(ctx).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST /access/ticket: %w", err)
 	}

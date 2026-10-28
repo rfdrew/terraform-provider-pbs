@@ -44,12 +44,19 @@ never returns.
   the matchers that route notifications to them
   (`pbs_notification_matcher`), the built-in `default-matcher` included,
   which is managed by importing it.
+* **Certificate** — a certificate from Let's Encrypt or another ACME CA for
+  the web interface and API: the account at the CA (`pbs_acme_account`),
+  a DNS challenge plugin such as Cloudflare's (`pbs_acme_plugin`), the
+  node's domains (`pbs_node_acme`) and the certificate itself
+  (`pbs_node_certificate`), which PBS renews on its own; `pbs_acme_tos`
+  reads a CA's terms of service. CAs that require External Account Binding
+  are not supported yet.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Namespaces, remotes, sync jobs, other notification endpoints and ACME
-follow in the next releases.
+Namespaces, remotes, sync jobs and other notification endpoints follow in
+the next releases.
 
 The usual first step is access for a Proxmox VE cluster: a user, an API
 token for it, and the role to back up to a datastore, for the token and its
@@ -84,8 +91,8 @@ user name and the token's secret, `pbs_api_token.pve.value`, as the password.
 
 The guide **Set up PBS for a Proxmox VE cluster** goes the whole way, in one
 configuration: a datastore with prune and verify
-jobs, notifications by mail, this access, and outputs with what the storage
-in Proxmox VE needs.
+jobs, notifications by mail, this access, outputs with what the storage
+in Proxmox VE needs, and a certificate from Let's Encrypt.
 
 ## Authentication
 
@@ -114,7 +121,14 @@ PBS generates a self-signed certificate at installation. Its fingerprint is
 on the dashboard ("Show Fingerprint") and in
 `proxmox-backup-manager cert info`; `tls_cert_fingerprint` trusts exactly
 that certificate. For a certificate from a private CA, use `ca_cert_file`
-instead.
+instead, and for one from a public CA, such as the Let's Encrypt
+certificate `pbs_node_certificate` orders, none of them: the provider
+verifies it against the system's CAs, for the host name in `endpoint`.
+
+When the provider has PBS change its certificate — ordering one with
+`pbs_node_certificate`, or destroying it, which brings back a self-signed
+one — it trusts the new certificate for the rest of the run, whatever these
+settings say, and warns when they need changing before the next run.
 
 ## Example Usage
 

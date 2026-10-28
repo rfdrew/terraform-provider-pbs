@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+	"golang.org/x/net/idna"
 )
 
 // DefaultNode is the node every PBS answers for: a PBS is a single node, and
@@ -70,6 +71,16 @@ type Client struct {
 	userAgent   string
 	taskTimeout time.Duration
 	httpClient  *http.Client
+	// trust decides which server certificates the client accepts; see
+	// tls.go.
+	trust *trust
+
+	// certificateChange serialises ChangeCertificate, and changing is the
+	// change in progress, if any: calls that meet a certificate they do not
+	// trust while it runs wait for it and try again. See certificate.go.
+	certificateChange sync.Mutex
+	changingMu        sync.Mutex
+	changing          chan struct{}
 
 	// The ticket session, when the client signs in with a password; see
 	// session.go. mu guards every field below it.
@@ -163,7 +174,15 @@ func New(opts Options) (*Client, error) {
 		return nil, errors.New("set either an API token or both a username and a password")
 	}
 
-	tlsConf, err := tlsConfig(opts)
+	// The host name as net/http and crypto/tls send it in the TLS handshake
+	// and Go verifies it: an internationalised name in its ASCII form,
+	// without a trailing dot.
+	host := parsed.Hostname()
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		host = ascii
+	}
+	host = strings.TrimRight(host, ".")
+	trust, err := newTrust(opts, host)
 	if err != nil {
 		return nil, err
 	}
@@ -184,9 +203,7 @@ func New(opts Options) (*Client, error) {
 	transport := opts.Transport
 	if transport == nil {
 		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
-		if tlsConf != nil {
-			defaultTransport.TLSClientConfig = tlsConf
-		}
+		defaultTransport.TLSClientConfig = trust.tlsConfig()
 		transport = defaultTransport
 	}
 
@@ -218,6 +235,7 @@ func New(opts Options) (*Client, error) {
 			// POST as a GET, so it is reported instead.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
+		trust: trust,
 		sleep: sleepContext,
 	}, nil
 }
@@ -246,6 +264,10 @@ func (c *Client) AuthID() string { return c.authID }
 // UsesAPIToken reports whether the client authenticates with an API token
 // rather than a password. Some calls are closed to API tokens.
 func (c *Client) UsesAPIToken() bool { return c.tokenAuth }
+
+// CloseIdleConnections closes the connections the client keeps open between
+// calls, so that the next call opens a new one.
+func (c *Client) CloseIdleConnections() { c.httpClient.CloseIdleConnections() }
 
 // credentials returns the current API token and password.
 func (c *Client) credentials() (apiToken, password string) {
@@ -308,24 +330,50 @@ func (c *Client) Call(ctx context.Context, method, path string, params url.Value
 // call is Call, with the retry after a 401 optional: PUT /access/password
 // answers 401 itself when the confirmation is wrong, and signing in again
 // would only hide that.
+//
+// A request that fails because the server presented a certificate the client
+// does not trust is tried once more when the client was changing the
+// server's certificate meanwhile and has come to trust a new one since: the
+// handshake failed before anything was sent, so nothing happened twice.
 func (c *Client) call(ctx context.Context, method, path string, params url.Values, out any, retryUnauthorized bool) (*Envelope, error) {
-	for attempt := 0; ; attempt++ {
+	signedInAgain, triedNewCertificate := false, false
+	// rejected is the generation of a ticket PBS rejected: a try after a
+	// certificate change must not send it again.
+	var rejected uint64
+	for {
+		// Read first: a sign-in, too, may meet a certificate the client
+		// comes to trust only when a change ends.
+		generation := c.trust.currentGeneration()
 		var t *ticket
 		if !c.tokenAuth {
 			var err error
-			if t, err = c.ticketNewerThan(ctx, 0); err != nil {
+			if t, err = c.ticketNewerThan(ctx, rejected); err != nil {
+				if !triedNewCertificate && c.awaitCertificateChange(ctx, err, generation) {
+					triedNewCertificate = true
+					continue
+				}
 				return nil, err
 			}
 		}
 
 		resp, raw, err := c.send(ctx, method, path, params, t)
 		if err != nil {
+			if !triedNewCertificate && c.awaitCertificateChange(ctx, err, generation) {
+				triedNewCertificate = true
+				continue
+			}
 			return nil, err
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized && t != nil && attempt == 0 && retryUnauthorized {
+		if resp.StatusCode == http.StatusUnauthorized && t != nil && !signedInAgain && retryUnauthorized {
+			signedInAgain = true
+			rejected = t.gen
 			tflog.Debug(ctx, "PBS rejected the ticket; signing in again", map[string]any{"method": method, "path": path})
 			if _, err := c.ticketNewerThan(ctx, t.gen); err != nil {
+				if !triedNewCertificate && c.awaitCertificateChange(ctx, err, generation) {
+					triedNewCertificate = true
+					continue
+				}
 				return nil, fmt.Errorf("%s %s: PBS rejected the ticket, and signing in again failed: %w", method, path, err)
 			}
 			continue
@@ -369,7 +417,7 @@ func (c *Client) send(ctx context.Context, method, path string, params url.Value
 		req.Header.Set("Authorization", "PBSAPIToken="+apiToken)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClientFor(ctx).Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}

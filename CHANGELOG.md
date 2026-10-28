@@ -79,3 +79,37 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the release the attribute needs instead of PBS refusing the request.
 - All resources import by ID and, from Terraform 1.12, by resource
   identity.
+- `pbs_acme_account` resource: an account at an ACME certificate authority,
+  Let's Encrypt's production directory by default, agreeing to its terms of
+  service with `tos_url`. The provider waits for PBS's tasks that register,
+  update and deactivate an account, and reports the CA's error. Only
+  `contact` changes in place; a new terms of service URL is recorded without
+  contacting the CA, so that Let's Encrypt publishing new terms does not
+  register a new account. Destroying the account deactivates it at the CA,
+  which cannot be undone; the plan warns about it. Let's Encrypt no longer
+  returns contacts, so `contact` stays as configured.
+- `pbs_acme_plugin` resource: a DNS challenge plugin, such as Cloudflare's
+  `cf` with an API token, whose settings (`data`) are sensitive and in
+  state, as PBS returns them. The built-in `standalone` plugin, for HTTP-01,
+  can be imported, not created, and destroying it leaves it.
+- `pbs_node_acme` resource: the ACME account and the up to five domains of
+  a node, each with its plugin and challenge alias. A domain keeps its slot
+  in PBS while it stays, so reordering changes nothing; the node's other
+  settings are left alone.
+- `pbs_node_certificate` resource: the certificate of the web interface and
+  API, ordered from the node's ACME account (`source = "acme"`). The
+  provider waits for the order and reports why it failed. A refresh reads
+  the certificate PBS renewed on its own without planning anything;
+  `triggers` orders a new one in place. Destroying it has PBS go back to a
+  new self-signed certificate, whose fingerprint the destroy reports.
+- `pbs_acme_tos` data source: the terms of service of an ACME directory.
+- When the provider has PBS change its certificate, it trusts the new
+  certificate for the rest of the run, whatever its TLS settings: it makes
+  the change over a connection it trusted before, which PBS keeps on the old
+  certificate, and reads the new one over it. Calls that meet the new
+  certificate meanwhile wait for the change and go through. The provider
+  warns when its settings need changing before the next run, and a failed
+  connection explains a certificate that no longer matches
+  `tls_cert_fingerprint`. A pinned fingerprint matches the server's own
+  certificate only, not one the server sends after it, which anyone could
+  send.

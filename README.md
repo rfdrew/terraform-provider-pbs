@@ -12,10 +12,12 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 (`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores with their prune and
 verify jobs (`pbs_datastore`, `pbs_prune_job`, `pbs_verify_job`) and
 notifications by mail (`pbs_notification_endpoint_smtp`,
-`pbs_notification_matcher`) can be managed, with data sources to read the
+`pbs_notification_matcher`) and a Let's Encrypt certificate for the web
+interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
+`pbs_node_certificate`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-besides `pbs_version` and `pbs_fingerprint`. Namespaces, remotes, sync
-jobs, other notification endpoints and ACME come next. The guide
+besides `pbs_version`, `pbs_fingerprint` and `pbs_acme_tos`. Namespaces,
+remotes, sync jobs and other notification endpoints come next. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
 puts them together.
 

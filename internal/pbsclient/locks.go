@@ -32,6 +32,7 @@ const (
 	ConfigNotifications = "notifications.cfg"
 	ConfigNode          = "node.cfg"
 	ConfigNetwork       = "interfaces"
+	ConfigACMEPlugins   = "acme/plugins.cfg"
 )
 
 type configLocks struct {

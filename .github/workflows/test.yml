@@ -14,6 +14,9 @@
 # first with write-only attributes) and the newest, the oldest supported line
 # (4.0), and the newest OpenTofu. One more run uses the community image
 # ayufan/proxmox-backup-server, so that the quick local stand keeps working.
+# Next to PBS, sharing its network, the script starts Pebble, Let's
+# Encrypt's test CA, for the ACME tests: it issues certificates without
+# validating anything, so neither DNS nor port 80 needs to be reachable.
 #
 # Building the packages image takes about half a minute, so it is cached per
 # release line and week: a new PBS release is picked up within a week, and
@@ -214,6 +217,7 @@ jobs:
         if: failure()
         run: |
           docker logs --tail 200 pbs-tfprovider-test || true
+          docker logs --tail 100 pbs-tfprovider-test-pebble || true
           if [ "$PBS_TEST_VARIANT" = packages ]; then
             docker exec pbs-tfprovider-test journalctl --no-pager -n 200 \
               -u proxmox-backup.service -u proxmox-backup-proxy.service || true
