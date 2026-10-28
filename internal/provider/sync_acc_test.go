@@ -215,6 +215,11 @@ data "pbs_verify_jobs" "target" {
 
 data "pbs_prune_job" "target" {
   id = pbs_prune_job.target.id
+
+  # The ID is known from the configuration, so without this the data source
+  # would be read while planning, also after the job went with its
+  # datastore, and fail before the apply could create it again.
+  depends_on = [pbs_prune_job.target]
 }
 `, target, dir, pullID, source, pushID, localID, pullExtra, verifyID, pruneID)
 	}
