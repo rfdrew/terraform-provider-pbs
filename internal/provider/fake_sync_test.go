@@ -389,7 +389,7 @@ func checkSyncJobLocked(w http.ResponseWriter, job fakeProperties) bool {
 	if depth, ok := job["max-depth"].(int64); ok {
 		for _, key := range []string{"ns", "remote-ns"} {
 			ns, _ := job[key].(string)
-			if nsDepth := namespaceDepth(ns); nsDepth+depth > maxNamespaceDepth {
+			if nsDepth := namespaceLevels(ns); nsDepth+depth > maxNamespaceDepth {
 				writeError(w, "namespace '%s's depth and recursion depth exceed limit: %d + %d > 7", ns, nsDepth, depth)
 				return false
 			}

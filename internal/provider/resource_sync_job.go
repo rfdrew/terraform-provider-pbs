@@ -344,8 +344,8 @@ func (r *syncJobResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.data = providerDataFrom(req.ProviderData, &resp.Diagnostics)
 }
 
-// namespaceDepth is how many levels below the root a namespace is.
-func namespaceDepth(ns string) int64 {
+// namespaceLevels is how many levels below the root a namespace is.
+func namespaceLevels(ns string) int64 {
 	if ns == "" {
 		return 0
 	}
@@ -391,7 +391,7 @@ func (r *syncJobResource) ValidateConfig(ctx context.Context, req resource.Valid
 			if ns.value.IsUnknown() {
 				continue
 			}
-			if depth := namespaceDepth(ns.value.ValueString()); depth+config.MaxDepth.ValueInt64() > maxNamespaceDepth {
+			if depth := namespaceLevels(ns.value.ValueString()); depth+config.MaxDepth.ValueInt64() > maxNamespaceDepth {
 				resp.Diagnostics.AddAttributeError(path.Root("max_depth"), "Namespaces nest at most 7 levels deep",
 					fmt.Sprintf("%s is %d levels deep, and max_depth = %d reaches %d levels below it; namespaces nest "+
 						"at most %d levels deep, and PBS refuses the job. Lower max_depth to %d at most.",

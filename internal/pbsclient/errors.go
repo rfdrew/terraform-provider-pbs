@@ -109,7 +109,9 @@ func IsNotFound(err error) bool {
 	if !ok || (apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusNotFound) {
 		return false
 	}
-	if IsEndpointMissing(err) {
+	// A datastore PBS cannot open is reported with its maintenance message,
+	// which may well end in "not found".
+	if IsEndpointMissing(err) || IsDatastoreUnavailable(err) {
 		return false
 	}
 	message := strings.ToLower(apiErr.Message)

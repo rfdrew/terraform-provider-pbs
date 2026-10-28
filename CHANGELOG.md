@@ -8,6 +8,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pbs_namespace` resource: a namespace of a datastore, such as `dept1` or
+  `dept1/hosts`, imported by `<store>:<namespace>`. It has no settings, so
+  any change replaces it. Creating one that exists takes it over, with a
+  warning. Destroying it deletes the namespaces below it too; it fails for a
+  namespace with backups unless `delete_groups` is set, and for protected
+  snapshots unless `error_on_protected = false`, both read from state. While
+  a removable datastore is not mounted, a refresh keeps its namespaces in
+  state, with a warning.
+- Removable datastores in `pbs_datastore`: `backing_device`, the UUID of the
+  file system on the disk, with a `path` relative to it, `gc_on_unmount`
+  (PBS 4.2), and the computed `mount_status`. They can be imported too; a
+  datastore on S3 object storage still cannot.
+- Data sources `pbs_datastore` and `pbs_datastores`, the configuration of
+  datastores of every kind; `pbs_namespaces`, the namespaces of a datastore
+  or below one of them; `pbs_datastore_status`, the size, use and free space
+  of a datastore and when PBS expects it to be full; and `pbs_gc_status`,
+  the schedule and outcome of a datastore's garbage collection.
 - `pbs_remote` resource: another PBS that sync jobs pull from or push to,
   with its host, port, user or API token, certificate fingerprint and use of
   the node's HTTP proxy (`use_node_proxy`, PBS 4.2), and a write-only

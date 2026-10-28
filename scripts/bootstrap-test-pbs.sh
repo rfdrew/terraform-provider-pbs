@@ -28,13 +28,16 @@
 # and starts Pebble, Let's Encrypt's test CA, in the PBS container's network
 # namespace, as the ACME directory https://localhost:14000/dir for PBS. Pebble
 # validates every challenge without looking (PEBBLE_VA_ALWAYS_VALID), so
-# ordering a certificate needs neither DNS nor a reachable port 80.
+# ordering a certificate needs neither DNS nor a reachable port 80. The
+# packages stand also gets a file system on a loop device, for removable
+# datastores.
 #
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
-# variant, the PBS version, the ACME directory, and the files of PBS's own
-# certificate and key, which the certificate tests put back when they end.
+# variant, the PBS version, the ACME directory, the files of PBS's own
+# certificate and key, which the certificate tests put back when they end,
+# and the UUID of the file system for removable datastores.
 # The test user's credentials are not exported as PBS_USERNAME and
 # PBS_PASSWORD, which the provider would read alongside the token.
 #
@@ -65,6 +68,14 @@
 #     store; Pebble shares the PBS container's network, where the
 #     certificate's name, localhost, is right. Pebble rejects 5% of nonces
 #     unless told not to, which PBS retries only three times.
+#   * PBS mounts a removable datastore's file system with `mount UUID=<uuid>`
+#     and tells whether it is mounted by comparing the device numbers of
+#     /dev/disk/by-uuid/<uuid> and of the mount's source. The packages stand
+#     has an ext4 image on a loop device for that, and the by-uuid link udev
+#     would make on a host. Loop devices belong to the host's kernel: the
+#     privileged container sees the device nodes the host had when it
+#     started, so the script creates the node of a newer one, and detaches
+#     the device again when it removes the container.
 #
 # Usage:
 #   eval "$(scripts/bootstrap-test-pbs.sh)"                         # official packages
@@ -85,6 +96,8 @@
 #   PBS_TEST_STATE_DIR       where credentials are kept
 #   PBS_TEST_PEBBLE          set to 0 to start no Pebble; the ACME tests then skip
 #   PBS_TEST_PEBBLE_IMAGE    Pebble image (default ghcr.io/letsencrypt/pebble:2.10.1)
+#   PBS_TEST_REMOVABLE       packages variant: set to 0 to make no file system for
+#                            removable datastores; their tests then skip
 #
 # The script logs "timing: <phase> <seconds>s" lines on stderr, so that CI can
 # report how long the stand takes to come up.
@@ -112,6 +125,12 @@ PEBBLE="${PBS_TEST_PEBBLE:-1}"
 PEBBLE_IMAGE="${PBS_TEST_PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1}"
 PEBBLE_CONTAINER="${CONTAINER}-pebble"
 ACME_DIRECTORY="https://localhost:14000/dir"
+REMOVABLE="${PBS_TEST_REMOVABLE:-1}"
+# The image of the file system for removable datastores, in the container,
+# and the file that notes its loop device, for the teardown.
+REMOVABLE_IMAGE="/var/lib/proxmox-backup/tfacc-removable.img"
+REMOVABLE_LOOP_FILE="/var/lib/proxmox-backup/tfacc-removable.loop"
+REMOVABLE_UUID=""
 
 TEST_USER="tfacc@pbs"
 TEST_TOKEN_NAME="acc"
@@ -131,8 +150,26 @@ rand_hex() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 T0="$(date +%s)"
 timing() { log "timing: $1 $(($(date +%s) - $2))s"; }
 
+# release_removable_device detaches the loop device of the file system for
+# removable datastores, which would outlive the container otherwise. One that
+# a mount in the container still holds is detached when the container's
+# mounts go with it. A stopped container that has a loop device noted is
+# started for that: docker exec needs it running.
+release_removable_device() {
+  if ! docker cp "${CONTAINER}:${REMOVABLE_LOOP_FILE}" - >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]]; then
+    docker start "$CONTAINER" >/dev/null 2>&1 || return 0
+  fi
+  # shellcheck disable=SC2016 # expanded by the container's shell
+  docker exec "$CONTAINER" sh -c 'dev="$(cat "$1")"; [ -b "$dev" ] || mknod "$dev" b 7 "${dev#/dev/loop}"; losetup -d "$dev"' \
+    sh "$REMOVABLE_LOOP_FILE" >/dev/null 2>&1 || true
+}
+
 if [[ "${1:-}" == "--teardown" ]]; then
   docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+  release_removable_device
   docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR"
@@ -195,7 +232,8 @@ build_packages_image() {
   ctx="$(mktemp -d)"
   # The version is picked from `apt-cache madison`, which the build log shows,
   # so that the log also tells which releases the repository still serves.
-  # proxmox-backup-client comes along to write test backups.
+  # proxmox-backup-client comes along to write test backups, and e2fsprogs
+  # to make the file system for removable datastores.
   cat >"$ctx/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
@@ -211,7 +249,7 @@ RUN apt-get update \\
  && v="\$(apt-cache madison proxmox-backup-server | awk -v p='${PBS_VERSION}' 'index(\$3, p) == 1 { print \$3; exit }')" \\
  && test -n "\$v" \\
  && echo "installing proxmox-backup-server=\$v" \\
- && apt-get install -y --no-install-recommends "proxmox-backup-server=\$v" proxmox-backup-client \\
+ && apt-get install -y --no-install-recommends "proxmox-backup-server=\$v" proxmox-backup-client e2fsprogs \\
  && apt-get clean \\
  && rm -rf /var/lib/apt/lists/*
 STOPSIGNAL SIGRTMIN+3
@@ -373,6 +411,41 @@ setup() {
   api PUT /access/acl --data-urlencode "path=/" --data-urlencode "role=Admin" \
     --data-urlencode "auth-id=${TOKEN_ID}" >/dev/null
   timing "setup" "$t"
+}
+
+# setup_removable_device makes the file system for removable datastores in
+# the packages stand: an ext4 image on a loop device, linked from
+# /dev/disk/by-uuid, and prints its UUID. A datastore's chunk store has 65536
+# directories, so the file system has 1 KiB blocks and inodes enough for two
+# of them in 256 MiB; the image is sparse. The loop device is noted for
+# release_removable_device.
+setup_removable_device() {
+  docker exec -i "$CONTAINER" bash -s -- "$REMOVABLE_IMAGE" "$REMOVABLE_LOOP_FILE" <<'SCRIPT'
+set -euo pipefail
+image="$1" loop_file="$2"
+uuid="$(cat /proc/sys/kernel/random/uuid)"
+truncate -s 256M "$image"
+mkfs.ext4 -q -F -b 1024 -N 140000 -U "$uuid" -L tfacc-removable "$image" >&2
+dev=""
+for _ in 1 2 3; do
+  candidate="$(losetup --find)"
+  if [[ ! -b "$candidate" ]]; then
+    mknod -m 0660 "$candidate" b 7 "${candidate#/dev/loop}"
+  fi
+  if losetup "$candidate" "$image" >&2; then
+    dev="$candidate"
+    break
+  fi
+done
+if [[ -z "$dev" ]]; then
+  echo "found no loop device for $image" >&2
+  exit 1
+fi
+echo "$dev" >"$loop_file"
+mkdir -p /dev/disk/by-uuid
+ln -sfn "$dev" "/dev/disk/by-uuid/$uuid"
+echo "$uuid"
+SCRIPT
 }
 
 # pebble_files writes, to dir, Pebble's configuration and the certificate it
@@ -540,10 +613,16 @@ print_exports() {
     # Clear what an earlier run exported in the same shell.
     printf 'unset PBS_ACC_ACME_DIRECTORY\n'
   fi
+  if [[ -n "$REMOVABLE_UUID" ]]; then
+    printf 'export PBS_ACC_REMOVABLE_UUID=%q\n' "$REMOVABLE_UUID"
+  else
+    printf 'unset PBS_ACC_REMOVABLE_UUID\n'
+  fi
 }
 
 # Always a fresh server, so that every test run starts from the same state.
 docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+release_removable_device
 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
 rm -rf "$STATE_DIR"
@@ -572,6 +651,11 @@ save_state
 check_token
 if [[ "$PEBBLE" != "0" ]]; then
   start_pebble
+fi
+if [[ "$VARIANT" == "packages" && "$REMOVABLE" != "0" ]]; then
+  t="$(date +%s)"
+  REMOVABLE_UUID="$(setup_removable_device)"
+  timing "removable" "$t"
 fi
 save_certificate
 FINGERPRINT="$(fingerprint)"
