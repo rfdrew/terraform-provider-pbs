@@ -4,7 +4,17 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-10-28
+
+First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
+4.2.8.
+
+### Requirements
+
+- Proxmox Backup Server 4.0 or newer; the provider warns about older
+  releases.
+- Terraform 1.11 or newer, or OpenTofu 1.11 or newer, the first releases with
+  write-only attributes; import by resource identity needs Terraform 1.12.
 
 ### Added
 
@@ -113,3 +123,5 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tls_cert_fingerprint`. A pinned fingerprint matches the server's own
   certificate only, not one the server sends after it, which anyone could
   send.
+
+[0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0
