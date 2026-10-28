@@ -70,20 +70,29 @@ func TestPropertyStringRoundTrip(t *testing.T) {
 	}
 }
 
+// Sizes parse as PBS parses them: K to P are powers of 1000, Ki to Pi powers
+// of 1024, B is optional, and PBS's own spelling, such as "10 MiB", is one
+// of them.
 func TestParseByteSize(t *testing.T) {
 	for in, want := range map[string]uint64{
 		"500":      500,
 		"500B":     500,
+		"500 b":    500,
 		"64KiB":    64 << 10,
 		"10MiB":    10 << 20,
 		"10 MiB":   10 << 20,
-		"10M":      10 << 20,
+		"10Mi":     10 << 20,
+		"10mib":    10 << 20,
+		"10M":      10_000_000,
+		"10 mb":    10_000_000,
 		"1.5GB":    1_500_000_000,
 		"1.5 gib":  3 << 29,
 		"2TB":      2e12,
+		"2 TiB":    2 << 40,
+		"1PB":      1e15,
 		"0":        0,
-		" 1KB ":    1000,
 		"0.5 KiB":  512,
+		"1.001 KB": 1001,
 		"1048576B": 1 << 20,
 	} {
 		got, err := ParseByteSize(in)
@@ -91,12 +100,14 @@ func TestParseByteSize(t *testing.T) {
 			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "MiB", "10 XB", "-1", "1.2.3MB", "ten"} {
+	for _, bad := range []string{"", "B", "MiB", "10 XB", "-1", "1.2.3MB", "ten", "10MIB", "10i", "10iB", " 1KB", "1KB ",
+		"1e3", "inf", ".5K", "10 M iB", "100000000PB"} {
 		if _, err := ParseByteSize(bad); err == nil {
 			t.Errorf("ParseByteSize(%q) accepted it", bad)
 		}
 	}
-	if !SameByteSize("10MiB", "10485760") || !SameByteSize("1 GB", "1000MB") || SameByteSize("1MiB", "1MB") || SameByteSize("x", "y") {
+	if !SameByteSize("10MiB", "10485760") || !SameByteSize("1 GB", "1000MB") || !SameByteSize("10mib", "10 MiB") ||
+		SameByteSize("1MiB", "1MB") || SameByteSize("10M", "10MiB") || SameByteSize("x", "y") || !SameByteSize("x", "x") {
 		t.Fatal("SameByteSize")
 	}
 }

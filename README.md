@@ -19,10 +19,12 @@ interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
 users, tokens and ACL entries, the roles and the effective permissions,
 the datastores, their namespaces, usage and garbage collection, the
 notification targets and matcher fields, besides `pbs_version`,
-`pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs come next. The
-guide
+`pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
+`pbs_sync_job`) copy backups between servers, with data sources for them and
+for the other jobs. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
-puts them together.
+puts them together, and [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
+adds a second server.
 
 ## Requirements
 

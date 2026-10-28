@@ -27,7 +27,8 @@ type pbsRelease struct {
 var pbs41 = pbsRelease{4, 1, 0}
 
 // pbs42 is what running garbage collection before unmounting a removable
-// datastore needs.
+// datastore, sync job worker threads and a remote's use of the node's proxy
+// need.
 var pbs42 = pbsRelease{4, 2, 0}
 
 func (r pbsRelease) String() string {

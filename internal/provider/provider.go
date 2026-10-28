@@ -511,6 +511,8 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewACMEPluginResource,
 		NewNodeACMEResource,
 		NewNodeCertificateResource,
+		NewRemoteResource,
+		NewSyncJobResource,
 	}
 }
 
@@ -532,6 +534,16 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewACMEToSDataSource,
 		NewNotificationTargetsDataSource,
 		NewNotificationMatcherFieldsDataSource,
+		NewRemoteDataSource,
+		NewRemotesDataSource,
+		NewRemoteDatastoresDataSource,
+		NewRemoteNamespacesDataSource,
+		NewSyncJobDataSource,
+		NewSyncJobsDataSource,
+		NewVerifyJobDataSource,
+		NewVerifyJobsDataSource,
+		NewPruneJobDataSource,
+		NewPruneJobsDataSource,
 	}
 }
 
