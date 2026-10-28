@@ -78,6 +78,22 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pbs_prune_jobs`.
 - Guide: copy backups to an offsite PBS, by push or by pull, with
   verification and retention offsite.
+- `pbs_realm_openid` resource: an OpenID Connect realm, to sign in to PBS
+  through an identity provider such as Authentik, with its issuer URL,
+  client ID, scopes, ACR values, audiences (PBS 4.2.1), prompt, username
+  claim, `autocreate` and `default`. The client key goes either in
+  `client_key`, kept in state as sensitive, where a change made outside
+  Terraform shows, or in the write-only `client_key_wo` with
+  `client_key_wo_version`; a realm created without either is a public
+  client. Removing `client_key` deletes the key from PBS, removing
+  `client_key_wo` leaves it. A new `username_claim`, which PBS cannot
+  change, replaces the realm, and the plan warns when that loses a key the
+  configuration leaves to PBS; `default = true` takes the flag from the
+  realm that had it. PBS contacts the issuer only when someone signs in,
+  not when it saves the realm. Requested in
+  [#6](https://github.com/rfdrew/terraform-provider-pbs/issues/6).
+- Data source `pbs_realms`: every realm, of every type, with its type,
+  comment and whether it is the default.
 
 ### Fixed
 

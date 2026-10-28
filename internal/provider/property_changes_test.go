@@ -182,6 +182,34 @@ func TestPropertyChangesSetsAndPropertyStrings(t *testing.T) {
 		t.Errorf("delete = %v", got)
 	}
 
+	// A list PBS keeps in one string: a set's elements sorted, a list's in
+	// order, separated by spaces.
+	list := func(values ...string) types.List {
+		elements := make([]attr.Value, len(values))
+		for i, v := range values {
+			elements[i] = types.StringValue(v)
+		}
+		return types.ListValueMust(types.StringType, elements)
+	}
+	c = newPropertyChanges(&diags, "scopes", "acr-values")
+	c.SpaceSeparated("scopes", set("profile", "email", "groups"), types.SetNull(types.StringType))
+	c.SpaceSeparated("acr-values", list("silver", "gold"), types.ListNull(types.StringType))
+	c.SpaceSeparated("audiences", types.SetNull(types.StringType), types.SetNull(types.StringType))
+	requireNoErrors(t, diags)
+	values = c.Values()
+	if values.Get("scopes") != "email groups profile" || values.Get("acr-values") != "silver gold" || len(values) != 2 {
+		t.Errorf("values = %v", values)
+	}
+	c = newPropertyChanges(&diags, "scopes")
+	c.SpaceSeparated("scopes", types.SetNull(types.StringType), set("email"))
+	if got := c.Values()["delete"]; len(got) != 1 || got[0] != "scopes" {
+		t.Errorf("delete = %v", got)
+	}
+	c = newPropertyChanges(&diags)
+	c.SpaceSeparated("prompt", types.StringValue("login"), types.StringNull())
+	requireErrorContaining(t, diags, `The PBS property "prompt" was planned as basetypes.StringValue`)
+	diags = nil
+
 	partlyUnknown := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
 		"sync_level": types.StringUnknown(), "cutoff": types.Int64Null(),
 	})

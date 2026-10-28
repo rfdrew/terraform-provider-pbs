@@ -31,6 +31,9 @@ var pbs41 = pbsRelease{4, 1, 0}
 // need.
 var pbs42 = pbsRelease{4, 2, 0}
 
+// pbs421 is what the extra audiences of an OpenID realm need.
+var pbs421 = pbsRelease{4, 2, 1}
+
 func (r pbsRelease) String() string {
 	if r.release == 0 {
 		return fmt.Sprintf("%d.%d", r.major, r.minor)
