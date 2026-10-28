@@ -60,6 +60,13 @@ type VerifyJob struct {
 	Comment        string `json:"comment,omitempty"`
 }
 
+// ListPruneJobs lists the prune jobs the caller may audit.
+func (c *Client) ListPruneJobs(ctx context.Context) ([]PruneJob, error) {
+	var jobs []PruneJob
+	_, err := c.Get(ctx, "/config/prune", nil, &jobs)
+	return jobs, err
+}
+
 // GetPruneJob reads one prune job.
 func (c *Client) GetPruneJob(ctx context.Context, id string) (PruneJob, error) {
 	var job PruneJob
@@ -85,6 +92,13 @@ func (c *Client) UpdatePruneJob(ctx context.Context, id string, params url.Value
 func (c *Client) DeletePruneJob(ctx context.Context, id string) error {
 	_, err := c.Delete(ctx, Path("config", "prune", id), nil, nil)
 	return err
+}
+
+// ListVerifyJobs lists the verify jobs the caller may audit.
+func (c *Client) ListVerifyJobs(ctx context.Context) ([]VerifyJob, error) {
+	var jobs []VerifyJob
+	_, err := c.Get(ctx, "/config/verify", nil, &jobs)
+	return jobs, err
 }
 
 // GetVerifyJob reads one verify job.

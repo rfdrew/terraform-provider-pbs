@@ -51,12 +51,18 @@ never returns.
   (`pbs_node_certificate`), which PBS renews on its own; `pbs_acme_tos`
   reads a CA's terms of service. CAs that require External Account Binding
   are not supported yet.
+* **Replication** — other PBS servers as remotes (`pbs_remote`), and sync
+  jobs that pull backups from them, push backups to them or copy them
+  between two datastores of one server (`pbs_sync_job`); to read them,
+  `pbs_remote`, `pbs_remotes`, `pbs_sync_job` and `pbs_sync_jobs`, and
+  `pbs_remote_datastores` and `pbs_remote_namespaces`, which sign in to a
+  remote and list what it holds. `pbs_verify_job`, `pbs_verify_jobs`,
+  `pbs_prune_job` and `pbs_prune_jobs` read the other jobs.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Namespaces, remotes, sync jobs and other notification endpoints follow in
-the next releases.
+Namespaces and other notification endpoints follow in the next releases.
 
 The usual first step is access for a Proxmox VE cluster: a user, an API
 token for it, and the role to back up to a datastore, for the token and its
@@ -92,7 +98,9 @@ user name and the token's secret, `pbs_api_token.pve.value`, as the password.
 The guide **Set up PBS for a Proxmox VE cluster** goes the whole way, in one
 configuration: a datastore with prune and verify
 jobs, notifications by mail, this access, outputs with what the storage
-in Proxmox VE needs, and a certificate from Let's Encrypt.
+in Proxmox VE needs, and a certificate from Let's Encrypt. The guide
+**Copy backups to an offsite PBS** adds a second server, with a remote and
+a sync job.
 
 ## Authentication
 

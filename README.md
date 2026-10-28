@@ -16,10 +16,13 @@ notifications by mail (`pbs_notification_endpoint_smtp`,
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
 `pbs_node_certificate`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-besides `pbs_version`, `pbs_fingerprint` and `pbs_acme_tos`. Namespaces,
-remotes, sync jobs and other notification endpoints come next. The guide
+besides `pbs_version`, `pbs_fingerprint` and `pbs_acme_tos`. Remotes and
+sync jobs (`pbs_remote`, `pbs_sync_job`) copy backups between servers, with
+data sources for them and for the other jobs. Namespaces and other
+notification endpoints come next. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
-puts them together.
+puts them together, and [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
+adds a second server.
 
 ## Requirements
 

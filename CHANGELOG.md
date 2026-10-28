@@ -4,6 +4,42 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pbs_remote` resource: another PBS that sync jobs pull from or push to,
+  with its host, port, user or API token, certificate fingerprint and use of
+  the node's HTTP proxy (`use_node_proxy`, PBS 4.2), and a write-only
+  password or token secret (`password_wo` and `password_wo_version`), which
+  creating a remote requires. The fingerprint is taken in any case, with or
+  without colons, sent as PBS shows it, and a change of spelling alone is no
+  change. PBS contacts nothing when it saves a remote; it refuses to delete
+  one a sync job uses, and the error says to set `create_before_destroy` when
+  a new name replaces it.
+- `pbs_sync_job` resource: a sync job of either direction —
+  `sync_direction = "pull"`, from a remote or, without `remote`, from another
+  local datastore, or `"push"`, to a remote — with its namespaces, depth,
+  schedule, owner, `remove_vanished`, group filters, `transfer_last`,
+  `encrypted_only`, `verified_only`, `resync_corrupt`, `run_on_mount`,
+  `unmount_on_done` (PBS 4.1), `worker_threads` (PBS 4.2) and rate and burst
+  limits. A new direction replaces the job. Rate and burst limits are byte
+  sizes compared by value, so PBS's own spelling, such as `10 MiB` for
+  `10MiB`, is no change. The plan refuses what PBS would: a push without a
+  remote, a local pull into its own source, `resync_corrupt` on a push,
+  `unmount_on_done` without `run_on_mount`, and a `max_depth` below the
+  deepest namespace. A job that PBS deleted with its datastore is created
+  again, as prune and verify jobs are. The sync encryption keys of PBS 4.2
+  are left alone.
+- Data sources `pbs_remote` and `pbs_remotes`, without passwords;
+  `pbs_remote_datastores` and `pbs_remote_namespaces`, which have PBS sign in
+  to a remote and list what its auth ID may see there, and so check a
+  remote; `pbs_sync_job` and `pbs_sync_jobs`, which list pull and push jobs
+  alike; `pbs_verify_job`, `pbs_verify_jobs`, `pbs_prune_job` and
+  `pbs_prune_jobs`.
+- Guide: copy backups to an offsite PBS, by push or by pull, with
+  verification and retention offsite.
+
 ## [0.1.0] - 2026-10-28
 
 First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and

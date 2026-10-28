@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // DeleteParam is the parameter through which a PUT unsets optional
@@ -161,37 +163,67 @@ func quotePropertyValue(v string) string {
 	return b.String()
 }
 
-// Byte sizes — rate and burst limits, cache sizes — are strings with an
-// optional unit, such as "10MiB", "1.5 GB" or "500": decimal units (KB, MB,
-// GB, TB, PB) and binary ones (KiB … PiB, and K … P without the "iB"), or
-// bytes without a unit. PBS may store a size in another spelling than it was
-// given, so sizes are compared by their value.
+// Byte sizes — rate and burst limits — are strings PBS parses as its
+// proxmox-human-byte crate does: a number, optionally followed by white space
+// and a unit. The unit is one of the letters K, M, G, T and P, in either case,
+// for a power of 1000, or the letter followed by a lower-case "i" for a power
+// of 1024, then an optional "B" or "b"; no unit, or "B" alone, means bytes.
+// So "10M" and "10MB" are 10,000,000 bytes, "10Mi" and "10MiB" 10,485,760,
+// and "10MIB" is no size at all. PBS writes a size back in its own spelling —
+// the number, rounded to three decimals, a space and the unit, such as
+// "10 MiB" for "10mib" — so sizes are compared by their value.
 
-var byteUnits = map[string]float64{
-	"": 1, "b": 1,
-	"kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12, "pb": 1e15,
-	"kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40, "pib": 1 << 50,
-	"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40, "p": 1 << 50,
+// byteUnitFactors are the powers of 1000 and of 1024 each unit letter stands
+// for.
+var byteUnitFactors = map[rune][2]float64{
+	'k': {1e3, 1 << 10},
+	'm': {1e6, 1 << 20},
+	'g': {1e9, 1 << 30},
+	't': {1e12, 1 << 40},
+	'p': {1e15, 1 << 50},
 }
 
-// ParseByteSize returns the number of bytes a size stands for.
+// byteSizeNumber is the number of a byte size: digits, with an optional
+// fraction. PBS would take more forms of a floating-point number, such as
+// "1e3" or "inf", which no one writes for a size.
+var byteSizeNumber = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+// ParseByteSize returns the number of bytes a size stands for, rounded to a
+// whole byte.
 func ParseByteSize(s string) (uint64, error) {
-	trimmed := strings.TrimSpace(s)
-	split := strings.IndexFunc(trimmed, func(r rune) bool { return (r < '0' || r > '9') && r != '.' })
-	number, unit := trimmed, ""
-	if split >= 0 {
-		number, unit = trimmed[:split], strings.TrimSpace(trimmed[split:])
+	invalid := fmt.Errorf("%q is not a byte size such as 500, 64KiB, 10MiB or 1.5GB", s)
+	rest := s
+	if strings.HasSuffix(rest, "B") || strings.HasSuffix(rest, "b") {
+		rest = rest[:len(rest)-1]
 	}
-	factor, ok := byteUnits[strings.ToLower(unit)]
-	if number == "" || !ok {
-		return 0, fmt.Errorf("%q is not a byte size such as 500, 64KiB, 10MiB or 1.5GB", s)
+	binary := strings.HasSuffix(rest, "i")
+	if binary {
+		rest = rest[:len(rest)-1]
+	}
+	factor := 1.0
+	if rest != "" {
+		if factors, ok := byteUnitFactors[unicode.ToLower(rune(rest[len(rest)-1]))]; ok {
+			factor = factors[0]
+			if binary {
+				factor = factors[1]
+			}
+			rest = rest[:len(rest)-1]
+		} else if binary {
+			// PBS reads "10i" as 10 bytes; it is a typo rather than a size.
+			return 0, invalid
+		}
+	}
+	number := strings.TrimRightFunc(rest, unicode.IsSpace)
+	if !byteSizeNumber.MatchString(number) {
+		return 0, invalid
 	}
 	value, err := strconv.ParseFloat(number, 64)
-	if err != nil || value < 0 {
-		return 0, fmt.Errorf("%q is not a byte size such as 500, 64KiB, 10MiB or 1.5GB", s)
+	if err != nil {
+		return 0, invalid
 	}
 	bytes := math.Round(value * factor)
-	if bytes > math.MaxUint64 {
+	// float64(math.MaxUint64) rounds up to 2^64, which no uint64 holds.
+	if bytes >= math.MaxUint64 {
 		return 0, fmt.Errorf("byte size %q is too large", s)
 	}
 	return uint64(bytes), nil
