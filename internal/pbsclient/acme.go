@@ -3,9 +3,13 @@ package pbsclient
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 // ACME: accounts at a certificate authority, challenge plugins, and the
@@ -102,13 +106,74 @@ func (c *Client) GetACMEAccount(ctx context.Context, name string) (ACMEAccount, 
 
 // RegisterACMEAccount registers an account at a CA from params — "name",
 // "contact" and optionally "directory" and "tos_url" — and waits for the
-// task, whose error, such as the CA refusing, is a *TaskError.
+// task, whose error, such as the CA refusing, is a *TaskError. When the CA
+// refuses the account key (IsACMEKeyRefused), it registers again, with a
+// new key, up to ACMERegisterAttempts times in all, as long as PBS kept no
+// account of that name.
 func (c *Client) RegisterACMEAccount(ctx context.Context, params url.Values) error {
+	name := params.Get("name")
+	if name == "" {
+		name = "default"
+	}
+	for attempt := 1; ; attempt++ {
+		err := c.registerACMEAccount(ctx, params)
+		if err == nil || !IsACMEKeyRefused(err) || attempt >= ACMERegisterAttempts {
+			return err
+		}
+		// PBS stores the account only once the CA accepted it. Should it
+		// have kept one all the same, registering again would be refused.
+		if _, getErr := c.GetACMEAccount(ctx, name); !IsNotFound(getErr) {
+			if getErr == nil {
+				return fmt.Errorf("%w; PBS has an ACME account named %q all the same", err, name)
+			}
+			return fmt.Errorf("%w; checking that PBS kept no account before registering again failed: %v", err, getErr)
+		}
+		tflog.Warn(ctx, "the CA refused the ACME account key PBS generated; registering again with a new key", map[string]any{
+			"account": name, "attempt": attempt, "error": err.Error(),
+		})
+	}
+}
+
+func (c *Client) registerACMEAccount(ctx context.Context, params url.Values) error {
 	env, err := c.Post(ctx, "/config/acme/account", params, nil)
 	if err != nil {
 		return err
 	}
 	return c.WaitTaskIn(ctx, env.Data)
+}
+
+// PBS's ACME client, proxmox-acme, generates a new P-256 key for every
+// registration and writes the coordinates of its public key in the JWK
+// without their leading zero bytes (key.rs takes BigNum::to_vec where
+// to_vec_padded(32) is right). About one key in 128 has a coordinate
+// shorter than 32 bytes, which CAs built on go-jose, Pebble and Let's
+// Encrypt's Boulder among them, refuse as malformed. The task fails before
+// PBS stores the account, and registering again, with a new key, almost
+// always succeeds.
+//
+// Pebble passes go-jose's reason on, and the task fails with
+// "urn:ietf:params:acme:error:malformed: Parse error reading JWS: failed to
+// unmarshal JWK: go-jose/go-jose: invalid EC public key, wrong length for x"
+// (or y; with go-jose before 4.1.6, the JWK follows). Boulder keeps the
+// reason to itself and answers "Unable to validate JWS :: Parse error
+// reading JWS", as for any request it cannot parse; PBS's requests are well
+// formed otherwise, and another cause would fail every attempt alike.
+
+// ACMERegisterAttempts is how many times RegisterACMEAccount registers an
+// account while the CA refuses the key. Three keys in a row with a short
+// coordinate are about one chance in two million.
+const ACMERegisterAttempts = 3
+
+// IsACMEKeyRefused reports whether an ACME task failed because the CA
+// refused the account key PBS generated, as described above.
+func IsACMEKeyRefused(err error) bool {
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) {
+		return false
+	}
+	exit := strings.TrimSpace(taskErr.ExitStatus)
+	return strings.Contains(exit, "invalid EC public key, wrong length for ") ||
+		strings.HasSuffix(exit, ":: Parse error reading JWS")
 }
 
 // UpdateACMEAccountContact has the CA change an account's contact addresses,

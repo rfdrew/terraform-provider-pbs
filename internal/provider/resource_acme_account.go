@@ -76,7 +76,11 @@ func (r *acmeAccountResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"configured, and reports a change made outside Terraform only for a CA that returns its contacts.\n\n" +
 			"Managing ACME accounts needs `" + certificatesPrivilege + "`. Registering, updating and deactivating " +
 			"an account runs as a PBS task; the provider waits for it, up to `task_timeout`, and reports the CA's " +
-			"error when it fails.",
+			"error when it fails.\n\n" +
+			"PBS writes about one account key in 128 in a form that CAs such as Let's Encrypt refuse as malformed " +
+			"(Pebble says \"invalid EC public key, wrong length for x\" or \"for y\", Let's Encrypt \"Parse error " +
+			"reading JWS\"); the provider then tries up to " + fmt.Sprint(pbsclient.ACMERegisterAttempts) + " keys in " +
+			"all, registering the account again with a new key.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -307,6 +311,12 @@ func acmeAccountErrorDetail(client *pbsclient.Client, plan acmeAccountModel, reg
 	if !registering {
 		return "PBS could not update the account at " + plan.Directory.ValueString() + ". Check that PBS can reach " +
 			"the directory and trusts its TLS certificate. " + err.Error()
+	}
+	if pbsclient.IsACMEKeyRefused(err) {
+		return fmt.Sprintf("PBS could not register the account at %s: the CA refused the request as malformed. "+
+			"PBS writes about one account key in 128 in a form that CAs such as Let's Encrypt refuse, so the "+
+			"provider tried up to %d keys; applying again tries more. %s", plan.Directory.ValueString(),
+			pbsclient.ACMERegisterAttempts, err)
 	}
 	detail := "PBS could not register the account at " + plan.Directory.ValueString() + ". Check that PBS can " +
 		"reach the directory and trusts its TLS certificate"

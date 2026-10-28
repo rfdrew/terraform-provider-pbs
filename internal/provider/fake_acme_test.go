@@ -59,11 +59,12 @@ type fakeACME struct {
 	deactivated []string
 	// caForgets makes the CA return no contacts, as Let's Encrypt does.
 	caForgets bool
-	// registerFailure and orderFailure make the next registration or order
-	// task fail with their text; orderFailureAfterInstall makes it fail after
-	// it installed the certificate, orderNothing end it without one, as for
-	// a node whose domains went away.
-	registerFailure          string
+	// registerFailures make the next registration tasks fail with their
+	// text, one each. orderFailure makes the next order task fail with its
+	// text; orderFailureAfterInstall makes it fail after it installed the
+	// certificate, orderNothing end it without one, as for a node whose
+	// domains went away.
+	registerFailures         []string
 	orderFailure             string
 	orderFailureAfterInstall string
 	orderNothing             bool
@@ -371,8 +372,9 @@ func (a *fakeACME) registerAccount(w http.ResponseWriter, req *http.Request) {
 		directory = pbsclient.DefaultACMEDirectory
 	}
 	upid := a.startTaskLocked("acme-register", name, func() string {
-		if failure := a.registerFailure; failure != "" {
-			a.registerFailure = ""
+		if len(a.registerFailures) > 0 {
+			failure := a.registerFailures[0]
+			a.registerFailures = a.registerFailures[1:]
 			return failure
 		}
 		contacts, failure := a.contactsLocked(params.Get("contact"))

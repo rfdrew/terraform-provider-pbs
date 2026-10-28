@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -88,6 +90,131 @@ func TestACMEAccountCalls(t *testing.T) {
 	if err := c.DeactivateACMEAccount(ctx, "default", false); !IsForbidden(err) {
 		t.Fatalf("DeactivateACMEAccount() error = %v", err)
 	}
+}
+
+// keyRefused is how a registration task fails when Pebble refuses the
+// account key PBS generated.
+const keyRefused = `urn:ietf:params:acme:error:malformed: Parse error reading JWS: failed to unmarshal JWK: ` +
+	`go-jose/go-jose: invalid EC public key, wrong length for x: "{\"kty\":\"EC\",\"crv\":\"P-256\"}"`
+
+func TestIsACMEKeyRefused(t *testing.T) {
+	upid, _ := ParseUPID(registerUPID)
+	taskErr := func(exit string) error { return &TaskError{UPID: upid, ExitStatus: exit} }
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"x too short", taskErr(keyRefused), true},
+		{"y too short", taskErr(strings.Replace(keyRefused, "for x", "for y", 1)), true},
+		{"go-jose 4.1.6", taskErr("urn:ietf:params:acme:error:malformed: Parse error reading JWS: failed to unmarshal JWK: go-jose/go-jose: invalid EC public key, wrong length for y"), true},
+		{"Boulder", taskErr("urn:ietf:params:acme:error:malformed: Unable to validate JWS :: Parse error reading JWS"), true},
+		{"Boulder, line break", taskErr("urn:ietf:params:acme:error:malformed: Unable to validate JWS :: Parse error reading JWS\n"), true},
+		{"wrapped", fmt.Errorf("registering: %w", taskErr(keyRefused)), true},
+		{"another refusal", taskErr("urn:ietf:params:acme:error:malformed: contact email has invalid domain"), false},
+		{"Pebble cannot parse something else", taskErr("urn:ietf:params:acme:error:malformed: Parse error reading JWS: illegal base64 data at input byte 4"), false},
+		{"a bad signature", taskErr("urn:ietf:params:acme:error:malformed: Unable to validate JWS :: JWS verification error"), false},
+		{"not a task", &Error{StatusCode: http.StatusBadRequest, Message: keyRefused}, false},
+		{"nil", nil, false},
+	} {
+		if got := IsACMEKeyRefused(tc.err); got != tc.want {
+			t.Errorf("%s: IsACMEKeyRefused() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRegisterACMEAccountAgainWhenTheCARefusesTheKey(t *testing.T) {
+	ctx := context.Background()
+	status := func(exit string) string {
+		return `{"data":{"status":"stopped","exitstatus":` + strconv.Quote(exit) + `}}`
+	}
+	register := func(t *testing.T, exits ...string) (*fakePBS, *Client) {
+		t.Helper()
+		fake := newFakePBS()
+		fake.reply("POST /config/acme/account", http.StatusOK, `{"data":"`+registerUPID+`"}`)
+		var statuses []string
+		for _, exit := range exits {
+			statuses = append(statuses, status(exit))
+		}
+		fake.replies("GET /nodes/localhost/tasks/"+registerUPID+"/status", http.StatusOK, statuses...)
+		return fake, fake.client(t)
+	}
+
+	t.Run("registered with the second key", func(t *testing.T) {
+		// Without a name, PBS registers the account "default".
+		fake, c := register(t, keyRefused, "OK")
+		fake.reply("GET /config/acme/account/default", http.StatusBadRequest, "acme account 'default' does not exist")
+		if err := c.RegisterACMEAccount(ctx, url.Values{"contact": {"ops@example.org"}}); err != nil {
+			t.Fatalf("RegisterACMEAccount() error = %v", err)
+		}
+		if posts, gets := fake.count("POST /config/acme/account"), fake.count("GET /config/acme/account/default"); posts != 2 || gets != 1 {
+			t.Fatalf("%d registrations and %d checks, want 2 and 1", posts, gets)
+		}
+	})
+
+	t.Run("refused every time", func(t *testing.T) {
+		params := url.Values{"name": {"le"}, "contact": {"ops@example.org"}}
+		fake, c := register(t, keyRefused)
+		fake.reply("GET /config/acme/account/le", http.StatusBadRequest, "acme account 'le' does not exist")
+		err := c.RegisterACMEAccount(ctx, params)
+		var taskErr *TaskError
+		if !errors.As(err, &taskErr) || taskErr.ExitStatus != keyRefused {
+			t.Fatalf("RegisterACMEAccount() error = %v, want the CA's", err)
+		}
+		// PBS is checked before every new attempt.
+		if posts, gets := fake.count("POST /config/acme/account"), fake.count("GET /config/acme/account/le"); posts != ACMERegisterAttempts || gets != ACMERegisterAttempts-1 {
+			t.Fatalf("%d registrations and %d checks, want %d and %d", posts, gets, ACMERegisterAttempts, ACMERegisterAttempts-1)
+		}
+	})
+
+	t.Run("another refusal ends it", func(t *testing.T) {
+		const invalid = "urn:ietf:params:acme:error:invalidContact: contact email has invalid domain"
+		params := url.Values{"name": {"le"}, "contact": {"ops@example.org"}}
+		fake, c := register(t, keyRefused, invalid, "OK")
+		fake.reply("GET /config/acme/account/le", http.StatusBadRequest, "acme account 'le' does not exist")
+		err := c.RegisterACMEAccount(ctx, params)
+		var taskErr *TaskError
+		if !errors.As(err, &taskErr) || taskErr.ExitStatus != invalid {
+			t.Fatalf("RegisterACMEAccount() error = %v, want the second refusal", err)
+		}
+		if posts := fake.count("POST /config/acme/account"); posts != 2 {
+			t.Fatalf("%d registrations, want 2", posts)
+		}
+	})
+
+	t.Run("not tried again once PBS has the account", func(t *testing.T) {
+		params := url.Values{"name": {"le"}, "contact": {"ops@example.org"}}
+		fake, c := register(t, keyRefused, keyRefused, "OK")
+		checked := false
+		fake.handle("GET /config/acme/account/le", func(w http.ResponseWriter, _ *http.Request) {
+			if !checked {
+				checked = true
+				writeFakeResponse(w, http.StatusBadRequest, "acme account 'le' does not exist")
+				return
+			}
+			writeFakeResponse(w, http.StatusOK, `{"data":{"directory":"https://ca/dir","location":"https://ca/acct/1","account":{"status":"valid"}}}`)
+		})
+		err := c.RegisterACMEAccount(ctx, params)
+		if !IsACMEKeyRefused(err) || !strings.Contains(err.Error(), `PBS has an ACME account named "le" all the same`) {
+			t.Fatalf("RegisterACMEAccount() error = %v, want the CA's and the account PBS kept", err)
+		}
+		if posts := fake.count("POST /config/acme/account"); posts != 2 {
+			t.Fatalf("%d registrations, want 2", posts)
+		}
+	})
+
+	t.Run("not tried again when the check fails", func(t *testing.T) {
+		params := url.Values{"name": {"le"}, "contact": {"ops@example.org"}}
+		fake, c := register(t, keyRefused, "OK")
+		fake.reply("GET /config/acme/account/le", http.StatusForbidden, "permission check failed")
+		err := c.RegisterACMEAccount(ctx, params)
+		if !IsACMEKeyRefused(err) || !strings.Contains(err.Error(), "permission check failed") {
+			t.Fatalf("RegisterACMEAccount() error = %v, want the CA's and the check's", err)
+		}
+		if posts := fake.count("POST /config/acme/account"); posts != 1 {
+			t.Fatalf("%d registrations, want 1", posts)
+		}
+	})
 }
 
 func TestACMETermsOfService(t *testing.T) {

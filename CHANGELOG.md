@@ -85,6 +85,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   value in `data` of `pbs_acme_plugin`, that failed validation, for example
   with a trailing line break, was repeated in the error message; it no
   longer is.
+- `pbs_acme_account` failed to register an account about once in 128
+  times: PBS writes some of the account keys it generates in a form that
+  CAs built on go-jose, Let's Encrypt and Pebble among them, refuse as
+  malformed ("Parse error reading JWS", or "invalid EC public key, wrong
+  length for x" or "for y"). The provider now tries up to three keys in
+  all, registering the account again with a new key, unless PBS kept an
+  account of that name.
 
 ## [0.1.0] - 2026-10-28
 
