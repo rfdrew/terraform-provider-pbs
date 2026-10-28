@@ -26,6 +26,10 @@ type pbsRelease struct {
 // them need.
 var pbs41 = pbsRelease{4, 1, 0}
 
+// pbs42 is what running garbage collection before unmounting a removable
+// datastore needs.
+var pbs42 = pbsRelease{4, 2, 0}
+
 func (r pbsRelease) String() string {
 	if r.release == 0 {
 		return fmt.Sprintf("%d.%d", r.major, r.minor)

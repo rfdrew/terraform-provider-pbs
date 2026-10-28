@@ -33,11 +33,15 @@ import (
 //     own form;
 //   - an update's delete accepts only the names PBS accepts, and PBS applies
 //     the deletions before the values;
-//   - missing objects answer the 400s and 404s PBS answers.
+//   - missing objects answer the 400s and 404s PBS answers;
+//   - a removable datastore, with a backing-device, has a path relative to
+//     its device, which must be connected — in devices — for the create task
+//     to mount it, and stays mounted after; destroy-data needs it mounted,
+//     and gc-on-unmount is refused for a datastore that is not removable.
 //
-// Tests set up state with addDatastore, addPruneJob, addVerifyJob and
-// addChunkStore, and look at it with datastore, pruneJob, verifyJob and
-// hasChunkStore.
+// Tests set up state with addDatastore, addPruneJob, addVerifyJob,
+// addChunkStore, connectDevice and setMounted, and look at it with
+// datastore, pruneJob, verifyJob, hasChunkStore and isMounted.
 type fakeDatastores struct {
 	fake *fakePBS
 
@@ -57,6 +61,10 @@ type fakeDatastores struct {
 	// datastore in use, with "error", or end with warnings, with "warnings",
 	// as it does when it cannot remove the data.
 	failDelete string
+	// devices are the file system UUIDs of the connected removable disks,
+	// and mounted the removable datastores mounted.
+	devices map[string]bool
+	mounted map[string]bool
 }
 
 // fakeProperties are the properties of one section of a configuration file,
@@ -95,6 +103,8 @@ func newFakeDatastores(fake *fakePBS) *fakeDatastores {
 		pruneJobs:   map[string]fakeProperties{},
 		verifyJobs:  map[string]fakeProperties{},
 		tasks:       map[string]func() string{},
+		devices:     map[string]bool{},
+		mounted:     map[string]bool{},
 	}
 	fake.handle("POST /config/datastore", d.createDatastore)
 	fake.handle("POST /config/prune", d.createJob("prune"))
@@ -116,9 +126,41 @@ func (d *fakeDatastores) addDatastore(name string, props fakeProperties) {
 	props = cloneProperties(props)
 	props["name"] = name
 	d.datastores[name] = props
-	if path, ok := props["path"].(string); ok {
-		d.chunkStores[path] = true
+	if _, ok := props["path"].(string); ok {
+		d.chunkStores[chunkStoreKey(props)] = true
 	}
+}
+
+// connectDevice connects a removable disk with a file system of the given
+// UUID, or disconnects it.
+func (d *fakeDatastores) connectDevice(uuid string, connected bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.devices[uuid] = connected
+}
+
+// setMounted mounts or unmounts a removable datastore, as PBS's mount and
+// unmount tasks do.
+func (d *fakeDatastores) setMounted(name string, mounted bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.mounted[name] = mounted
+}
+
+func (d *fakeDatastores) isMounted(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mounted[name]
+}
+
+// chunkStoreKey is where a datastore's chunk store is: its path, or for a
+// removable datastore its device and the path on it.
+func chunkStoreKey(props fakeProperties) string {
+	path, _ := props["path"].(string)
+	if device, _ := props["backing-device"].(string); device != "" {
+		return device + ":" + path
+	}
+	return path
 }
 
 func (d *fakeDatastores) addPruneJob(id string, props fakeProperties) {
@@ -257,7 +299,7 @@ func (d *fakeDatastores) createDatastore(w http.ResponseWriter, req *http.Reques
 	if !checkRequired(w, params, "name", "path") {
 		return
 	}
-	name, path := params.Get("name"), params.Get("path")
+	name, path, device := params.Get("name"), params.Get("path"), params.Get("backing-device")
 	reuse := fakeBool(params.Get("reuse-datastore"))
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -265,23 +307,37 @@ func (d *fakeDatastores) createDatastore(w http.ResponseWriter, req *http.Reques
 		writeError(w, "parameter verification failed - 'name': datastore '%s' already exists.", name)
 		return
 	}
-	if !strings.HasPrefix(path, "/") {
+	switch {
+	case device == "" && !strings.HasPrefix(path, "/"):
 		writeError(w, "parameter verification failed - 'path': expected an absolute path, '%s' is not", path)
+		return
+	case device != "" && strings.HasPrefix(path, "/"):
+		writeError(w, "parameter verification failed - 'path': expected a relative on-device path, '%s' is not", path)
+		return
+	case device == "" && fakeBool(params.Get("gc-on-unmount")):
+		writeError(w, "parameter verification failed - 'gc-on-unmount': only supported on removable datastores")
 		return
 	}
 	props := fakeProperties{}
 	applyFakeForm(props, params, nil, fakeDatastoreBools, "reuse-datastore", "overwrite-in-use")
+	key := chunkStoreKey(props)
 	upid := d.startTaskLocked("create-datastore", name, func() string {
 		switch {
-		case reuse && !d.chunkStores[path]:
+		case device != "" && !d.devices[device]:
+			return fmt.Sprintf("mounting to tmp path failed: command \"mount\" \"UUID=%s\" \"/run/proxmox-backup/mount/0a1b\" "+
+				"failed - status code: 1 - mount: /run/proxmox-backup/mount/0a1b: can't find UUID=%s.", device, device)
+		case reuse && !d.chunkStores[key]:
 			return fmt.Sprintf("unable to open existing chunk store path %q - ENOENT: No such file or directory", path+"/.chunks")
-		case !reuse && d.backups[path]:
+		case !reuse && d.backups[key]:
 			return "datastore path not empty"
-		case !reuse && d.chunkStores[path]:
+		case !reuse && d.chunkStores[key]:
 			return fmt.Sprintf("unable to create chunk store '%s' subdir %q - EEXIST: File exists", name, path+"/.chunks")
 		}
-		d.chunkStores[path] = true
+		d.chunkStores[key] = true
 		d.datastores[name] = props
+		if device != "" {
+			d.mounted[name] = true
+		}
 		return "OK"
 	})
 	writeData(w, upid, "")
@@ -316,6 +372,10 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 				return
 			}
 		}
+		if device, _ := props["backing-device"].(string); device == "" && fakeBool(params.Get("gc-on-unmount")) {
+			writeError(w, "parameter verification failed - 'gc-on-unmount': only supported on removable datastores")
+			return
+		}
 		_, changesMode := params["maintenance-mode"]
 		if slices.Contains(params[pbsclient.DeleteParam], "maintenance-mode") {
 			changesMode = true
@@ -341,6 +401,11 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 			writeFakeResponse(w, http.StatusNotFound, fmt.Sprintf("datastore '%s' does not exist.", name))
 			return
 		}
+		destroy := fakeBool(params.Get("destroy-data"))
+		if device, _ := props["backing-device"].(string); device != "" && destroy && !d.mounted[name] {
+			writeError(w, "cannot destroy data on '%s' unless the datastore is mounted", name)
+			return
+		}
 		if !fakeBool(params.Get("keep-job-configs")) {
 			for _, jobs := range []map[string]fakeProperties{d.pruneJobs, d.verifyJobs} {
 				for id, job := range jobs {
@@ -350,7 +415,6 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 				}
 			}
 		}
-		destroy := fakeBool(params.Get("destroy-data"))
 		upid := d.startTaskLocked("delete-datastore", name, func() string {
 			props["maintenance-mode"] = pbsclient.MaintenanceDelete
 			failure := d.failDelete
@@ -362,9 +426,10 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 				return "WARNINGS: 1"
 			}
 			delete(d.datastores, name)
+			delete(d.mounted, name)
 			if destroy {
-				delete(d.chunkStores, props["path"].(string))
-				delete(d.backups, props["path"].(string))
+				delete(d.chunkStores, chunkStoreKey(props))
+				delete(d.backups, chunkStoreKey(props))
 			}
 			return "OK"
 		})

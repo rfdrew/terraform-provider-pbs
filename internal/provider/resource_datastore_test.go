@@ -303,7 +303,6 @@ func TestDatastoreResourceImport(t *testing.T) {
 		"tuning":            "gc-atime-safety-check=0,unknown-option=1",
 	})
 	datastores.addDatastore("s3", fakeProperties{"path": "/mnt/cache", "backend": "type=s3,client=minio,bucket=pbs"})
-	datastores.addDatastore("usb", fakeProperties{"path": "usb", "backing-device": "6f8a4d9e-2b1c-4e3f-9a7b-5c6d7e8f9a0b"})
 
 	for name, inst := range map[string]*resourceInstance{
 		"id":       h.importByID(t, "pbs_datastore", "store1"),
@@ -316,15 +315,13 @@ func TestDatastoreResourceImport(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"s3", "usb"} {
-		resp := h.importResource(t, "pbs_datastore", name, nil)
-		requireNoProtocolErrors(t, resp.Diagnostics)
-		imported := resp.ImportedResources[0]
-		read := h.read(t, &resourceInstance{typeName: "pbs_datastore", state: h.decodeResource(t, "pbs_datastore", imported.State), identity: imported.Identity})
-		requireProtocolErrorContaining(t, read.Diagnostics, "manages datastores in a directory only")
-	}
+	resp := h.importResource(t, "pbs_datastore", "s3", nil)
+	requireNoProtocolErrors(t, resp.Diagnostics)
+	imported := resp.ImportedResources[0]
+	read := h.read(t, &resourceInstance{typeName: "pbs_datastore", state: h.decodeResource(t, "pbs_datastore", imported.State), identity: imported.Identity})
+	requireProtocolErrorContaining(t, read.Diagnostics, "is on S3 object storage")
 
-	resp := h.importResource(t, "pbs_datastore", "no/such", nil)
+	resp = h.importResource(t, "pbs_datastore", "no/such", nil)
 	requireProtocolErrorContaining(t, resp.Diagnostics, "Import a PBS datastore by its name")
 }
 
@@ -335,6 +332,10 @@ func TestDatastoreResourceValidation(t *testing.T) {
 		want  string
 	}{
 		"relative path":       {map[string]any{"name": "store1", "path": "datastore"}, "must be an absolute path"},
+		"absolute on device":  {map[string]any{"name": "store1", "path": "/usb", "backing_device": testDeviceUUID}, "relative to the root"},
+		"leaving the device":  {map[string]any{"name": "store1", "path": "a/../..", "backing_device": testDeviceUUID}, "relative to the root"},
+		"upper-case UUID":     {map[string]any{"name": "store1", "path": "usb", "backing_device": strings.ToUpper(testDeviceUUID)}, "UUID of a file system"},
+		"gc without device":   {map[string]any{"name": "store1", "path": "/mnt/s1", "gc_on_unmount": true}, "needs backing_device"},
 		"root path":           {map[string]any{"name": "store1", "path": "/"}, "must be an absolute path"},
 		"short name":          {map[string]any{"name": "s1", "path": "/mnt/s1"}, "name"},
 		"empty tuning":        {map[string]any{"name": "store1", "path": "/mnt/s1", "tuning": map[string]any{}}, "must set at least one attribute"},

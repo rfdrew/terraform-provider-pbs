@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -52,6 +53,9 @@ type datastoreModel struct {
 	Notify           types.Object `tfsdk:"notify"`
 	Tuning           types.Object `tfsdk:"tuning"`
 	MaintenanceMode  types.Object `tfsdk:"maintenance_mode"`
+	BackingDevice    types.String `tfsdk:"backing_device"`
+	GCOnUnmount      types.Bool   `tfsdk:"gc_on_unmount"`
+	MountStatus      types.String `tfsdk:"mount_status"`
 	ReuseDatastore   types.Bool   `tfsdk:"reuse_datastore"`
 	DestroyData      types.Bool   `tfsdk:"destroy_data"`
 	KeepJobConfigs   types.Bool   `tfsdk:"keep_job_configs"`
@@ -60,7 +64,8 @@ type datastoreModel struct {
 // datastoreDeletable are the properties of a datastore that this resource
 // manages and PBS lets an update delete.
 var datastoreDeletable = []string{
-	"comment", "gc-schedule", "verify-new", "notify-user", "notify", "notification-mode", "tuning", "maintenance-mode",
+	"comment", "gc-schedule", "gc-on-unmount", "verify-new", "notify-user", "notify", "notification-mode", "tuning",
+	"maintenance-mode",
 }
 
 // Notification modes. PBS 4.0 made notification-system the default; a
@@ -94,7 +99,26 @@ var (
 )
 
 // Privileges the datastore resource needs, for error messages.
-const datastoreAllocatePrivilege = "Datastore.Allocate on /datastore"
+const (
+	datastoreAllocatePrivilege = "Datastore.Allocate on /datastore"
+	// A removable datastore needs Sys.Modify on /system/disks too, to be
+	// created, mounted or destroyed.
+	removableDatastorePrivilege = datastoreAllocatePrivilege + " and Sys.Modify on /system/disks"
+)
+
+// allocatePrivilege names what creating or destroying the datastore of m
+// needs, for errors.
+func (m datastoreModel) allocatePrivilege() string {
+	if m.BackingDevice.ValueString() != "" {
+		return removableDatastorePrivilege
+	}
+	return datastoreAllocatePrivilege
+}
+
+// filesystemUUIDPattern is the UUID of a file system, as PBS accepts it for
+// a removable datastore's backing device: lower-case hexadecimal digits in
+// groups of 8, 4, 4, 4 and 12.
+var filesystemUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
 // datastorePrivilege names a privilege on one datastore, for errors.
 func datastorePrivilege(privilege, name string) string {
@@ -119,9 +143,9 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 	}
 
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a Proxmox Backup Server datastore in a directory: where backups are stored, " +
-			"as a chunk store that deduplicates them, and how PBS looks after it. Mount the disk outside Terraform; " +
-			"PBS creates the directory if it is missing.\n\n" +
+		MarkdownDescription: "Manages a Proxmox Backup Server datastore in a directory, or on a removable disk: " +
+			"where backups are stored, as a chunk store that deduplicates them, and how PBS looks after it. Mount " +
+			"the disk of a datastore in a directory outside Terraform; PBS creates the directory if it is missing.\n\n" +
 			"Creating a datastore is a PBS task that creates 65536 chunk directories, which takes a few seconds; " +
 			"the provider waits for it, up to the provider's `task_timeout`, and reports the task's error should it " +
 			"fail. PBS creates the datastore in an empty directory, or one with dotfiles and `lost+found` only; " +
@@ -131,13 +155,25 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"`gc_schedule` frees the space pruned backups held.\n\n" +
 			"~> **Destroying a datastore deletes its jobs and access rights.** Unless `keep_job_configs` is set, PBS " +
 			"deletes the datastore's prune, verify, sync and tape backup jobs and every ACL entry on " +
-			"`/datastore/<name>` with it — also when a change of `name` or `path` replaces the datastore. " +
-			"Terraform creates the ones it manages again: in the same apply those that refer to a new `name`, " +
-			"on the next apply the others. The backups stay on disk unless `destroy_data` is set, and a " +
+			"`/datastore/<name>` with it — also when a change of `name`, `path` or `backing_device` replaces the " +
+			"datastore. Terraform creates the ones it manages again: in the same apply those that refer to a new " +
+			"`name`, on the next apply the others. The backups stay on disk unless `destroy_data` is set, and a " +
 			"datastore created again in the same directory then needs `reuse_datastore`.\n\n" +
-			"Datastores on S3 object storage and removable datastores are not supported yet, and cannot be " +
-			"imported. Managing datastores needs `" + datastoreAllocatePrivilege + "` to create and destroy them, " +
-			"`Datastore.Modify` on the datastore to change it and `Datastore.Audit` to read it.",
+			"A **removable datastore** lives on a disk that is connected only at times, such as a USB disk for " +
+			"backups kept offsite: `backing_device` names the file system on it by UUID, and `path` is a directory " +
+			"on that file system, which PBS mounts at `/mnt/datastore/<name>`. PBS mounts it when it creates the " +
+			"datastore, which needs the disk connected, when the disk is plugged in, and when told to — in the " +
+			"web interface, or with `proxmox-backup-manager datastore mount <name>` —; it unmounts it when told " +
+			"to, or after a sync job set to unmount when done. `mount_status` shows which. The provider changes " +
+			"the datastore's settings whether it is mounted or not, but `destroy_data` needs it mounted, and so " +
+			"does creating or destroying its namespaces.\n\n" +
+			"Namespaces live in the datastore's directory: a datastore renamed with `reuse_datastore` keeps them, " +
+			"and one moved to another `path` or `backing_device` starts without them. `pbs_namespace` says what " +
+			"that means for the namespaces Terraform manages.\n\n" +
+			"Datastores on S3 object storage are not supported yet, and cannot be imported. Managing datastores " +
+			"needs `" + datastoreAllocatePrivilege + "` to create and destroy them — and, for a removable " +
+			"datastore, `Sys.Modify` on `/system/disks` —, `Datastore.Modify` on the datastore to change it and " +
+			"`Datastore.Audit` to read it.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -154,9 +190,35 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"path": schema.StringAttribute{
 				Required: true,
 				MarkdownDescription: "Absolute path of the directory, such as `/mnt/datastore/store1`. It must not " +
-					"lie inside another datastore's directory, nor contain one. Changing it replaces the datastore.",
-				Validators:    []validator.String{absolutePathValidator()},
+					"lie inside another datastore's directory, nor contain one. For a removable datastore, the " +
+					"directory's path on the device's file system instead, relative to its root, such as `store1` " +
+					"or `pbs/store1`; PBS creates it if it is missing. Changing it replaces the datastore.",
+				Validators:    []validator.String{datastorePathValidator()},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"backing_device": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "Makes the datastore removable: the UUID of the file system on the removable " +
+					"disk that holds it, as `blkid` or `lsblk -f` shows it, such as " +
+					"`0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d`. The disk must be connected to the PBS host when the " +
+					"datastore is created. Changing it replaces the datastore.",
+				Validators: []validator.String{stringvalidator.RegexMatches(filesystemUUIDPattern,
+					"must be the UUID of a file system in lower case, such as 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"gc_on_unmount": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				MarkdownDescription: "Whether PBS runs garbage collection on a removable datastore before it " +
+					"unmounts it, so that the space pruned backups held is freed while the disk is connected. " +
+					"Defaults to `false`. Needs `backing_device` and PBS 4.2 or newer.",
+			},
+			"mount_status": schema.StringAttribute{
+				Computed: true,
+				MarkdownDescription: "Whether the file system of a removable datastore is mounted: `mounted` or " +
+					"`notmounted`. `nonremovable` for a datastore without `backing_device`.",
+				PlanModifiers: []planmodifier.String{nonRemovableMountStatus{}},
 			},
 			"comment": schema.StringAttribute{
 				Optional:            true,
@@ -309,14 +371,58 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 	}
 }
 
-// absolutePathValidator accepts an absolute path below /, on one line.
-func absolutePathValidator() validator.String {
+// datastorePathValidator accepts the path of a datastore's directory, of
+// either kind: at most 4096 characters, on one line. Whether it must be
+// absolute or relative depends on backing_device, which ValidateConfig
+// checks.
+func datastorePathValidator() validator.String {
 	return stringCheck{
-		description: "must be an absolute path below /, such as /mnt/datastore/store1, of at most 4096 characters without control characters",
+		description: "must be a path of at most 4096 characters without control characters",
 		check: func(s string) bool {
-			return strings.HasPrefix(s, "/") && strings.Trim(s, "/") != "" && len(s) <= 4096 &&
-				!strings.ContainsFunc(s, unicode.IsControl)
+			return s != "" && len(s) <= 4096 && !strings.ContainsFunc(s, unicode.IsControl)
 		},
+	}
+}
+
+// isAbsoluteDatastorePath reports whether s is an absolute path below /, as
+// the directory of a datastore that is not removable.
+func isAbsoluteDatastorePath(s string) bool {
+	return strings.HasPrefix(s, "/") && strings.Trim(s, "/") != ""
+}
+
+// isOnDevicePath reports whether s is a path relative to the root of a file
+// system that stays inside it, as the directory of a removable datastore.
+func isOnDevicePath(s string) bool {
+	if strings.HasPrefix(s, "/") {
+		return false
+	}
+	for part := range strings.SplitSeq(s, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// nonRemovableMountStatus plans mount_status as nonremovable for a datastore
+// without backing_device, which is never mounted or unmounted. A removable
+// datastore's is left as Terraform plans it: unknown when the datastore
+// changes, since PBS mounts and unmounts it on its own.
+type nonRemovableMountStatus struct{}
+
+func (nonRemovableMountStatus) Description(_ context.Context) string {
+	return "nonremovable for a datastore without backing_device"
+}
+
+func (m nonRemovableMountStatus) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (nonRemovableMountStatus) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	var backingDevice types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("backing_device"), &backingDevice)...)
+	if backingDevice.IsNull() {
+		resp.PlanValue = types.StringValue(pbsclient.MountStatusNonRemovable)
 	}
 }
 
@@ -328,13 +434,34 @@ func (r *datastoreResource) Configure(_ context.Context, req resource.ConfigureR
 	r.data = providerDataFrom(req.ProviderData, &resp.Diagnostics)
 }
 
-// ValidateConfig warns about the settings of mails that the notification
-// system ignores.
+// ValidateConfig checks path against the kind of datastore backing_device
+// makes it, refuses gc_on_unmount for a datastore that is not removable, and
+// warns about the settings of mails that the notification system ignores.
 func (r *datastoreResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var config datastoreModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	if resp.Diagnostics.HasError() || config.NotificationMode.IsUnknown() ||
-		config.NotificationMode.ValueString() == notificationModeLegacy {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !config.BackingDevice.IsUnknown() && !config.Path.IsNull() && !config.Path.IsUnknown() {
+		dir := config.Path.ValueString()
+		switch removable := !config.BackingDevice.IsNull(); {
+		case !removable && !isAbsoluteDatastorePath(dir):
+			resp.Diagnostics.AddAttributeError(path.Root("path"), "Invalid Attribute Value",
+				fmt.Sprintf("Attribute path must be an absolute path below /, such as /mnt/datastore/store1, got: %q. "+
+					"Only a removable datastore, with backing_device, has a relative path, on its device.", dir))
+		case removable && !isOnDevicePath(dir):
+			resp.Diagnostics.AddAttributeError(path.Root("path"), "Invalid Attribute Value",
+				fmt.Sprintf("Attribute path of a removable datastore must be a path relative to the root of its "+
+					"device's file system, such as store1 or pbs/store1, without \"..\", got: %q.", dir))
+		}
+	}
+	if config.BackingDevice.IsNull() && config.GCOnUnmount.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("gc_on_unmount"), "Invalid Attribute Combination",
+			"gc_on_unmount = true needs backing_device: only a removable datastore is unmounted.")
+	}
+
+	if config.NotificationMode.IsUnknown() || config.NotificationMode.ValueString() == notificationModeLegacy {
 		return
 	}
 	for _, setting := range []struct {
@@ -369,13 +496,18 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 			r.data.requireRelease(&resp.Diagnostics, path.Root("tuning").AtName(name), attributes[name], pbs41)
 		}
 	}
+	// gc_on_unmount = false, its default, is never sent.
+	if plan.GCOnUnmount.IsUnknown() || plan.GCOnUnmount.ValueBool() {
+		r.data.requireRelease(&resp.Diagnostics, path.Root("gc_on_unmount"), plan.GCOnUnmount, pbs42)
+	}
 
 	if req.State.Raw.IsNull() {
 		return
 	}
 	var state datastoreModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() || (plan.Name.Equal(state.Name) && plan.Path.Equal(state.Path)) {
+	if resp.Diagnostics.HasError() ||
+		(plan.Name.Equal(state.Name) && plan.Path.Equal(state.Path) && plan.BackingDevice.Equal(state.BackingDevice)) {
 		return
 	}
 
@@ -384,8 +516,8 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	// behind without destroy_data, and PBS refuses to create it there unless
 	// it reuses that — after the old datastore, its jobs and its ACL entries
 	// are already gone.
-	if !plan.Name.IsUnknown() && plan.Path.Equal(state.Path) && !state.DestroyData.ValueBool() &&
-		!plan.ReuseDatastore.IsUnknown() && !plan.ReuseDatastore.ValueBool() {
+	if !plan.Name.IsUnknown() && plan.Path.Equal(state.Path) && plan.BackingDevice.Equal(state.BackingDevice) &&
+		!state.DestroyData.ValueBool() && !plan.ReuseDatastore.IsUnknown() && !plan.ReuseDatastore.ValueBool() {
 		resp.Diagnostics.AddAttributeError(path.Root("reuse_datastore"), "Renaming the datastore needs reuse_datastore",
 			fmt.Sprintf("PBS cannot rename a datastore, so this plan destroys datastore %q and creates %q in the same "+
 				"directory, %s. Destroying it with destroy_data = false, as in state, leaves its chunk store there, "+
@@ -402,7 +534,10 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 			"makes PBS delete its prune, verify, sync and tape backup jobs and every ACL entry on %s, also those "+
 			"Terraform does not manage. Terraform creates the jobs and entries it manages again: in this apply "+
 			"those whose datastore or path refers to the new name, on the next apply the others. To keep them, set "+
-			"keep_job_configs = true and apply that first.",
+			"keep_job_configs = true and apply that first. Namespaces stay with the old chunk store: a datastore "+
+			"renamed with reuse_datastore keeps them, but destroying its pbs_namespace resources that hold backups "+
+			"fails — take those out of state first —, and one in a new place starts without them, which Terraform "+
+			"creates again on the next apply.",
 			state.Name.ValueString(), "/datastore/"+state.Name.ValueString()))
 }
 
@@ -411,6 +546,7 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 var datastoreDefaults = datastoreModel{
 	Comment:          types.StringNull(),
 	GCSchedule:       types.StringNull(),
+	GCOnUnmount:      types.BoolValue(false),
 	VerifyNew:        types.BoolValue(false),
 	NotificationMode: types.StringValue(notificationModeSystem),
 	NotifyUser:       types.StringNull(),
@@ -423,6 +559,7 @@ var datastoreDefaults = datastoreModel{
 func (m *datastoreModel) changes(prior datastoreModel, c *propertyChanges) {
 	c.String("comment", m.Comment, prior.Comment)
 	c.String("gc-schedule", m.GCSchedule, prior.GCSchedule)
+	c.BoolDefault("gc-on-unmount", m.GCOnUnmount, prior.GCOnUnmount, false)
 	c.BoolDefault("verify-new", m.VerifyNew, prior.VerifyNew, false)
 	c.StringDefault("notification-mode", m.NotificationMode, prior.NotificationMode, notificationModeSystem)
 	c.String("notify-user", m.NotifyUser, prior.NotifyUser)
@@ -431,25 +568,25 @@ func (m *datastoreModel) changes(prior datastoreModel, c *propertyChanges) {
 	c.PropertyString("maintenance-mode", m.MaintenanceMode, prior.MaintenanceMode, datastoreMaintenanceFormat)
 }
 
-// fromDatastore records a datastore as PBS reports it. The name is the one it
-// was looked up by. A maintenance mode PBS set itself, for an operation in
-// progress, leaves the recorded one as it was, and so do the attributes that
-// exist only in Terraform, which get their defaults after an import.
-func (m *datastoreModel) fromDatastore(name string, ds pbsclient.Datastore, diags *diag.Diagnostics) {
-	if backend := ds.BackendType(); backend != pbsclient.BackendFilesystem || ds.BackingDevice != "" {
-		kind := "on S3 object storage"
-		if ds.BackingDevice != "" {
-			kind = "removable"
-		}
+// fromDatastore records a datastore as PBS reports it, with its mount status.
+// The name is the one it was looked up by. A maintenance mode PBS set itself,
+// for an operation in progress, leaves the recorded one as it was, and so do
+// the attributes that exist only in Terraform, which get their defaults after
+// an import.
+func (m *datastoreModel) fromDatastore(name string, ds pbsclient.Datastore, mountStatus string, diags *diag.Diagnostics) {
+	if backend := ds.BackendType(); backend != pbsclient.BackendFilesystem {
 		diags.AddError("Unsupported PBS datastore",
-			fmt.Sprintf("Datastore %q is %s. pbs_datastore manages datastores in a directory only, so far, and "+
-				"cannot import it.", name, kind))
+			fmt.Sprintf("Datastore %q is on S3 object storage. pbs_datastore manages datastores in a directory and "+
+				"removable ones only, so far, and cannot import it.", name))
 		return
 	}
 
 	m.ID = types.StringValue(name)
 	m.Name = types.StringValue(name)
 	m.Path = types.StringValue(ds.Path)
+	m.BackingDevice = stringOrNull(ds.BackingDevice)
+	m.GCOnUnmount = boolOr(ds.GCOnUnmount, false)
+	m.MountStatus = stringOrNull(mountStatus)
 	m.Comment = stringOrNull(ds.Comment)
 	m.GCSchedule = stringOrNull(ds.GCSchedule)
 	m.VerifyNew = boolOr(ds.VerifyNew, false)
@@ -497,6 +634,9 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 	params := changes.Values()
 	params.Set("name", name)
 	params.Set("path", plan.Path.ValueString())
+	if device := plan.BackingDevice.ValueString(); device != "" {
+		params.Set("backing-device", device)
+	}
 	if plan.ReuseDatastore.ValueBool() {
 		params.Set("reuse-datastore", "true")
 	}
@@ -517,6 +657,7 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 	ds, err := client.WaitForDatastore(ctx, name)
 	if err != nil {
 		plan.ID = types.StringValue(name)
+		plan.unknownMountStatusToNull()
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
 		resp.Diagnostics.AddWarning("Unable to read PBS datastore back after creation",
@@ -524,9 +665,29 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 				"failed; the next plan reads it again. %s", name, apiErrorDetail(client, datastorePrivilege("Datastore.Audit", name), err)))
 		return
 	}
-	plan.fromDatastore(name, ds, &resp.Diagnostics)
+	plan.fromDatastore(name, ds, r.mountStatus(ctx, ds, &resp.Diagnostics), &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
+}
+
+// mountStatus returns the mount status of a datastore, or "" — null in state —
+// with a warning when PBS does not say.
+func (r *datastoreResource) mountStatus(ctx context.Context, ds pbsclient.Datastore, diags *diag.Diagnostics) string {
+	status, err := r.data.client.DatastoreMountStatus(ctx, ds)
+	if err != nil {
+		diags.AddWarning("Unable to read whether the PBS datastore is mounted",
+			fmt.Sprintf("Reading the mount status of removable datastore %q failed, so mount_status is left "+
+				"empty. %s", ds.Name, apiErrorDetail(r.data.client, datastorePrivilege("Datastore.Audit", ds.Name), err)))
+	}
+	return status
+}
+
+// unknownMountStatusToNull leaves mount_status null rather than unknown, for
+// state written without reading the datastore back.
+func (m *datastoreModel) unknownMountStatusToNull() {
+	if m.MountStatus.IsUnknown() {
+		m.MountStatus = types.StringNull()
+	}
 }
 
 // datastoreCreateErrorDetail explains why creating a datastore failed, with
@@ -546,12 +707,16 @@ func datastoreCreateErrorDetail(client *pbsclient.Client, plan datastoreModel, e
 		return fmt.Sprintf("PBS did not create datastore %q: reuse_datastore is set, but %s does not hold a chunk "+
 			"store PBS can open, or its owner or permissions are wrong. Leave reuse_datastore out for a new, "+
 			"empty directory. %s", name, dir, err)
+	case errors.As(err, &taskErr) && strings.Contains(taskErr.ExitStatus, "mounting to tmp path failed"):
+		return fmt.Sprintf("PBS did not create removable datastore %q: it could not mount the file system with UUID "+
+			"%s. The disk must be connected to the PBS host and hold a file system with that UUID, which blkid "+
+			"shows. %s", name, plan.BackingDevice.ValueString(), err)
 	case errors.As(err, &taskErr):
 		return fmt.Sprintf("PBS did not create datastore %q in %s; its task failed. PBS may have left the chunk "+
 			"store it had begun in the directory, which a new attempt then needs reuse_datastore for. The task log "+
 			"in PBS has the details. %s", name, dir, err)
 	}
-	return apiErrorDetail(client, datastoreAllocatePrivilege, err)
+	return apiErrorDetail(client, plan.allocatePrivilege(), err)
 }
 
 // isUsedDirectory reports whether a create-datastore task failed because the
@@ -588,7 +753,7 @@ func (r *datastoreResource) Read(ctx context.Context, req resource.ReadRequest, 
 	if maintenance := maintenanceType(ds.MaintenanceMode); pbsclient.IsInternalMaintenance(maintenance) {
 		tflog.Info(ctx, "PBS has the datastore in a maintenance mode of its own", map[string]any{"name": name, "type": maintenance})
 	}
-	state.fromDatastore(name, ds, &resp.Diagnostics)
+	state.fromDatastore(name, ds, r.mountStatus(ctx, ds, &resp.Diagnostics), &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -625,6 +790,7 @@ func (r *datastoreResource) Update(ctx context.Context, req resource.UpdateReque
 
 	ds, err := client.GetDatastore(ctx, name)
 	if err != nil {
+		plan.unknownMountStatusToNull()
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
 		resp.Diagnostics.AddError("Unable to read PBS datastore back after update",
@@ -632,7 +798,7 @@ func (r *datastoreResource) Update(ctx context.Context, req resource.UpdateReque
 				name, apiErrorDetail(client, datastorePrivilege("Datastore.Audit", name), err)))
 		return
 	}
-	plan.fromDatastore(name, ds, &resp.Diagnostics)
+	plan.fromDatastore(name, ds, r.mountStatus(ctx, ds, &resp.Diagnostics), &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
 }
@@ -673,8 +839,14 @@ func (r *datastoreResource) Delete(ctx context.Context, req resource.DeleteReque
 			fmt.Sprintf("PBS's task to delete datastore %q failed, and PBS keeps the datastore in its \"delete\" "+
 				"maintenance mode until a deletion succeeds; destroying it again retries. A datastore in use — by "+
 				"a running backup, say — cannot be deleted. %s", name, err))
+	case strings.Contains(err.Error(), "unless the datastore is mounted"):
+		resp.Diagnostics.AddError("Unable to delete PBS datastore",
+			fmt.Sprintf("Removable datastore %q is not mounted, and PBS deletes its data, as destroy_data = true in "+
+				"state asks, only while it is. Connect the disk and mount the datastore — in the web interface, or "+
+				"with `proxmox-backup-manager datastore mount %s` —, or set destroy_data = false and apply that "+
+				"first to keep the data on the disk. %s", name, name, err))
 	default:
-		resp.Diagnostics.AddError("Unable to delete PBS datastore", apiErrorDetail(client, datastoreAllocatePrivilege, err))
+		resp.Diagnostics.AddError("Unable to delete PBS datastore", apiErrorDetail(client, state.allocatePrivilege(), err))
 	}
 }
 
