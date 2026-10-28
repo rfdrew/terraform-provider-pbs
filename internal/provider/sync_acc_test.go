@@ -212,18 +212,20 @@ data "pbs_verify_jobs" "target" {
 
   depends_on = [pbs_verify_job.target]
 }
-
-data "pbs_prune_job" "target" {
-  id = pbs_prune_job.target.id
-
-  # The ID is known from the configuration, so without this the data source
-  # would be read while planning, also after the job went with its
-  # datastore, and fail before the apply could create it again.
-  depends_on = [pbs_prune_job.target]
-}
 `, target, dir, pullID, source, pushID, localID, pullExtra, verifyID, pruneID)
 	}
-	initial := config("", "")
+	// pruneLookup reads the prune job by its ID. The steps around the
+	// deletion of the target datastore leave it out: the plan of a PlanOnly
+	// step, like the plan after every step, runs without a refresh first,
+	// while state still holds the job PBS deleted, so Terraform reads the
+	// data source then, whatever its depends_on, and the read fails.
+	pruneLookup := `
+data "pbs_prune_job" "target" {
+  id = pbs_prune_job.target.id
+}
+`
+	initial := config("", "") + pruneLookup
+	withoutLookup := config("", "")
 
 	acc.Test(t, acc.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -279,7 +281,7 @@ data "pbs_prune_job" "target" {
   resync_corrupt  = true
   burst_in        = "20 MiB"
   comment         = "terraform-provider-pbs acceptance tests"
-  `+newer),
+  `+newer) + pruneLookup,
 				Check: acc.ComposeAggregateTestCheckFunc(
 					acc.TestCheckResourceAttr("pbs_remote.self", "port", "8007"),
 					acc.TestCheckResourceAttr("pbs_sync_job.pull", "ns", "pulled"),
@@ -341,13 +343,16 @@ data "pbs_prune_job" "target" {
 						t.Errorf("the push job did not survive: %v", err)
 					}
 				},
-				Config:             initial,
+				Config:             withoutLookup,
 				PlanOnly:           true,
 				ExpectNonEmptyPlan: true,
 			},
 			{
-				Config: initial,
-				Check:  acc.TestCheckResourceAttr("pbs_sync_job.local", "group_filter.#", "2"),
+				Config: withoutLookup,
+				Check: acc.ComposeAggregateTestCheckFunc(
+					acc.TestCheckResourceAttr("pbs_sync_job.local", "group_filter.#", "2"),
+					acc.TestCheckResourceAttr("pbs_prune_job.target", "keep.last", "3"),
+				),
 			},
 		},
 	})
