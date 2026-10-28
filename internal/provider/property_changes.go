@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -101,6 +102,29 @@ func int64WithoutDefault(v types.Int64, def int64) types.Int64 {
 // key repeated, from a set of strings. PBS replaces the whole array.
 func (c *propertyChanges) StringSet(name string, plan, prior types.Set) {
 	c.changeValues(name, plan, prior, func() []string { return sortedStrings(plan.Elements()) })
+}
+
+// SpaceSeparated records the change of a list PBS keeps in one string, such
+// as the scopes of an OpenID realm, from a set or list of strings: PBS gets
+// the elements separated by spaces, a list's in order and a set's sorted.
+func (c *propertyChanges) SpaceSeparated(name string, plan, prior attr.Value) {
+	c.change(name, plan, prior, func() string {
+		var elements []string
+		switch v := plan.(type) {
+		case types.Set:
+			elements = sortedStrings(v.Elements())
+		case types.List:
+			for _, e := range v.Elements() {
+				if s, ok := e.(types.String); ok && !s.IsNull() && !s.IsUnknown() {
+					elements = append(elements, s.ValueString())
+				}
+			}
+		default:
+			c.diags.AddError("Unexpected planned value",
+				fmt.Sprintf("The PBS property %q was planned as %T, not as a set or list of strings. This is a bug in the provider.", name, plan))
+		}
+		return strings.Join(elements, " ")
+	})
 }
 
 // PropertyString records the change of a property string, which the schema

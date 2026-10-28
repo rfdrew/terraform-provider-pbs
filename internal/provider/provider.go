@@ -513,6 +513,7 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewNodeCertificateResource,
 		NewRemoteResource,
 		NewSyncJobResource,
+		NewOpenIDRealmResource,
 	}
 }
 
@@ -544,6 +545,7 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewVerifyJobsDataSource,
 		NewPruneJobDataSource,
 		NewPruneJobsDataSource,
+		NewRealmsDataSource,
 	}
 }
 

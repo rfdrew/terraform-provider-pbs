@@ -9,7 +9,8 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 > `DaveTCode/pbs`, which manages Altair PBS Professional.
 
 **Status: early development.** Users, API tokens and ACL entries
-(`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores — removable ones too —
+(`pbs_user`, `pbs_api_token`, `pbs_acl`), OpenID Connect realms
+(`pbs_realm_openid`), datastores — removable ones too —
 with their namespaces and their prune and verify jobs (`pbs_datastore`,
 `pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`) and
 notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
@@ -17,8 +18,8 @@ notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
 `pbs_node_certificate`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-the datastores, their namespaces, usage and garbage collection, the
-notification targets and matcher fields, besides `pbs_version`,
+the realms, the datastores, their namespaces, usage and garbage
+collection, the notification targets and matcher fields, besides `pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
 `pbs_sync_job`) copy backups between servers, with data sources for them and
 for the other jobs. The guide
