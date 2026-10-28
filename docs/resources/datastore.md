@@ -3,24 +3,30 @@
 page_title: "pbs_datastore Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Manages a Proxmox Backup Server datastore in a directory: where backups are stored, as a chunk store that deduplicates them, and how PBS looks after it. Mount the disk outside Terraform; PBS creates the directory if it is missing.
+  Manages a Proxmox Backup Server datastore in a directory, or on a removable disk: where backups are stored, as a chunk store that deduplicates them, and how PBS looks after it. Mount the disk of a datastore in a directory outside Terraform; PBS creates the directory if it is missing.
   Creating a datastore is a PBS task that creates 65536 chunk directories, which takes a few seconds; the provider waits for it, up to the provider's task_timeout, and reports the task's error should it fail. PBS creates the datastore in an empty directory, or one with dotfiles and lost+found only; a directory that already holds a chunk store — one a datastore destroyed without destroy_data left behind — needs reuse_datastore, which keeps its backups.
   Retention is not set here: a pbs_prune_job prunes the datastore, and a pbs_verify_job verifies it. gc_schedule frees the space pruned backups held.
-  ~> Destroying a datastore deletes its jobs and access rights. Unless keep_job_configs is set, PBS deletes the datastore's prune, verify, sync and tape backup jobs and every ACL entry on /datastore/<name> with it — also when a change of name or path replaces the datastore. Terraform creates the ones it manages again: in the same apply those that refer to a new name, on the next apply the others. The backups stay on disk unless destroy_data is set, and a datastore created again in the same directory then needs reuse_datastore.
-  Datastores on S3 object storage and removable datastores are not supported yet, and cannot be imported. Managing datastores needs Datastore.Allocate on /datastore to create and destroy them, Datastore.Modify on the datastore to change it and Datastore.Audit to read it.
+  ~> Destroying a datastore deletes its jobs and access rights. Unless keep_job_configs is set, PBS deletes the datastore's prune, verify, sync and tape backup jobs and every ACL entry on /datastore/<name> with it — also when a change of name, path or backing_device replaces the datastore. Terraform creates the ones it manages again: in the same apply those that refer to a new name, on the next apply the others. The backups stay on disk unless destroy_data is set, and a datastore created again in the same directory then needs reuse_datastore.
+  A removable datastore lives on a disk that is connected only at times, such as a USB disk for backups kept offsite: backing_device names the file system on it by UUID, and path is a directory on that file system, which PBS mounts at /mnt/datastore/<name>. PBS mounts it when it creates the datastore, which needs the disk connected, when the disk is plugged in, and when told to — in the web interface, or with proxmox-backup-manager datastore mount <name> —; it unmounts it when told to, or after a sync job set to unmount when done. mount_status shows which. The provider changes the datastore's settings whether it is mounted or not, but destroy_data needs it mounted, and so does creating or destroying its namespaces.
+  Namespaces live in the datastore's directory: a datastore renamed with reuse_datastore keeps them, and one moved to another path or backing_device starts without them. pbs_namespace says what that means for the namespaces Terraform manages.
+  Datastores on S3 object storage are not supported yet, and cannot be imported. Managing datastores needs Datastore.Allocate on /datastore to create and destroy them — and, for a removable datastore, Sys.Modify on /system/disks —, Datastore.Modify on the datastore to change it and Datastore.Audit to read it.
 ---
 
 # pbs_datastore (Resource)
 
-Manages a Proxmox Backup Server datastore in a directory: where backups are stored, as a chunk store that deduplicates them, and how PBS looks after it. Mount the disk outside Terraform; PBS creates the directory if it is missing.
+Manages a Proxmox Backup Server datastore in a directory, or on a removable disk: where backups are stored, as a chunk store that deduplicates them, and how PBS looks after it. Mount the disk of a datastore in a directory outside Terraform; PBS creates the directory if it is missing.
 
 Creating a datastore is a PBS task that creates 65536 chunk directories, which takes a few seconds; the provider waits for it, up to the provider's `task_timeout`, and reports the task's error should it fail. PBS creates the datastore in an empty directory, or one with dotfiles and `lost+found` only; a directory that already holds a chunk store — one a datastore destroyed without `destroy_data` left behind — needs `reuse_datastore`, which keeps its backups.
 
 Retention is not set here: a `pbs_prune_job` prunes the datastore, and a `pbs_verify_job` verifies it. `gc_schedule` frees the space pruned backups held.
 
-~> **Destroying a datastore deletes its jobs and access rights.** Unless `keep_job_configs` is set, PBS deletes the datastore's prune, verify, sync and tape backup jobs and every ACL entry on `/datastore/<name>` with it — also when a change of `name` or `path` replaces the datastore. Terraform creates the ones it manages again: in the same apply those that refer to a new `name`, on the next apply the others. The backups stay on disk unless `destroy_data` is set, and a datastore created again in the same directory then needs `reuse_datastore`.
+~> **Destroying a datastore deletes its jobs and access rights.** Unless `keep_job_configs` is set, PBS deletes the datastore's prune, verify, sync and tape backup jobs and every ACL entry on `/datastore/<name>` with it — also when a change of `name`, `path` or `backing_device` replaces the datastore. Terraform creates the ones it manages again: in the same apply those that refer to a new `name`, on the next apply the others. The backups stay on disk unless `destroy_data` is set, and a datastore created again in the same directory then needs `reuse_datastore`.
 
-Datastores on S3 object storage and removable datastores are not supported yet, and cannot be imported. Managing datastores needs `Datastore.Allocate on /datastore` to create and destroy them, `Datastore.Modify` on the datastore to change it and `Datastore.Audit` to read it.
+A **removable datastore** lives on a disk that is connected only at times, such as a USB disk for backups kept offsite: `backing_device` names the file system on it by UUID, and `path` is a directory on that file system, which PBS mounts at `/mnt/datastore/<name>`. PBS mounts it when it creates the datastore, which needs the disk connected, when the disk is plugged in, and when told to — in the web interface, or with `proxmox-backup-manager datastore mount <name>` —; it unmounts it when told to, or after a sync job set to unmount when done. `mount_status` shows which. The provider changes the datastore's settings whether it is mounted or not, but `destroy_data` needs it mounted, and so does creating or destroying its namespaces.
+
+Namespaces live in the datastore's directory: a datastore renamed with `reuse_datastore` keeps them, and one moved to another `path` or `backing_device` starts without them. `pbs_namespace` says what that means for the namespaces Terraform manages.
+
+Datastores on S3 object storage are not supported yet, and cannot be imported. Managing datastores needs `Datastore.Allocate on /datastore` to create and destroy them — and, for a removable datastore, `Sys.Modify` on `/system/disks` —, `Datastore.Modify` on the datastore to change it and `Datastore.Audit` to read it.
 
 ## Example Usage
 
@@ -48,6 +54,21 @@ resource "pbs_datastore" "store1" {
   # access to the datastore until it is removed again; "read-only" still
   # allows restores.
 }
+
+# A removable datastore on a USB disk, for backups kept offsite: the disk's
+# file system is named by its UUID, which `blkid` shows, and path is a
+# directory on it. The disk must be connected when the datastore is created.
+# PBS mounts the directory at /mnt/datastore/offsite then, and whenever the
+# disk is plugged in, and unmounts it when told to, for the disk to be taken
+# away.
+resource "pbs_datastore" "offsite" {
+  name           = "offsite"
+  path           = "pbs/offsite"
+  backing_device = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+  # Free the space of pruned backups before the disk leaves (PBS 4.2+).
+  gc_on_unmount = true
+}
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -56,12 +77,14 @@ resource "pbs_datastore" "store1" {
 ### Required
 
 - `name` (String) Datastore name, 3 to 32 characters: letters, digits, `_`, `.` and `-`, not starting with `.` or `-`. Changing it replaces the datastore.
-- `path` (String) Absolute path of the directory, such as `/mnt/datastore/store1`. It must not lie inside another datastore's directory, nor contain one. Changing it replaces the datastore.
+- `path` (String) Absolute path of the directory, such as `/mnt/datastore/store1`. It must not lie inside another datastore's directory, nor contain one. For a removable datastore, the directory's path on the device's file system instead, relative to its root, such as `store1` or `pbs/store1`; PBS creates it if it is missing. Changing it replaces the datastore.
 
 ### Optional
 
+- `backing_device` (String) Makes the datastore removable: the UUID of the file system on the removable disk that holds it, as `blkid` or `lsblk -f` shows it, such as `0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d`. The disk must be connected to the PBS host when the datastore is created. Changing it replaces the datastore.
 - `comment` (String) Free-form comment, up to 128 characters on one line.
 - `destroy_data` (Boolean) Whether destroying the datastore also deletes its directory and every backup in it. Defaults to `false`, which leaves them on disk, ready for `reuse_datastore`. Destroying uses the value in state: set it in an apply before the one that destroys or replaces the datastore.
+- `gc_on_unmount` (Boolean) Whether PBS runs garbage collection on a removable datastore before it unmounts it, so that the space pruned backups held is freed while the disk is connected. Defaults to `false`. Needs `backing_device` and PBS 4.2 or newer.
 - `gc_schedule` (String) When garbage collection runs, as a PBS calendar event such as `daily` or `sat 05:00`. Garbage collection frees the chunks no backup uses any more, after a prune: without a schedule, it runs only when started by hand, and pruned backups keep their space.
 - `keep_job_configs` (Boolean) Whether destroying the datastore keeps its prune, verify, sync and tape backup jobs and its ACL entries, which PBS deletes otherwise. Defaults to `false`. Like `destroy_data`, it is read from state.
 - `maintenance_mode` (Attributes) Puts the datastore into maintenance. PBS also sets maintenance modes of its own while it unmounts, refreshes or deletes a datastore; the provider does not report those as a change. (see [below for nested schema](#nestedatt--maintenance_mode))
@@ -75,6 +98,7 @@ resource "pbs_datastore" "store1" {
 ### Read-Only
 
 - `id` (String) Same value as `name`, present because Terraform requires an `id`.
+- `mount_status` (String) Whether the file system of a removable datastore is mounted: `mounted` or `notmounted`. `nonremovable` for a datastore without `backing_device`.
 
 <a id="nestedatt--maintenance_mode"></a>
 ### Nested Schema for `maintenance_mode`
@@ -146,8 +170,8 @@ import {
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# Datastores are imported by name. Only datastores in a directory can be
-# imported so far, not those on S3 object storage or removable ones.
+# Datastores are imported by name. Datastores in a directory and removable
+# ones can be imported so far, not those on S3 object storage.
 # reuse_datastore, destroy_data and keep_job_configs exist only in Terraform
 # and are false after an import; setting them later changes nothing on the
 # server.
