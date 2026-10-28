@@ -119,8 +119,11 @@ func IsNotFound(err error) bool {
 }
 
 // IsAlreadyExists reports whether PBS refused to create an object because one
-// with the same ID exists: 400 "user 'x' already exists." or "token 'x' for
-// user 'y' already exists.".
+// with the same ID exists: a 400 whose text ends in "already exists", such as
+// "user 'x' already exists.", "token 'x' for user 'y' already exists.",
+// "parameter verification failed - 'id': job 'x' already exists." or, for
+// notification endpoints and matchers, "Cannot create 'x', an entity with
+// the same name already exists".
 func IsAlreadyExists(err error) bool {
 	apiErr, ok := asError(err)
 	return ok && apiErr.StatusCode == http.StatusBadRequest &&

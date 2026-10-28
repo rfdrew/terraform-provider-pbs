@@ -8,11 +8,16 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 > `yavasura/pbs` and does not share state with them, and it is unrelated to
 > `DaveTCode/pbs`, which manages Altair PBS Professional.
 
-**Status: early development.** Users, API tokens and ACL entries can be
-managed (`pbs_user`, `pbs_api_token`, `pbs_acl`), with data sources to read
-them, the roles and the effective permissions, besides `pbs_version` and
-`pbs_fingerprint`. Datastores, namespaces, remotes, jobs and notifications
-come next.
+**Status: early development.** Users, API tokens and ACL entries
+(`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores with their prune and
+verify jobs (`pbs_datastore`, `pbs_prune_job`, `pbs_verify_job`) and
+notifications by mail (`pbs_notification_endpoint_smtp`,
+`pbs_notification_matcher`) can be managed, with data sources to read the
+users, tokens and ACL entries, the roles and the effective permissions,
+besides `pbs_version` and `pbs_fingerprint`. Namespaces, remotes, sync
+jobs, other notification endpoints and ACME come next. The guide
+[Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
+puts them together.
 
 ## Requirements
 
