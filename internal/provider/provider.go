@@ -482,6 +482,11 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewUserResource,
 		NewAPITokenResource,
 		NewACLResource,
+		NewDatastoreResource,
+		NewPruneJobResource,
+		NewVerifyJobResource,
+		NewSMTPEndpointResource,
+		NewNotificationMatcherResource,
 	}
 }
 

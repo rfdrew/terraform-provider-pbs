@@ -33,11 +33,26 @@ var authIDPattern = regexp.MustCompile(`^[^\s:/\p{Cc}]+@[A-Za-z0-9_][A-Za-z0-9._
 // /datastore/store1.
 var aclPathPattern = regexp.MustCompile(`^(/|(/[A-Za-z0-9_][A-Za-z0-9._-]*)+)$`)
 
+// safeIDPattern is what PBS calls a safe ID: the name of a datastore, a job,
+// or a notification endpoint or matcher.
+var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
+// namespacePattern is a datastore namespace below the root: up to seven
+// names, as deep as namespaces nest, separated by slashes, such as
+// dept1/hosts.
+var namespacePattern = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9._-]*/){0,6}[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
 // PBS limits on the lengths of IDs and texts.
 const (
 	maxAuthIDLength  = 64
 	maxACLPathLength = 128
 	maxCommentLength = 128
+	// Datastore names and job IDs are 3 to 32 characters, the names of
+	// notification endpoints and matchers 2 to 32.
+	minSafeIDLength           = 3
+	minNotificationNameLength = 2
+	maxSafeIDLength           = 32
+	maxNamespaceLength        = 256
 	// A user's names and email address are 2 to 64 characters.
 	minNameLength = 2
 	maxNameLength = 64
@@ -56,6 +71,24 @@ func authIDValidators() []validator.String {
 	return []validator.String{
 		stringvalidator.LengthBetween(3, maxAuthIDLength),
 		stringvalidator.RegexMatches(authIDPattern, "must be a user ID such as alice@pbs or an API token ID such as alice@pbs!ci"),
+	}
+}
+
+// safeIDValidators check a datastore name, a job ID or the name of a
+// notification endpoint or matcher, minLength to 32 characters.
+func safeIDValidators(minLength int) []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(minLength, maxSafeIDLength),
+		stringvalidator.RegexMatches(safeIDPattern, "must start with a letter, a digit or an underscore, followed by letters, digits, underscores, dots and hyphens"),
+	}
+}
+
+// namespaceValidators check a datastore namespace below the root, which is
+// left out rather than empty.
+func namespaceValidators() []validator.String {
+	return []validator.String{
+		stringvalidator.LengthBetween(1, maxNamespaceLength),
+		stringvalidator.RegexMatches(namespacePattern, "must be a namespace such as dept1 or dept1/hosts: up to seven names separated by slashes, without leading or trailing slashes"),
 	}
 }
 
@@ -178,4 +211,29 @@ func parsePositiveDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf(`must be a positive duration such as "30s" or "2m", got %q`, s)
 	}
 	return d, nil
+}
+
+// nonEmptyObject requires a nested object to set at least one of its
+// attributes. PBS treats a property with nothing in it as no property at
+// all, so an empty object would read back as null; leaving the attribute
+// out is how to have none.
+type nonEmptyObject struct{}
+
+func (nonEmptyObject) Description(_ context.Context) string {
+	return "must set at least one attribute; leave it out instead to have none"
+}
+
+func (v nonEmptyObject) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+
+func (v nonEmptyObject) ValidateObject(ctx context.Context, req validator.ObjectRequest, resp *validator.ObjectResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	for _, value := range req.ConfigValue.Attributes() {
+		if !value.IsNull() {
+			return
+		}
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Attribute Value",
+		fmt.Sprintf("Attribute %s %s.", req.Path, v.Description(ctx)))
 }

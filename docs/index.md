@@ -37,12 +37,19 @@ never returns.
   the roles they have on ACL paths (`pbs_acl`); to read them,
   `pbs_user`, `pbs_users`, `pbs_api_tokens`, `pbs_acl`, `pbs_roles` and
   `pbs_permissions`, which shows what a user or token may actually do.
+* **Datastores** — datastores in a directory (`pbs_datastore`), and the jobs
+  that look after them: prune jobs (`pbs_prune_job`), which hold the
+  retention, and verify jobs (`pbs_verify_job`).
+* **Notifications** — SMTP endpoints (`pbs_notification_endpoint_smtp`) and
+  the matchers that route notifications to them
+  (`pbs_notification_matcher`), the built-in `default-matcher` included,
+  which is managed by importing it.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Datastores, namespaces, remotes, sync, verify and prune jobs and
-notifications follow in the next releases.
+Namespaces, remotes, sync jobs, other notification endpoints and ACME
+follow in the next releases.
 
 The usual first step is access for a Proxmox VE cluster: a user, an API
 token for it, and the role to back up to a datastore, for the token and its
@@ -74,6 +81,11 @@ resource "pbs_acl" "pve_token" {
 
 Proxmox VE then signs in to PBS with the token ID, `pve@pbs!cluster1`, as the
 user name and the token's secret, `pbs_api_token.pve.value`, as the password.
+
+The guide **Set up PBS for a Proxmox VE cluster** goes the whole way, in one
+configuration: a datastore with prune and verify
+jobs, notifications by mail, this access, and outputs with what the storage
+in Proxmox VE needs.
 
 ## Authentication
 

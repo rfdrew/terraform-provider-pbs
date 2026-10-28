@@ -530,29 +530,42 @@ func (h *protocolHarness) readDataSource(t *testing.T, typeName string, config t
 // PlanResourceChange (internal/plans/objchange in Terraform): the configured
 // value of every attribute, except that a computed attribute the
 // configuration leaves null keeps its prior value, and a write-only attribute
-// is always null. The provider's schemas have no nested attributes or blocks
-// yet, so this does not descend into any.
+// is always null. Single nested attributes are walked the same way; the
+// provider's schemas have no other nesting and no blocks, which this does not
+// handle.
 func proposedNewState(t *testing.T, block *tfprotov6.SchemaBlock, prior, config tftypes.Value) tftypes.Value {
 	t.Helper()
 	if !config.IsKnown() || config.IsNull() {
 		return config
 	}
+	if len(block.BlockTypes) > 0 {
+		t.Fatal("proposedNewState does not handle blocks")
+	}
+	return proposedAttributes(t, block.Attributes, prior, config)
+}
+
+// proposedAttributes is proposedNewState for the attributes of one object.
+func proposedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, prior, config tftypes.Value) tftypes.Value {
+	t.Helper()
 	priorAttrs := harnessObjectAttributes(t, prior)
 	configAttrs := harnessObjectAttributes(t, config)
-	proposed := make(map[string]tftypes.Value, len(block.Attributes))
-	for _, attr := range block.Attributes {
-		if attr.NestedType != nil || len(block.BlockTypes) > 0 {
-			t.Fatalf("proposedNewState does not handle nested attributes or blocks (%s)", attr.Name)
-		}
+	proposed := make(map[string]tftypes.Value, len(attributes))
+	for _, attr := range attributes {
 		configV := configAttrs[attr.Name]
 		priorV, ok := priorAttrs[attr.Name]
 		if !ok {
 			priorV = tftypes.NewValue(configV.Type(), nil)
 		}
+		configured := configV.IsKnown() && !configV.IsNull()
 		switch {
 		case attr.WriteOnly:
 			proposed[attr.Name] = tftypes.NewValue(configV.Type(), nil)
-		case !attr.Computed || (configV.IsKnown() && !configV.IsNull()):
+		case attr.NestedType != nil && configured:
+			if attr.NestedType.Nesting != tfprotov6.SchemaObjectNestingModeSingle {
+				t.Fatalf("proposedNewState handles single nested attributes only (%s)", attr.Name)
+			}
+			proposed[attr.Name] = proposedAttributes(t, attr.NestedType.Attributes, priorV, configV)
+		case !attr.Computed || configured:
 			proposed[attr.Name] = configV
 		default:
 			proposed[attr.Name] = priorV

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -115,4 +116,76 @@ func TestWriteOnlySecretAttributes(t *testing.T) {
 	if _, ok := writeOnlySecret(context.Background(), config, "password", &diags); ok {
 		t.Error("writeOnlySecret() reports an unknown value as set")
 	}
+}
+
+// A property reset to the default the schema plans is deleted, not written,
+// and a create sends no default.
+func TestPropertyChangesDefaults(t *testing.T) {
+	var diags diag.Diagnostics
+	c := newPropertyChanges(&diags, "mode", "disable", "max-depth")
+	c.StringDefault("mode", types.StringValue("all"), types.StringValue("any"), "all")
+	c.BoolDefault("disable", types.BoolValue(true), types.BoolValue(false), false)
+	c.Int64Default("max-depth", types.Int64Value(7), types.Int64Value(3), 7)
+	requireNoErrors(t, diags)
+	values := c.Values()
+	if got := values["delete"]; len(got) != 2 || got[0] != "max-depth" || got[1] != "mode" {
+		t.Errorf("delete = %v, want max-depth and mode", got)
+	}
+	if values.Get("disable") != "true" || len(values) != 2 {
+		t.Errorf("values = %v", values)
+	}
+
+	c = newPropertyChanges(&diags)
+	c.StringDefault("mode", types.StringValue("all"), types.StringValue("all"), "all")
+	c.BoolDefault("disable", types.BoolValue(false), types.BoolValue(false), false)
+	c.Int64Default("max-depth", types.Int64Value(7), types.Int64Value(7), 7)
+	requireNoErrors(t, diags)
+	if !c.Empty() {
+		t.Errorf("values = %v, want none at the defaults", c.Values())
+	}
+}
+
+func TestPropertyChangesSetsAndPropertyStrings(t *testing.T) {
+	set := func(values ...string) types.Set {
+		elements := make([]attr.Value, len(values))
+		for i, v := range values {
+			elements[i] = types.StringValue(v)
+		}
+		return types.SetValueMust(types.StringType, elements)
+	}
+	format := propertyStringFormat{keys: []propertyStringKey{{"sync_level", "sync-level", types.StringType}, {"cutoff", "gc-atime-cutoff", types.Int64Type}}}
+	object := func(level string, cutoff int64) types.Object {
+		return types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+			"sync_level": types.StringValue(level), "cutoff": types.Int64Value(cutoff),
+		})
+	}
+
+	var diags diag.Diagnostics
+	c := newPropertyChanges(&diags, "mailto", "tuning")
+	c.StringSet("mailto", set("b@example.com", "a@example.com"), set("a@example.com"))
+	c.StringSet("target", set("x"), set("x"))
+	c.PropertyString("tuning", object("file", 60), object("none", 60), format)
+	requireNoErrors(t, diags)
+	values := c.Values()
+	if got := values["mailto"]; len(got) != 2 || got[0] != "a@example.com" || got[1] != "b@example.com" {
+		t.Errorf("mailto = %v, want both, sorted", got)
+	}
+	if got := values.Get("tuning"); got != "gc-atime-cutoff=60,sync-level=file" || values.Has("target") {
+		t.Errorf("values = %v", values)
+	}
+
+	c = newPropertyChanges(&diags, "mailto", "tuning")
+	c.StringSet("mailto", types.SetNull(types.StringType), set("a@example.com"))
+	c.PropertyString("tuning", types.ObjectNull(format.attributeTypes()), object("none", 60), format)
+	requireNoErrors(t, diags)
+	if got := c.Values()["delete"]; len(got) != 2 || got[0] != "mailto" || got[1] != "tuning" {
+		t.Errorf("delete = %v", got)
+	}
+
+	partlyUnknown := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+		"sync_level": types.StringUnknown(), "cutoff": types.Int64Null(),
+	})
+	c = newPropertyChanges(&diags)
+	c.PropertyString("tuning", partlyUnknown, types.ObjectNull(format.attributeTypes()), format)
+	requireErrorContaining(t, diags, `Part of the PBS property "tuning" was still unknown`)
 }
