@@ -8,6 +8,7 @@ description: |-
   ~> Destroying the resource deactivates the account at the CA, which cannot be undone. The CA refuses every later request of the account; certificates it issued stay valid until they expire, but PBS can no longer renew them with this account. Replacing the resource — a new name or directory — deactivates the old account the same way.
   Let's Encrypt stopped storing contact addresses in June 2025: it takes the address at registration but neither keeps nor returns it, and ignores changes. The provider therefore keeps contact as configured, and reports a change made outside Terraform only for a CA that returns its contacts.
   Managing ACME accounts needs Sys.Modify on /system/certificates. Registering, updating and deactivating an account runs as a PBS task; the provider waits for it, up to task_timeout, and reports the CA's error when it fails.
+  PBS writes about one account key in 128 in a form that CAs such as Let's Encrypt refuse as malformed (Pebble says "invalid EC public key, wrong length for x" or "for y", Let's Encrypt "Parse error reading JWS"); the provider then tries up to 3 keys in all, registering the account again with a new key.
 ---
 
 # pbs_acme_account (Resource)
@@ -21,6 +22,8 @@ Creating the resource has PBS register the account at the CA; PBS keeps the acco
 Let's Encrypt stopped storing contact addresses in June 2025: it takes the address at registration but neither keeps nor returns it, and ignores changes. The provider therefore keeps `contact` as configured, and reports a change made outside Terraform only for a CA that returns its contacts.
 
 Managing ACME accounts needs `Sys.Modify on /system/certificates`. Registering, updating and deactivating an account runs as a PBS task; the provider waits for it, up to `task_timeout`, and reports the CA's error when it fails.
+
+PBS writes about one account key in 128 in a form that CAs such as Let's Encrypt refuse as malformed (Pebble says "invalid EC public key, wrong length for x" or "for y", Let's Encrypt "Parse error reading JWS"); the provider then tries up to 3 keys in all, registering the account again with a new key.
 
 ## Example Usage
 

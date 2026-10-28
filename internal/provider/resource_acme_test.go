@@ -207,7 +207,7 @@ func TestACMEAccountResourceErrors(t *testing.T) {
 
 	// The CA refuses: the error names the task's reason, and suggests
 	// tos_url, which is missing.
-	acme.registerFailure = "Error: userActionRequired: Provided account did not agree to the terms of service"
+	acme.registerFailures = []string{"Error: userActionRequired: Provided account did not agree to the terms of service"}
 	config = accountConfig(t, h, nil)
 	planned = h.plan(t, "pbs_acme_account", nil, config)
 	applied = h.apply(t, "pbs_acme_account", nil, config, planned)
@@ -248,6 +248,63 @@ func TestACMEAccountResourceErrors(t *testing.T) {
 	}
 	resp := h.importResource(t, "pbs_acme_account", "not/valid", nil)
 	requireProtocolErrorContaining(t, resp.Diagnostics, "Import a PBS ACME account by its name")
+}
+
+// fakeKeyRefused is how a registration task fails when Pebble refuses the
+// account key: PBS wrote one of its coordinates without a leading zero byte.
+const fakeKeyRefused = `urn:ietf:params:acme:error:malformed: Parse error reading JWS: failed to unmarshal JWK: ` +
+	`go-jose/go-jose: invalid EC public key, wrong length for y: "{\"kty\":\"EC\",\"crv\":\"P-256\",` +
+	`\"x\":\"6Cr11bNHc09BF9f2gJB0uy1IijrecIYL5OoE5K_Z6Gg\",\"y\":\"gjB8uCXHAjbhAAlXhDGAlEQZT0BKWGM0pIXjs1iYRA\"}"`
+
+// The CA refuses about one account key PBS generates in 128: the provider
+// registers again, with a new key, unless PBS kept an account all the same.
+func TestACMEAccountResourceRegistersAgainWhenTheCARefusesTheKey(t *testing.T) {
+	h, fake, acme := newACMEHarness(t)
+	registrations := func() int { return fake.count("POST /config/acme/account") }
+
+	// Refused once: the second key is registered.
+	acme.registerFailures = []string{fakeKeyRefused}
+	inst := h.create(t, "pbs_acme_account", accountConfig(t, h, map[string]any{"tos_url": "https://ca.test/tos"}))
+	if registrations() != 2 || stringAt(t, inst.state, "status") != "valid" {
+		t.Fatalf("%d registrations, state %s; want 2 and a valid account", registrations(), inst.state)
+	}
+	if _, exists := acme.account("le"); !exists {
+		t.Fatal("the account was not registered")
+	}
+
+	// Refused every time: the error after the last attempt is the CA's.
+	acme.registerFailures = slices.Repeat([]string{fakeKeyRefused}, pbsclient.ACMERegisterAttempts)
+	config := accountConfig(t, h, map[string]any{"name": "le2", "tos_url": "https://ca.test/tos"})
+	applied := h.apply(t, "pbs_acme_account", nil, config, h.plan(t, "pbs_acme_account", nil, config))
+	requireProtocolErrorContaining(t, applied.Diagnostics, "refused the request as malformed")
+	requireProtocolErrorContaining(t, applied.Diagnostics, "wrong length for y")
+	// PBS is checked for the account before every new attempt.
+	if registrations() != 2+pbsclient.ACMERegisterAttempts || fake.count("GET /config/acme/account/le2") != pbsclient.ACMERegisterAttempts-1 {
+		t.Fatalf("%d registrations and %d checks, want %d and %d", registrations()-2, fake.count("GET /config/acme/account/le2"),
+			pbsclient.ACMERegisterAttempts, pbsclient.ACMERegisterAttempts-1)
+	}
+
+	// Any other refusal is final.
+	acme.registerFailures = []string{"urn:ietf:params:acme:error:malformed: contact email has invalid domain", fakeKeyRefused}
+	applied = h.apply(t, "pbs_acme_account", nil, config, h.plan(t, "pbs_acme_account", nil, config))
+	requireProtocolErrorContaining(t, applied.Diagnostics, "invalid domain")
+	if registrations() != 3+pbsclient.ACMERegisterAttempts {
+		t.Fatalf("another refusal was registered again")
+	}
+	acme.registerFailures = nil
+
+	// PBS kept an account of that name although the task failed:
+	// registering again would be refused, so it is not tried.
+	acme.registerFailures = []string{fakeKeyRefused}
+	fake.handle("GET /config/acme/account/le2", func(w http.ResponseWriter, _ *http.Request) {
+		writeData(w, map[string]any{"directory": pbsclient.DefaultACMEDirectory, "location": "https://ca.test/acme/acct/9", "account": map[string]any{"status": "valid"}}, "")
+	})
+	applied = h.apply(t, "pbs_acme_account", nil, config, h.plan(t, "pbs_acme_account", nil, config))
+	requireProtocolErrorContaining(t, applied.Diagnostics, `PBS has an ACME account named "le2" all the same`)
+	requireProtocolErrorContaining(t, applied.Diagnostics, "wrong length for y")
+	if registrations() != 4+pbsclient.ACMERegisterAttempts {
+		t.Fatalf("registered again although PBS kept the account")
+	}
 }
 
 func pluginConfig(t *testing.T, h *protocolHarness, attrs map[string]any) tftypes.Value {
