@@ -147,6 +147,8 @@ resource "pbs_notification_endpoint_smtp" "mail" {
 
   password_wo         = var.smtp_password
   password_wo_version = 1
+
+  send_test_on_apply = true
 }
 
 variable "smtp_password" {
@@ -177,8 +179,9 @@ The SMTP password is write-only: Terraform passes it to PBS without storing
 it in the plan or state. PBS receives it when the endpoint is created; to
 change it, set the new password and increment `password_wo_version`. PBS
 does not contact the relay when it saves the endpoint, so a wrong setting
-shows only when it sends the first notification: send a test notification
-from the endpoint in the PBS web interface to find out at once.
+would show only when it sends the first notification; `send_test_on_apply`
+has PBS send a test mail after every apply that creates or changes the
+endpoint, and a mail the relay refuses fails the apply.
 
 A notification reaches an endpoint only through a matcher. PBS's built-in
 `default-matcher` routes every notification but those of successful prune
@@ -189,6 +192,12 @@ without `match_field`, `match_severity` and `invert_match`, the matcher
 would match every notification, successful prunes included. Destroying the
 resource does not delete `default-matcher`; PBS resets it to its built-in
 settings, and notifications go to `mail-to-root` again.
+
+Mail is not the only channel. A `pbs_notification_endpoint_gotify` pushes
+notifications to a Gotify server, and a `pbs_notification_endpoint_webhook`
+sends them to any service that takes an HTTP request, with credentials kept
+in write-only secrets; a matcher of its own, such as one with
+`match_severity = ["error"]`, routes the failures there as well.
 
 ## Access for Proxmox VE
 

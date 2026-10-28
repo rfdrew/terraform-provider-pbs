@@ -4,7 +4,7 @@ page_title: "pbs_notification_endpoint_smtp Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Manages a Proxmox Backup Server SMTP notification endpoint: a mail server PBS delivers notifications through — about garbage collection, prune, verify and sync jobs, tape backups, package updates and certificates; mails about backups come from Proxmox VE. A notification reaches an endpoint only through a matcher: route notifications to this one with a pbs_notification_matcher whose target names it, such as the built-in default-matcher, imported.
-  PBS does not contact the server when it saves the endpoint; a wrong setting shows when PBS sends the first notification. Endpoint and matcher names share one namespace.
+  PBS does not contact the server when it saves the endpoint; a wrong setting shows when PBS sends the first notification, or at once with send_test_on_apply. Endpoint and matcher names share one namespace.
   ~> PBS refuses to delete an endpoint a matcher targets. When a change of name replaces an endpoint that a pbs_notification_matcher targets, set lifecycle { create_before_destroy = true } on the endpoint, so that the matcher moves to the new endpoint before the old one goes.
   Managing notification endpoints needs Sys.Modify on /system/notifications, reading them Sys.Audit on /system/notifications.
 ---
@@ -13,7 +13,7 @@ description: |-
 
 Manages a Proxmox Backup Server SMTP notification endpoint: a mail server PBS delivers notifications through — about garbage collection, prune, verify and sync jobs, tape backups, package updates and certificates; mails about backups come from Proxmox VE. A notification reaches an endpoint only through a matcher: route notifications to this one with a `pbs_notification_matcher` whose `target` names it, such as the built-in `default-matcher`, imported.
 
-PBS does not contact the server when it saves the endpoint; a wrong setting shows when PBS sends the first notification. Endpoint and matcher names share one namespace.
+PBS does not contact the server when it saves the endpoint; a wrong setting shows when PBS sends the first notification, or at once with `send_test_on_apply`. Endpoint and matcher names share one namespace.
 
 ~> **PBS refuses to delete an endpoint a matcher targets.** When a change of `name` replaces an endpoint that a `pbs_notification_matcher` targets, set `lifecycle { create_before_destroy = true }` on the endpoint, so that the matcher moves to the new endpoint before the old one goes.
 
@@ -74,6 +74,7 @@ variable "smtp_password" {
 - `password_wo` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Password to authenticate to the SMTP server with, along with `username`, without white space at either end, which PBS would drop when it reads the password back. Write-only: Terraform passes it to PBS without storing it in the plan or state, and PBS never returns it, so a change made outside Terraform goes unnoticed. PBS receives it when the object is created and whenever `password_wo_version` changes. Requires `password_wo_version`, and Terraform or OpenTofu 1.11 or later.
 - `password_wo_version` (Number) Version of `password_wo`, which Terraform stores in its place. Change it — increment it, say — to send a new `password_wo`; removing it, with `password_wo`, leaves the value on the server as it is. Requires `password_wo`.
 - `port` (Number) Port of the SMTP server; when left out, the one `mode` implies: 465 for `tls`, 587 for `starttls`, 25 for `insecure`.
+- `send_test_on_apply` (Boolean) Have PBS send a test notification through the endpoint after every apply that creates or changes it, unless it is disabled, so that a wrong setting fails the apply instead of going unnoticed until a real notification is lost. Defaults to `false`. It exists only in Terraform: turning it on changes nothing in PBS and sends nothing by itself, and every test delivers a real message. PBS waits for the SMTP server to accept the mail, which it then delivers or bounces on its own. A failed test fails the apply. When the test after a create fails, the provider deletes the endpoint again, so the next apply creates and tests it again — should that delete fail too, the endpoint is kept and marked tainted; when the test after an update fails, the endpoint keeps the change, and the next apply tests again only if the endpoint changes again. Sending a test needs `Sys.Modify on /system/notifications`.
 - `username` (String) User name to authenticate with, by PLAIN or LOGIN; no authentication when left out. Requires `password_wo`: PBS fails to send with a user name but no password.
 
 ### Read-Only

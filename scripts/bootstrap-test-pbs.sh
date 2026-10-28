@@ -33,8 +33,10 @@
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
-# variant, the PBS version, the ACME directory, and the files of PBS's own
-# certificate and key, which the certificate tests put back when they end.
+# variant, the PBS version, the ACME directory, the files of PBS's own
+# certificate and key, which the certificate tests put back when they end,
+# and the address at which the container reaches this host, where the
+# notification tests receive what PBS sends.
 # The test user's credentials are not exported as PBS_USERNAME and
 # PBS_PASSWORD, which the provider would read alongside the token.
 #
@@ -534,6 +536,9 @@ print_exports() {
   printf 'export PBS_ACC_VERSION=%q\n' "$2"
   printf 'export PBS_ACC_PROXY_CERT_FILE=%q\n' "${STATE_DIR}/proxy.pem"
   printf 'export PBS_ACC_PROXY_KEY_FILE=%q\n' "${STATE_DIR}/proxy.key"
+  # Both stands map host.docker.internal to this host (--add-host), under
+  # native Docker and Docker Desktop alike.
+  printf 'export PBS_ACC_HOST_ADDRESS=%q\n' "host.docker.internal"
   if [[ "$PEBBLE" != "0" ]]; then
     printf 'export PBS_ACC_ACME_DIRECTORY=%q\n' "$ACME_DIRECTORY"
   else
