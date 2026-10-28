@@ -122,6 +122,7 @@ func (r *acmePluginResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"state.",
 				Validators: []validator.Map{
 					mapvalidator.SizeAtLeast(1),
+					mapvalidator.NoNullValues(),
 					mapvalidator.KeysAre(
 						stringvalidator.LengthBetween(1, 128),
 						stringvalidator.RegexMatches(acmePluginSettingPattern, "must be the name of an environment variable, such as CF_Token"),

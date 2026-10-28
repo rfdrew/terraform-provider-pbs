@@ -265,6 +265,7 @@ func (r *syncJobResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"an exclude — or there is none — and no exclude.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(
 						stringvalidator.LengthAtLeast(1),
 						stringvalidator.RegexMatches(groupFilterPattern, "must be type:<vm|ct|host>, group:<type>/<id> "+

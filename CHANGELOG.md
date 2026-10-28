@@ -108,6 +108,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length for x" or "for y"). The provider now tries up to three keys in
   all, registering the account again with a new key, unless PBS kept an
   account of that name.
+- A null element in a set, list or map — a variable left null in
+  `mailto = ["ops@example.com", var.extra]`, say — is refused when the
+  configuration is validated. Before, `mailto` and `mailto_user` of the
+  sendmail and SMTP endpoints, the sets of `pbs_notification_matcher`,
+  `group_filter` of `pbs_sync_job` and `header` and `secret` of
+  `pbs_notification_endpoint_webhook` dropped it, and the apply failed with
+  "Provider produced inconsistent result after apply"; `domains` of
+  `pbs_node_acme` and `data` of `pbs_acme_plugin` failed with a less clear
+  error.
 
 ## [0.1.0] - 2026-10-28
 

@@ -174,6 +174,7 @@ func (r *smtpEndpointResource) Schema(_ context.Context, _ resource.SchemaReques
 					"`mailto_user` is required.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(textValidators(minRecipientLength, maxRecipientLength)...),
 				},
 			},
@@ -184,6 +185,7 @@ func (r *smtpEndpointResource) Schema(_ context.Context, _ resource.SchemaReques
 					"has for each.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(userIDValidators()...),
 				},
 			},

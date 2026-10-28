@@ -94,6 +94,7 @@ func (r *sendmailEndpointResource) Schema(_ context.Context, _ resource.SchemaRe
 					"`mailto_user` is required.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(textValidators(minRecipientLength, maxRecipientLength)...),
 				},
 			},
@@ -104,6 +105,7 @@ func (r *sendmailEndpointResource) Schema(_ context.Context, _ resource.SchemaRe
 					"has for each; a user without one gets nothing.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(userIDValidators()...),
 				},
 			},
