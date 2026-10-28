@@ -4,7 +4,7 @@ page_title: "pbs_fingerprint Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Reports the SHA-256 fingerprint of the certificate the server's web interface and API serve on port 8007 (proxy.pem), with the certificate's subject and validity. Proxmox VE pins a PBS storage by this fingerprint, and so does another PBS that syncs from this one: pass it to the fingerprint of proxmox_storage_pbs in the bpg/proxmox provider, or of a remote.
-  Reading it needs Sys.Audit on /system/certificates.
+  Reading it needs Sys.Modify on /system/certificates.
   ~> The fingerprint changes whenever the certificate does: a new custom certificate, an ACME renewal, or deleting the custom certificate, which makes PBS generate a new self-signed one.
 ---
 
@@ -12,7 +12,7 @@ description: |-
 
 Reports the SHA-256 fingerprint of the certificate the server's web interface and API serve on port 8007 (`proxy.pem`), with the certificate's subject and validity. Proxmox VE pins a PBS storage by this fingerprint, and so does another PBS that syncs from this one: pass it to the `fingerprint` of `proxmox_storage_pbs` in the bpg/proxmox provider, or of a remote.
 
-Reading it needs `Sys.Audit` on `/system/certificates`.
+Reading it needs `Sys.Modify on /system/certificates`.
 
 ~> **The fingerprint changes** whenever the certificate does: a new custom certificate, an ACME renewal, or deleting the custom certificate, which makes PBS generate a new self-signed one.
 
@@ -55,5 +55,5 @@ check "pbs_certificate_is_valid" {
 - `issuer` (String) Issuer of the certificate; the same as `subject` for a self-signed one.
 - `not_after` (String) End of the certificate's validity, in RFC 3339 format (UTC).
 - `not_before` (String) Start of the certificate's validity, in RFC 3339 format (UTC).
-- `san` (List of String) Subject alternative names, as PBS lists them, such as `DNS:pbs.example.com` or `IP:192.0.2.10`.
+- `san` (List of String) DNS names among the certificate's subject alternative names, as PBS lists them, such as `pbs.example.com`; PBS leaves out IP addresses.
 - `subject` (String) Subject of the certificate.

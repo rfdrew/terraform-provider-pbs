@@ -42,7 +42,7 @@ func (d *fingerprintDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 			"API serve on port 8007 (`proxy.pem`), with the certificate's subject and validity. Proxmox VE " +
 			"pins a PBS storage by this fingerprint, and so does another PBS that syncs from this one: pass it " +
 			"to the `fingerprint` of `proxmox_storage_pbs` in the bpg/proxmox provider, or of a remote.\n\n" +
-			"Reading it needs `Sys.Audit` on `/system/certificates`.\n\n" +
+			"Reading it needs `" + certificatesPrivilege + "`.\n\n" +
 			"~> **The fingerprint changes** whenever the certificate does: a new custom certificate, an ACME " +
 			"renewal, or deleting the custom certificate, which makes PBS generate a new self-signed one.",
 		Attributes: map[string]schema.Attribute{
@@ -70,7 +70,7 @@ func (d *fingerprintDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 			"san": schema.ListAttribute{
 				Computed:            true,
 				ElementType:         types.StringType,
-				MarkdownDescription: "Subject alternative names, as PBS lists them, such as `DNS:pbs.example.com` or `IP:192.0.2.10`.",
+				MarkdownDescription: "DNS names among the certificate's subject alternative names, as PBS lists them, such as `pbs.example.com`; PBS leaves out IP addresses.",
 			},
 		},
 	}
@@ -84,7 +84,7 @@ func (d *fingerprintDataSource) Read(ctx context.Context, _ datasource.ReadReque
 	cert, err := d.data.client.ProxyCertificate(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read the PBS certificate",
-			apiErrorDetail(d.data.client, "Sys.Audit on /system/certificates", err))
+			apiErrorDetail(d.data.client, certificatesPrivilege, err))
 		return
 	}
 

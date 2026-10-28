@@ -458,7 +458,23 @@ func (p *pbsProvider) Configure(ctx context.Context, req provider.ConfigureReque
 
 // connectErrorDetail explains why the first call failed.
 func connectErrorDetail(client *pbsclient.Client, err error) string {
+	var untrusted *pbsclient.UntrustedCertificateError
 	switch {
+	case errors.As(err, &untrusted) && client.PinsCertificate() && untrusted.Presented() != "":
+		return "The server presents a certificate with SHA-256 fingerprint " +
+			pbsclient.FormatFingerprint(untrusted.Presented()) + ", not the one tls_cert_fingerprint names. PBS " +
+			"serves a new certificate after pbs_node_certificate ordered one, after a renewal, or after its " +
+			"certificate was deleted, which makes PBS generate a new self-signed one. For a certificate of a public " +
+			"CA, such as Let's Encrypt, remove tls_cert_fingerprint (and PBS_TLS_FINGERPRINT), so that the provider " +
+			"verifies it against the system's CAs, with endpoint naming one of its domains. For a self-signed one, " +
+			"set tls_cert_fingerprint to the new fingerprint — after comparing it with `proxmox-backup-manager cert " +
+			"info` on the host. " + err.Error()
+	case errors.As(err, &untrusted) && untrusted.Presented() != "":
+		return "The server's certificate, with SHA-256 fingerprint " + pbsclient.FormatFingerprint(untrusted.Presented()) +
+			", does not verify for " + client.EndpointHost() + ". If PBS serves a self-signed certificate — such as the " +
+			"one it generates after its certificate was deleted —, set tls_cert_fingerprint to its fingerprint, after " +
+			"comparing it with `proxmox-backup-manager cert info` on the host; if it serves one of a public CA, set " +
+			"endpoint to one of the certificate's domains. " + err.Error()
 	case errors.Is(err, pbsclient.ErrSecondFactor):
 		return "PBS accepted the password of " + strconv.Quote(client.AuthID()) + ", but the user has " +
 			"two-factor authentication enabled, which the provider cannot complete. Create an API token for the " +
@@ -487,6 +503,10 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewVerifyJobResource,
 		NewSMTPEndpointResource,
 		NewNotificationMatcherResource,
+		NewACMEAccountResource,
+		NewACMEPluginResource,
+		NewNodeACMEResource,
+		NewNodeCertificateResource,
 	}
 }
 
@@ -500,6 +520,7 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewACLDataSource,
 		NewRolesDataSource,
 		NewPermissionsDataSource,
+		NewACMEToSDataSource,
 	}
 }
 

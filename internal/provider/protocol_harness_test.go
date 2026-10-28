@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -187,7 +188,10 @@ type resourceInstance struct {
 
 // harnessOptions are what newProtocolHarness configures.
 type harnessOptions struct {
-	passwordSignIn bool
+	passwordSignIn  bool
+	certFingerprint string
+	caCertFile      string
+	transport       http.RoundTripper
 }
 
 type harnessOption func(*harnessOptions)
@@ -196,6 +200,26 @@ type harnessOption func(*harnessOptions)
 // password instead of its API token.
 func withPasswordSignIn() harnessOption {
 	return func(o *harnessOptions) { o.passwordSignIn = true }
+}
+
+// withCACertFile configures the provider to verify certificates against the
+// CA file. The fake answers without TLS, so only what the provider does with
+// the setting shows.
+func withCACertFile(file string) harnessOption {
+	return func(o *harnessOptions) { o.caCertFile = file }
+}
+
+// withTransport has the provider send its requests through transport, which
+// wraps the fake, instead of the fake itself.
+func withTransport(transport http.RoundTripper) harnessOption {
+	return func(o *harnessOptions) { o.transport = transport }
+}
+
+// withCertFingerprint configures the provider to pin the given certificate
+// fingerprint. The fake answers without TLS, so only what the provider does
+// with the setting shows.
+func withCertFingerprint(fingerprint string) harnessOption {
+	return func(o *harnessOptions) { o.certFingerprint = fingerprint }
 }
 
 // newProtocolHarness starts the provider's protocol server with the fake as
@@ -208,7 +232,11 @@ func newProtocolHarness(t *testing.T, fake *fakePBS, opts ...harnessOption) *pro
 	}
 	ctx := context.Background()
 	clearPBSEnv(t)
-	server, err := providerserver.NewProtocol6WithError(&pbsProvider{version: "test", transport: fake})()
+	var transport http.RoundTripper = fake
+	if options.transport != nil {
+		transport = options.transport
+	}
+	server, err := providerserver.NewProtocol6WithError(&pbsProvider{version: "test", transport: transport})()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +255,12 @@ func newProtocolHarness(t *testing.T, fake *fakePBS, opts ...harnessOption) *pro
 	providerConfig := map[string]any{"endpoint": "https://pbs.test:8007", "api_token": fakeAPIToken}
 	if options.passwordSignIn {
 		providerConfig = map[string]any{"endpoint": "https://pbs.test:8007", "username": fake.username, "password": fake.password}
+	}
+	if options.certFingerprint != "" {
+		providerConfig["tls_cert_fingerprint"] = options.certFingerprint
+	}
+	if options.caCertFile != "" {
+		providerConfig["ca_cert_file"] = options.caCertFile
 	}
 	config := dynamicValue(t, tfValue(t, schemas.Provider.ValueType(), providerConfig))
 	resp, err := server.ConfigureProvider(ctx, &tfprotov6.ConfigureProviderRequest{TerraformVersion: "1.14.0", Config: config})
@@ -395,8 +429,17 @@ func (h *protocolHarness) planAndApply(t *testing.T, typeName string, prior *res
 	}
 	planned := h.plan(t, typeName, prior, config)
 	requireNoProtocolErrors(t, planned.Diagnostics)
+	plannedState := h.decodeResource(t, typeName, planned.PlannedState)
+	if !config.IsNull() {
+		priorState := tftypes.NewValue(h.resourceType(t, typeName), nil)
+		if prior != nil {
+			priorState = prior.state
+		}
+		requirePlanValid(t, h.resourceSchema(t, typeName).Block, priorState, config, plannedState)
+	}
 	applied := h.apply(t, typeName, prior, config, planned)
 	requireNoProtocolErrors(t, applied.Diagnostics)
+	requireAppliedCompatible(t, plannedState, h.decodeResource(t, typeName, applied.NewState))
 	return &resourceInstance{
 		typeName: typeName,
 		state:    h.decodeResource(t, typeName, applied.NewState),
@@ -528,11 +571,12 @@ func (h *protocolHarness) readDataSource(t *testing.T, typeName string, config t
 
 // proposedNewState builds the proposed new state Terraform core sends with
 // PlanResourceChange (internal/plans/objchange in Terraform): the configured
-// value of every attribute, except that a computed attribute the
-// configuration leaves null keeps its prior value, and a write-only attribute
-// is always null. Single nested attributes are walked the same way; the
-// provider's schemas have no other nesting and no blocks, which this does not
-// handle.
+// value of every attribute, unknown ones included, except that a computed
+// attribute the configuration leaves null keeps its prior value, and a
+// write-only attribute is always null. Single nested attributes are walked the same way; list,
+// set and map nested attributes are taken as configured, which is what
+// Terraform proposes when their objects have no computed attributes, as the
+// provider's have not. Blocks are not handled: the provider has none.
 func proposedNewState(t *testing.T, block *tfprotov6.SchemaBlock, prior, config tftypes.Value) tftypes.Value {
 	t.Helper()
 	if !config.IsKnown() || config.IsNull() {
@@ -556,14 +600,20 @@ func proposedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, p
 		if !ok {
 			priorV = tftypes.NewValue(configV.Type(), nil)
 		}
-		configured := configV.IsKnown() && !configV.IsNull()
+		configured := !configV.IsNull()
 		switch {
 		case attr.WriteOnly:
 			proposed[attr.Name] = tftypes.NewValue(configV.Type(), nil)
-		case attr.NestedType != nil && configured:
-			if attr.NestedType.Nesting != tfprotov6.SchemaObjectNestingModeSingle {
-				t.Fatalf("proposedNewState handles single nested attributes only (%s)", attr.Name)
+		case attr.NestedType != nil && !configV.IsKnown():
+			proposed[attr.Name] = configV
+		case attr.NestedType != nil && configured && attr.NestedType.Nesting != tfprotov6.SchemaObjectNestingModeSingle:
+			for _, nested := range attr.NestedType.Attributes {
+				if nested.Computed {
+					t.Fatalf("proposedNewState does not handle computed attributes in %s, a collection of objects", attr.Name)
+				}
 			}
+			proposed[attr.Name] = configV
+		case attr.NestedType != nil && configured:
 			proposed[attr.Name] = proposedAttributes(t, attr.NestedType.Attributes, priorV, configV)
 		case !attr.Computed || configured:
 			proposed[attr.Name] = configV
@@ -572,6 +622,56 @@ func proposedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, p
 		}
 	}
 	return tftypes.NewValue(config.Type(), proposed)
+}
+
+// requirePlanValid fails the test where a plan breaks Terraform core's rules
+// for top-level attributes (internal/plans/objchange's AssertPlanValid): a
+// configured value must be planned as configured — or as the prior value,
+// when there is one, which core allows for semantic equality — and an
+// unknown one may only stay unknown; a value the configuration leaves out
+// may be planned for a computed attribute only. Write-only attributes are
+// planned null, and computed-only ones as the provider likes.
+func requirePlanValid(t *testing.T, block *tfprotov6.SchemaBlock, prior, config, planned tftypes.Value) {
+	t.Helper()
+	priorAttrs := harnessObjectAttributes(t, prior)
+	configAttrs := harnessObjectAttributes(t, config)
+	plannedAttrs := harnessObjectAttributes(t, planned)
+	for _, attr := range block.Attributes {
+		configV, plannedV := configAttrs[attr.Name], plannedAttrs[attr.Name]
+		priorV, hasPrior := priorAttrs[attr.Name]
+		keepsPrior := hasPrior && !priorV.IsNull() && plannedV.Equal(priorV)
+		switch {
+		case attr.WriteOnly || (attr.Computed && !attr.Optional):
+		case configV.IsNull():
+			if !attr.Computed && !plannedV.IsNull() {
+				t.Fatalf("invalid plan: %s is not configured, and not computed, but planned as %s", attr.Name, plannedV)
+			}
+		case keepsPrior:
+		case !configV.IsKnown():
+			if plannedV.IsKnown() {
+				t.Fatalf("invalid plan: %s is unknown in the configuration but planned as %s", attr.Name, plannedV)
+			}
+		case attr.NestedType == nil && !plannedV.Equal(configV):
+			t.Fatalf("invalid plan: %s is configured as %s but planned as %s", attr.Name, configV, plannedV)
+		}
+	}
+}
+
+// requireAppliedCompatible fails the test where apply changed a value that
+// was known in the plan (internal/plans/objchange's AssertObjectCompatible,
+// for top-level attributes), which Terraform reports as "Provider produced
+// inconsistent result after apply".
+func requireAppliedCompatible(t *testing.T, planned, applied tftypes.Value) {
+	t.Helper()
+	if planned.IsNull() || applied.IsNull() {
+		return
+	}
+	appliedAttrs := harnessObjectAttributes(t, applied)
+	for name, plannedV := range harnessObjectAttributes(t, planned) {
+		if plannedV.IsFullyKnown() && !plannedV.Equal(appliedAttrs[name]) {
+			t.Fatalf("inconsistent result after apply: %s was planned as %s but applied as %s", name, plannedV, appliedAttrs[name])
+		}
+	}
 }
 
 // harnessObjectAttributes returns an object's attributes; none for null.

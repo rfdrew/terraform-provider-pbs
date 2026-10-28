@@ -27,7 +27,7 @@ func TestFingerprintDataSourceReadsTheProxyCertificate(t *testing.T) {
 		{"filename":"proxy.key","fingerprint":"aa"},
 		{"filename":"proxy.pem","fingerprint":"2F:F2:F7:E9:8B:A5:62:FE:BB:6D:63:40:33:8B:4A:97:E6:D4:80:5D:F9:96:B9:63:EE:4C:08:31:C2:D0:00:5C",
 		 "subject":"OU=PBS Ephemeral, O=Proxmox Backup Server, CN=pbs-acc","issuer":"OU=PBS Ephemeral, O=Proxmox Backup Server, CN=pbs-acc",
-		 "notbefore":1761562800,"notafter":2076922800,"san":["IP:127.0.0.1","DNS:pbs-acc","DNS:localhost"]}]}`)
+		 "notbefore":1761562800,"notafter":2076922800,"san":["pbs-acc","localhost"]}]}`)
 
 	resp := readDataSource(t, d, dataSourceValue(t, d, map[string]any{}))
 	requireNoErrors(t, resp.Diagnostics)
@@ -37,7 +37,7 @@ func TestFingerprintDataSourceReadsTheProxyCertificate(t *testing.T) {
 		"issuer":      "OU=PBS Ephemeral, O=Proxmox Backup Server, CN=pbs-acc",
 		"not_before":  "2025-10-27T11:00:00Z",
 		"not_after":   "2035-10-25T11:00:00Z",
-		"san":         []string{"IP:127.0.0.1", "DNS:pbs-acc", "DNS:localhost"},
+		"san":         []string{"pbs-acc", "localhost"},
 	})
 	if !resp.State.Raw.Equal(want) {
 		t.Errorf("state = %s, want %s", resp.State.Raw, want)
@@ -57,14 +57,14 @@ func TestFingerprintDataSourceWithoutSAN(t *testing.T) {
 	}
 }
 
-// A token without Sys.Audit gets 403, and the error says what is missing.
+// A token without Sys.Modify gets 403, and the error says what is missing.
 func TestFingerprintDataSourceExplainsAMissingPrivilege(t *testing.T) {
 	fake := newFakePBS()
 	d := &fingerprintDataSource{data: fake.configured(t)}
 	fake.reply("GET /nodes/localhost/certificates/info", http.StatusForbidden, "permission check failed")
 
 	resp := readDataSource(t, d, dataSourceValue(t, d, map[string]any{}))
-	requireErrorContaining(t, resp.Diagnostics, "Sys.Audit on /system/certificates")
+	requireErrorContaining(t, resp.Diagnostics, certificatesPrivilege)
 	requireErrorContaining(t, resp.Diagnostics, "An API token has no privileges of its own")
 }
 

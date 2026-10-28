@@ -113,15 +113,18 @@ func TestCertificateFingerprintIsTheSHA256OfTheDER(t *testing.T) {
 
 // The pinned certificate may be any one the server presents, leaf or
 // intermediate.
-func TestVerifyFingerprintAcceptsAnyPresentedCertificate(t *testing.T) {
+// Only the leaf may match: the handshake proves the server holds its key,
+// while anyone may send PBS's certificate after a leaf of their own.
+func TestVerifyFingerprintMatchesTheLeafOnly(t *testing.T) {
 	leaf := newTestCertificate(t, "pbs.test")
 	other := newTestCertificate(t, "intermediate.test")
 	state := tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.cert, other.cert}}
 
-	for _, cert := range []*x509.Certificate{leaf.cert, other.cert} {
-		if err := verifyFingerprint(CertificateFingerprint(cert))(state); err != nil {
-			t.Errorf("verifyFingerprint(%s) error = %v, want a match", CertificateFingerprint(cert), err)
-		}
+	if err := verifyFingerprint(CertificateFingerprint(leaf.cert))(state); err != nil {
+		t.Errorf("verifyFingerprint(leaf) error = %v, want a match", err)
+	}
+	if err := verifyFingerprint(CertificateFingerprint(other.cert))(state); err == nil {
+		t.Error("verifyFingerprint() accepted a certificate that came after the leaf")
 	}
 }
 
@@ -161,13 +164,29 @@ func TestNewConfiguresTLS(t *testing.T) {
 	}
 	base := Options{Endpoint: "https://pbs.test:8007", APIToken: fakeAPIToken}
 
+	// Go's own verification is always off: VerifyConnection does it,
+	// whatever the settings, so that it can also accept a certificate the
+	// server switched to while the client changed it.
+	requireVerifyConnection := func(t *testing.T, c *Client) *tls.Config {
+		t.Helper()
+		conf := transportTLS(t, c)
+		if conf == nil || !conf.InsecureSkipVerify || conf.VerifyConnection == nil || conf.VerifyPeerCertificate != nil {
+			t.Fatalf("TLS config = %+v, want Go's verification replaced by VerifyConnection", conf)
+		}
+		return conf
+	}
+
 	t.Run("system roots by default", func(t *testing.T) {
 		c, err := New(base)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if conf := transportTLS(t, c); conf != nil && (conf.InsecureSkipVerify || conf.RootCAs != nil) {
-			t.Fatalf("TLS config = %+v, want Go's defaults", conf)
+		requireVerifyConnection(t, c)
+		if c.trust.pinned != "" || c.trust.roots != nil || c.trust.insecure || c.trust.host != "pbs.test" {
+			t.Fatalf("trust = %+v, want the system roots for pbs.test", c.trust)
+		}
+		if c.PinsCertificate() || c.SkipsCertificateVerification() {
+			t.Fatal("PinsCertificate() or SkipsCertificateVerification() is true without either setting")
 		}
 	})
 
@@ -178,12 +197,12 @@ func TestNewConfiguresTLS(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		conf := transportTLS(t, c)
-		if conf == nil || !conf.InsecureSkipVerify || conf.VerifyConnection == nil || conf.VerifyPeerCertificate != nil {
-			t.Fatalf("TLS config = %+v, want chain verification replaced by VerifyConnection", conf)
-		}
+		conf := requireVerifyConnection(t, c)
 		if err := conf.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert.cert}}); err != nil {
 			t.Fatalf("VerifyConnection() error = %v, want the normalised fingerprint to match", err)
+		}
+		if !c.PinsCertificate() {
+			t.Fatal("PinsCertificate() = false with a fingerprint")
 		}
 	})
 
@@ -194,9 +213,9 @@ func TestNewConfiguresTLS(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		conf := transportTLS(t, c)
-		if conf == nil || conf.RootCAs == nil || conf.InsecureSkipVerify {
-			t.Fatalf("TLS config = %+v, want the CA file as roots with verification on", conf)
+		requireVerifyConnection(t, c)
+		if c.trust.roots == nil || c.trust.pinned != "" || c.trust.insecure {
+			t.Fatalf("trust = %+v, want the CA file as roots", c.trust)
 		}
 	})
 
@@ -226,8 +245,9 @@ func TestNewConfiguresTLS(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if conf := transportTLS(t, c); conf == nil || !conf.InsecureSkipVerify || conf.VerifyConnection != nil {
-			t.Fatalf("TLS config = %+v, want verification skipped", conf)
+		conf := requireVerifyConnection(t, c)
+		if err := conf.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert.cert}}); err != nil || !c.SkipsCertificateVerification() {
+			t.Fatalf("VerifyConnection() error = %v, SkipsCertificateVerification() = %v, want verification skipped", err, c.SkipsCertificateVerification())
 		}
 	})
 
@@ -372,7 +392,7 @@ func serveTLS(t *testing.T, fake *fakePBS, chain []testCertificate, opts Options
 	}
 
 	listener := newPipeListener()
-	server := &http.Server{Handler: http.HandlerFunc(fake.serve), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: http.HandlerFunc(fake.serveRecorded), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		_ = server.Serve(tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}))
 	}()
@@ -402,6 +422,11 @@ func TestTLSHandshake(t *testing.T) {
 	if err := os.WriteFile(caFile, leaf.pem, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	idn := newTestCertificate(t, "xn--bcher-kva.test")
+	idnCAFile := filepath.Join(t.TempDir(), "idn.pem")
+	if err := os.WriteFile(idnCAFile, idn.pem, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name    string
@@ -422,15 +447,25 @@ func TestTLSHandshake(t *testing.T) {
 			chain: []testCertificate{leaf},
 		},
 		{
-			name:  "pinned intermediate",
-			opts:  Options{Endpoint: "https://pbs.test", CertFingerprint: CertificateFingerprint(intermediate.cert)},
-			chain: []testCertificate{leaf, intermediate},
+			// A server in the middle presents a leaf of its own, with PBS's
+			// certificate after it, which anyone can get.
+			name:    "pinned certificate after another leaf",
+			opts:    Options{Endpoint: "https://pbs.test", CertFingerprint: CertificateFingerprint(intermediate.cert)},
+			chain:   []testCertificate{leaf, intermediate},
+			wantErr: "does not match SHA-256 fingerprint",
 		},
 		{
 			name:    "fingerprint mismatch",
 			opts:    Options{Endpoint: "https://pbs.test", CertFingerprint: strings.Repeat("0", 64)},
 			chain:   []testCertificate{leaf},
-			wantErr: "no certificate the server presented matches SHA-256 fingerprint",
+			wantErr: "does not match SHA-256 fingerprint",
+		},
+		{
+			// net/http sends and Go verifies the ASCII form of an
+			// internationalised host name.
+			name:  "CA file for an internationalised host name",
+			opts:  Options{Endpoint: "https://bücher.test", CAFile: idnCAFile},
+			chain: []testCertificate{idn},
 		},
 		{
 			name:  "CA file",
@@ -474,6 +509,9 @@ func TestTLSHandshake(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ServerVersion() error = %v", err)
+			}
+			if fake.count("GET /version") != 1 {
+				t.Fatalf("the server recorded %v, want GET /version", fake.routes())
 			}
 			if version.String() != "4.2.8" {
 				t.Fatalf("ServerVersion() = %q, want 4.2.8", version)
