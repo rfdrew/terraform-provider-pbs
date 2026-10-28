@@ -85,25 +85,6 @@ func hostValidators() []validator.String {
 	}
 }
 
-// secretCheck is stringCheck for a secret: a failing value is reported
-// without repeating it.
-type secretCheck struct {
-	description string
-	check       func(string) bool
-}
-
-func (v secretCheck) Description(_ context.Context) string { return v.description }
-
-func (v secretCheck) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
-
-func (v secretCheck) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || v.check(req.ConfigValue.ValueString()) {
-		return
-	}
-	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Attribute Value",
-		fmt.Sprintf("Attribute %s %s; the value is a secret and is not shown.", req.Path, v.description))
-}
-
 func (r *remoteResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_remote"
 }
@@ -113,12 +94,12 @@ func (r *remoteResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 		"Password of `auth_id` on the remote, or, when `auth_id` is an API token, the token's secret. PBS needs "+
 			"it to create the remote, so it is required then; after an import, leave it out to keep the password "+
 			"PBS has.",
-		secretCheck{
+		stringCheck{
 			description: "must be 1 to 768 bytes long, without control characters",
 			check: func(s string) bool {
 				return s != "" && len(s) <= maxRemotePasswordBytes && !strings.ContainsFunc(s, unicode.IsControl)
 			},
-		},
+		}.secret(),
 	)
 
 	resp.Schema = schema.Schema{

@@ -12,16 +12,16 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 (`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores — removable ones too —
 with their namespaces and their prune and verify jobs (`pbs_datastore`,
 `pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`) and
-notifications by mail (`pbs_notification_endpoint_smtp`,
+notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 `pbs_notification_matcher`) and a Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
 `pbs_node_certificate`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-the datastores, their namespaces, usage and garbage collection,
-besides `pbs_version`, `pbs_fingerprint` and `pbs_acme_tos`. Remotes and
-sync jobs (`pbs_remote`, `pbs_sync_job`) copy backups between servers, with
-data sources for them and for the other jobs. Other notification endpoints
-come next. The guide
+the datastores, their namespaces, usage and garbage collection, the
+notification targets and matcher fields, besides `pbs_version`,
+`pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
+`pbs_sync_job`) copy backups between servers, with data sources for them and
+for the other jobs. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
 puts them together, and [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
 adds a second server.

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
@@ -57,6 +56,7 @@ type smtpEndpointModel struct {
 	Comment           types.String `tfsdk:"comment"`
 	Disable           types.Bool   `tfsdk:"disable"`
 	Origin            types.String `tfsdk:"origin"`
+	SendTestOnApply   types.Bool   `tfsdk:"send_test_on_apply"`
 }
 
 // smtpEndpointDeletable are the properties PBS lets an SMTP endpoint update
@@ -96,12 +96,7 @@ func (r *smtpEndpointResource) Schema(_ context.Context, _ resource.SchemaReques
 			"end, which PBS would drop when it reads the password back.",
 		stringvalidator.LengthAtLeast(1),
 		stringvalidator.AlsoRequires(path.MatchRoot("username")),
-		stringCheck{
-			description: "must not contain control characters, and must not begin or end with white space",
-			check: func(s string) bool {
-				return !strings.ContainsFunc(s, unicode.IsControl) && strings.TrimSpace(s) == s
-			},
-		},
+		noControlOrPadding.secret(),
 	)
 
 	resp.Schema = schema.Schema{
@@ -112,7 +107,8 @@ func (r *smtpEndpointResource) Schema(_ context.Context, _ resource.SchemaReques
 			"this one with a `pbs_notification_matcher` whose `target` names it, such as the built-in " +
 			"`default-matcher`, imported.\n\n" +
 			"PBS does not contact the server when it saves the endpoint; a wrong setting shows when PBS sends the " +
-			"first notification. Endpoint and matcher names share one namespace.\n\n" +
+			"first notification, or at once with `send_test_on_apply`. Endpoint and matcher names share one " +
+			"namespace.\n\n" +
 			"~> **PBS refuses to delete an endpoint a matcher targets.** When a change of `name` replaces an " +
 			"endpoint that a `pbs_notification_matcher` targets, set `lifecycle { create_before_destroy = true }` " +
 			"on the endpoint, so that the matcher moves to the new endpoint before the old one goes.\n\n" +
@@ -207,6 +203,8 @@ func (r *smtpEndpointResource) Schema(_ context.Context, _ resource.SchemaReques
 				MarkdownDescription: "Where the endpoint comes from: `user-created` for every SMTP endpoint, as PBS has no built-in one.",
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"send_test_on_apply": sendTestOnApplyAttribute("PBS waits for the SMTP server to accept the mail, " +
+				"which it then delivers or bounces on its own."),
 		},
 	}
 }
@@ -254,8 +252,9 @@ func (m *smtpEndpointModel) changes(prior smtpEndpointModel, c *propertyChanges)
 }
 
 // fromSMTPEndpoint records an SMTP endpoint as PBS reports it. The name is the
-// one it was looked up by. The password's version exists only in Terraform
-// and keeps its value; the password itself is never stored.
+// one it was looked up by. The password's version and send_test_on_apply
+// exist only in Terraform and keep their values; the password itself is never
+// stored.
 func (m *smtpEndpointModel) fromSMTPEndpoint(name string, e pbsclient.SMTPEndpoint, diags *diag.Diagnostics) {
 	m.ID = types.StringValue(name)
 	m.Name = types.StringValue(name)
@@ -271,6 +270,11 @@ func (m *smtpEndpointModel) fromSMTPEndpoint(name string, e pbsclient.SMTPEndpoi
 	m.Comment = stringOrNull(e.Comment)
 	m.Disable = boolOr(e.Disable, false)
 	m.Origin = stringOr(e.Origin, pbsclient.OriginUserCreated)
+	m.SendTestOnApply = sendTestOnApplyOrDefault(m.SendTestOnApply)
+}
+
+func (m *smtpEndpointModel) testPlan() notificationTestPlan {
+	return notificationTestPlan{SendTestOnApply: m.SendTestOnApply, Disable: m.Disable}
 }
 
 func (r *smtpEndpointResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -327,6 +331,9 @@ func (r *smtpEndpointResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 	plan.fromSMTPEndpoint(name, endpoint, &resp.Diagnostics)
+	if !resp.Diagnostics.HasError() && !testCreatedEndpoint(ctx, client, name, plan.testPlan(), client.DeleteSMTPEndpoint, &resp.Diagnostics) {
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
 }
@@ -383,7 +390,8 @@ func (r *smtpEndpointResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	if len(params) > 0 {
+	changed := len(params) > 0
+	if changed {
 		err := client.WithConfigLock(pbsclient.ConfigNotifications, func() error {
 			return client.UpdateSMTPEndpoint(ctx, name, params)
 		})
@@ -406,6 +414,10 @@ func (r *smtpEndpointResource) Update(ctx context.Context, req resource.UpdateRe
 	plan.fromSMTPEndpoint(name, endpoint, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() || !changed {
+		return
+	}
+	testChangedEndpoint(ctx, client, name, plan.testPlan(), &resp.Diagnostics)
 }
 
 func (r *smtpEndpointResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -448,5 +460,8 @@ func (r *smtpEndpointResource) ImportState(ctx context.Context, req resource.Imp
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), name)...)
+	// The default, so that importing plans no change for a configuration
+	// that leaves it out.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("send_test_on_apply"), false)...)
 	setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
 }
