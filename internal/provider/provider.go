@@ -503,6 +503,9 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewPruneJobResource,
 		NewVerifyJobResource,
 		NewSMTPEndpointResource,
+		NewSendmailEndpointResource,
+		NewGotifyEndpointResource,
+		NewWebhookEndpointResource,
 		NewNotificationMatcherResource,
 		NewACMEAccountResource,
 		NewACMEPluginResource,
@@ -527,6 +530,8 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewRolesDataSource,
 		NewPermissionsDataSource,
 		NewACMEToSDataSource,
+		NewNotificationTargetsDataSource,
+		NewNotificationMatcherFieldsDataSource,
 	}
 }
 

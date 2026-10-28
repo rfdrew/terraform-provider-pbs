@@ -3,8 +3,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -574,8 +576,9 @@ func (h *protocolHarness) readDataSource(t *testing.T, typeName string, config t
 // value of every attribute, unknown ones included, except that a computed
 // attribute the configuration leaves null keeps its prior value, and a
 // write-only attribute is always null. Single nested attributes are walked the same way; list,
-// set and map nested attributes are taken as configured, which is what
-// Terraform proposes when their objects have no computed attributes, as the
+// set and map nested attributes are taken as configured, but for their
+// objects' write-only attributes, which are null too: that is what Terraform
+// proposes when their objects have no computed attributes, as the
 // provider's have not. Blocks are not handled: the provider has none.
 func proposedNewState(t *testing.T, block *tfprotov6.SchemaBlock, prior, config tftypes.Value) tftypes.Value {
 	t.Helper()
@@ -612,7 +615,7 @@ func proposedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, p
 					t.Fatalf("proposedNewState does not handle computed attributes in %s, a collection of objects", attr.Name)
 				}
 			}
-			proposed[attr.Name] = configV
+			proposed[attr.Name] = withoutNestedWriteOnly(t, attr.NestedType, configV)
 		case attr.NestedType != nil && configured:
 			proposed[attr.Name] = proposedAttributes(t, attr.NestedType.Attributes, priorV, configV)
 		case !attr.Computed || configured:
@@ -622,6 +625,54 @@ func proposedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, p
 		}
 	}
 	return tftypes.NewValue(config.Type(), proposed)
+}
+
+// withoutNestedWriteOnly returns a known list or map of objects with the
+// write-only attributes of every object null. Sets of objects cannot have
+// write-only attributes.
+func withoutNestedWriteOnly(t *testing.T, nested *tfprotov6.SchemaObject, v tftypes.Value) tftypes.Value {
+	t.Helper()
+	if !slices.ContainsFunc(nested.Attributes, func(a *tfprotov6.SchemaAttribute) bool { return a.WriteOnly }) {
+		return v
+	}
+	withoutWriteOnly := func(object tftypes.Value) tftypes.Value {
+		if !object.IsKnown() || object.IsNull() {
+			return object
+		}
+		attrs := maps.Clone(harnessObjectAttributes(t, object))
+		for _, a := range nested.Attributes {
+			if a.WriteOnly {
+				attrs[a.Name] = tftypes.NewValue(attrs[a.Name].Type(), nil)
+			}
+		}
+		return tftypes.NewValue(object.Type(), attrs)
+	}
+	// As hands out the value's own elements and attributes, which must not
+	// change.
+	switch nested.Nesting {
+	case tfprotov6.SchemaObjectNestingModeList:
+		var elements []tftypes.Value
+		if err := v.As(&elements); err != nil {
+			t.Fatal(err)
+		}
+		proposed := make([]tftypes.Value, len(elements))
+		for i, e := range elements {
+			proposed[i] = withoutWriteOnly(e)
+		}
+		return tftypes.NewValue(v.Type(), proposed)
+	case tfprotov6.SchemaObjectNestingModeMap:
+		var elements map[string]tftypes.Value
+		if err := v.As(&elements); err != nil {
+			t.Fatal(err)
+		}
+		proposed := make(map[string]tftypes.Value, len(elements))
+		for k, e := range elements {
+			proposed[k] = withoutWriteOnly(e)
+		}
+		return tftypes.NewValue(v.Type(), proposed)
+	}
+	t.Fatalf("proposedNewState does not handle write-only attributes in a %v of objects", nested.Nesting)
+	return v
 }
 
 // requirePlanValid fails the test where a plan breaks Terraform core's rules

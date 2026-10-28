@@ -79,6 +79,7 @@ func (r *userResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		stringCheck{
 			description: "must not contain control characters",
 			check:       func(s string) bool { return !strings.ContainsFunc(s, unicode.IsControl) },
+			hideValue:   true,
 		},
 	)
 

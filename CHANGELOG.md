@@ -25,6 +25,35 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or below one of them; `pbs_datastore_status`, the size, use and free space
   of a datastore and when PBS expects it to be full; and `pbs_gc_status`,
   the schedule and outcome of a datastore's garbage collection.
+- `pbs_notification_endpoint_sendmail` resource: mail handed to the host's
+  mail transport agent, with its recipients, sender and author. The
+  built-in `mail-to-root` cannot be created, only imported, and destroying
+  it resets it to its built-in settings, as `default-matcher` does.
+- `pbs_notification_endpoint_gotify` resource: notifications pushed to a
+  Gotify server, with a write-only application token (`token_wo` and
+  `token_wo_version`).
+- `pbs_notification_endpoint_webhook` resource: an HTTP request for every
+  notification, with its method, headers and body as templates, and
+  secrets for them whose values are write-only. Each secret has a version
+  of its own: a change sends the values of new secrets and of those whose
+  version changed, and keeps the values PBS has for the others. The
+  provider encodes headers and body in base64, as PBS stores them.
+- `send_test_on_apply` on every notification endpoint resource, SMTP
+  included: PBS sends a test notification through an enabled endpoint
+  after every apply that creates or changes it, and a failed test fails the
+  apply. An endpoint whose test fails right after its creation is deleted
+  again, so that the next apply creates it anew, also under
+  `create_before_destroy`. It defaults to `false`.
+- Data sources `pbs_notification_targets`, every notification endpoint, and
+  `pbs_notification_matcher_fields`, the metadata fields a matcher can
+  match with the values PBS knows for them.
+
+### Fixed
+
+- A `password_wo` of `pbs_user` or `pbs_notification_endpoint_smtp`, or a
+  value in `data` of `pbs_acme_plugin`, that failed validation, for example
+  with a trailing line break, was repeated in the error message; it no
+  longer is.
 
 ## [0.1.0] - 2026-10-28
 
@@ -146,4 +175,5 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0

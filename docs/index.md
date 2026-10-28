@@ -43,10 +43,16 @@ never returns.
   retention, and verify jobs (`pbs_verify_job`); to read them,
   `pbs_datastore`, `pbs_datastores` and `pbs_namespaces`, and how they are
   doing, `pbs_datastore_status` and `pbs_gc_status`.
-* **Notifications** — SMTP endpoints (`pbs_notification_endpoint_smtp`) and
-  the matchers that route notifications to them
-  (`pbs_notification_matcher`), the built-in `default-matcher` included,
-  which is managed by importing it.
+* **Notifications** — endpoints that deliver notifications: by the host's
+  sendmail (`pbs_notification_endpoint_sendmail`), the built-in
+  `mail-to-root` included, by SMTP (`pbs_notification_endpoint_smtp`), to
+  Gotify (`pbs_notification_endpoint_gotify`) and as webhooks
+  (`pbs_notification_endpoint_webhook`), each able to send a test
+  notification on apply; and the matchers that route notifications to them
+  (`pbs_notification_matcher`), the built-in `default-matcher` included.
+  Built-in entries are managed by importing them. `pbs_notification_targets`
+  and `pbs_notification_matcher_fields` read the endpoints and what
+  matchers can match.
 * **Certificate** — a certificate from Let's Encrypt or another ACME CA for
   the web interface and API: the account at the CA (`pbs_acme_account`),
   a DNS challenge plugin such as Cloudflare's (`pbs_acme_plugin`), the
@@ -58,8 +64,7 @@ never returns.
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Remotes, sync jobs and other notification endpoints follow in the next
-releases.
+Remotes and sync jobs follow in the next releases.
 
 The usual first step is access for a Proxmox VE cluster: a user, an API
 token for it, and the role to back up to a datastore, for the token and its

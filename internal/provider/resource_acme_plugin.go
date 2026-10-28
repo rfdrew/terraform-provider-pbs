@@ -131,6 +131,7 @@ func (r *acmePluginResource) Schema(_ context.Context, _ resource.SchemaRequest,
 						check: func(s string) bool {
 							return !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 						},
+						hideValue: true,
 					}),
 				},
 			},

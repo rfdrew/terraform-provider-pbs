@@ -120,11 +120,29 @@ func textValidators(minLength, maxLength int) []validator.String {
 	}
 }
 
+// noControlOrPadding refuses control characters and white space at either
+// end, which PBS would drop when it reads a value back from its
+// configuration file, such as a password.
+var noControlOrPadding = stringCheck{
+	description: "must not contain control characters, and must not begin or end with white space",
+	check: func(s string) bool {
+		return !strings.ContainsFunc(s, unicode.IsControl) && strings.TrimSpace(s) == s
+	},
+}
+
 // stringCheck adapts a predicate into a string validator. A failing value is
-// reported as "Attribute <path> <description>, got: <value>".
+// reported as "Attribute <path> <description>, got: <value>" — without the
+// value for a check made secret, whose value must not reach the output.
 type stringCheck struct {
 	description string
 	check       func(string) bool
+	hideValue   bool
+}
+
+// secret returns the check for a secret, whose errors leave out the value.
+func (v stringCheck) secret() stringCheck {
+	v.hideValue = true
+	return v
 }
 
 func (v stringCheck) Description(_ context.Context) string { return v.description }
@@ -135,11 +153,11 @@ func (v stringCheck) ValidateString(_ context.Context, req validator.StringReque
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || v.check(req.ConfigValue.ValueString()) {
 		return
 	}
-	resp.Diagnostics.AddAttributeError(
-		req.Path,
-		"Invalid Attribute Value",
-		fmt.Sprintf("Attribute %s %s, got: %q", req.Path, v.description, req.ConfigValue.ValueString()),
-	)
+	detail := fmt.Sprintf("Attribute %s %s, got: %q", req.Path, v.description, req.ConfigValue.ValueString())
+	if v.hideValue {
+		detail = fmt.Sprintf("Attribute %s %s; the value is not shown, as it is a secret.", req.Path, v.description)
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Attribute Value", detail)
 }
 
 // httpsURLValidator accepts an absolute https:// URL with a host and without
