@@ -144,6 +144,7 @@ func (r *nodeACMEResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				},
 				Validators: []validator.Set{
 					setvalidator.SizeBetween(1, pbsclient.MaxACMEDomains),
+					setvalidator.NoNullValues(),
 					uniqueDomainsValidator{},
 				},
 			},

@@ -160,7 +160,7 @@ func (r *webhookEndpointResource) Schema(_ context.Context, _ resource.SchemaReq
 					"base64-encoded; the provider encodes and decodes them. A header that holds a credential should " +
 					"take it from a secret, as `{{ secrets.<name> }}`: header values are stored as they are given " +
 					"and readable through the API.",
-				Validators: []validator.List{listvalidator.SizeAtLeast(1)},
+				Validators: []validator.List{listvalidator.SizeAtLeast(1), listvalidator.NoNullValues()},
 				NestedObject: schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
 					"name": schema.StringAttribute{
 						Required:            true,
@@ -190,7 +190,7 @@ func (r *webhookEndpointResource) Schema(_ context.Context, _ resource.SchemaReq
 					"keeps the value PBS has. Removing a secret from the list removes it from PBS, and PBS's " +
 					"secrets that the list does not name show as a change that removes them. Needs Terraform or " +
 					"OpenTofu 1.11 or later.",
-				Validators: []validator.List{listvalidator.SizeAtLeast(1), uniqueSecretNames{}},
+				Validators: []validator.List{listvalidator.SizeAtLeast(1), listvalidator.NoNullValues(), uniqueSecretNames{}},
 				NestedObject: schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
 					"name": schema.StringAttribute{
 						Required:            true,

@@ -117,6 +117,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 					"targets sends nothing.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(safeIDValidators(minNotificationNameLength)...),
 				},
 			},
@@ -128,6 +129,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 					"which match a notification of any of them.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(stringvalidator.RegexMatches(severityMatcherPattern,
 						"must be severities — info, notice, warning, error or unknown — separated by commas without spaces")),
 				},
@@ -140,6 +142,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 					"`regex:<field>=<regular expression>`, such as `regex:hostname=^pbs-`.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(fieldMatcherValidator()),
 				},
 			},
@@ -150,6 +153,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 					"`mon..fri 8-17` or `sat,sun 10:00-14:30`. PBS checks them.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
+					setvalidator.NoNullValues(),
 					setvalidator.ValueStringsAre(textValidators(1, 256)...),
 				},
 			},
