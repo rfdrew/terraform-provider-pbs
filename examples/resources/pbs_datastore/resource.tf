@@ -21,3 +21,18 @@ resource "pbs_datastore" "store1" {
   # access to the datastore until it is removed again; "read-only" still
   # allows restores.
 }
+
+# A removable datastore on a USB disk, for backups kept offsite: the disk's
+# file system is named by its UUID, which `blkid` shows, and path is a
+# directory on it. The disk must be connected when the datastore is created.
+# PBS mounts the directory at /mnt/datastore/offsite then, and whenever the
+# disk is plugged in, and unmounts it when told to, for the disk to be taken
+# away.
+resource "pbs_datastore" "offsite" {
+  name           = "offsite"
+  path           = "pbs/offsite"
+  backing_device = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+  # Free the space of pruned backups before the disk leaves (PBS 4.2+).
+  gc_on_unmount = true
+}

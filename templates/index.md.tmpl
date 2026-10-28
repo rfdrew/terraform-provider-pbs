@@ -37,9 +37,12 @@ never returns.
   the roles they have on ACL paths (`pbs_acl`); to read them,
   `pbs_user`, `pbs_users`, `pbs_api_tokens`, `pbs_acl`, `pbs_roles` and
   `pbs_permissions`, which shows what a user or token may actually do.
-* **Datastores** — datastores in a directory (`pbs_datastore`), and the jobs
+* **Datastores** — datastores in a directory or on a removable disk
+  (`pbs_datastore`), their namespaces (`pbs_namespace`), and the jobs
   that look after them: prune jobs (`pbs_prune_job`), which hold the
-  retention, and verify jobs (`pbs_verify_job`).
+  retention, and verify jobs (`pbs_verify_job`); to read them,
+  `pbs_datastore`, `pbs_datastores` and `pbs_namespaces`, and how they are
+  doing, `pbs_datastore_status` and `pbs_gc_status`.
 * **Notifications** — endpoints that deliver notifications: by the host's
   sendmail (`pbs_notification_endpoint_sendmail`), the built-in
   `mail-to-root` included, by SMTP (`pbs_notification_endpoint_smtp`), to
@@ -61,7 +64,7 @@ never returns.
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
 
-Namespaces, remotes and sync jobs follow in the next releases.
+Remotes and sync jobs follow in the next releases.
 
 The usual first step is access for a Proxmox VE cluster: a user, an API
 token for it, and the role to back up to a datastore, for the token and its

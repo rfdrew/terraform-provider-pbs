@@ -9,16 +9,18 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 > `DaveTCode/pbs`, which manages Altair PBS Professional.
 
 **Status: early development.** Users, API tokens and ACL entries
-(`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores with their prune and
-verify jobs (`pbs_datastore`, `pbs_prune_job`, `pbs_verify_job`) and
+(`pbs_user`, `pbs_api_token`, `pbs_acl`), datastores — removable ones too —
+with their namespaces and their prune and verify jobs (`pbs_datastore`,
+`pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`) and
 notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 `pbs_notification_matcher`) and a Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
 `pbs_node_certificate`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-the notification targets and matcher fields, besides `pbs_version`,
-`pbs_fingerprint` and `pbs_acme_tos`. Namespaces, remotes and sync jobs
-come next. The guide
+the datastores, their namespaces, usage and garbage collection, the
+notification targets and matcher fields, besides `pbs_version`,
+`pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs come next. The
+guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
 puts them together.
 
@@ -68,7 +70,9 @@ Proxmox publishes no container image for PBS, so `make pbs-up`
 systemd. It needs Docker with privileged containers. `PBS_TEST_PBS_VERSION=4.0`
 pins an older release line, and `PBS_TEST_VARIANT=image` uses the community
 image `ayufan/proxmox-backup-server` instead, which needs no privileges but
-has no `root@pam`.
+has no `root@pam`. The packages stand also gets a file system on a loop
+device, for the tests of removable datastores; `PBS_TEST_REMOVABLE=0` leaves
+it out, and those tests skip.
 
 Run the acceptance tests only against such a throwaway server: they create,
 change and delete real configuration.
