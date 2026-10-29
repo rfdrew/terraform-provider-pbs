@@ -601,7 +601,7 @@ func TestDatastoreResourceS3ReuseWithMaintenanceMode(t *testing.T) {
 	if !isNullAt(t, inst.state, "maintenance_mode") {
 		t.Errorf("state = %s", inst.state)
 	}
-	inst = h.update(t, inst, config)
+	h.update(t, inst, config)
 	if got := fake.lastCall(t, "PUT /config/datastore/s3store").form.Get("maintenance-mode"); got != "read-only" {
 		t.Errorf("PUT maintenance-mode = %q", got)
 	}
