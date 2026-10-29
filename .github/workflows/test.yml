@@ -201,6 +201,9 @@ jobs:
           echo "::add-mask::${PBS_API_TOKEN#*:}"
           echo "::add-mask::${PBS_ACC_PASSWORD}"
           echo "::add-mask::${PBS_ACC_ADMIN_PASSWORD}"
+          for secret in "${PBS_ACC_LDAP_BIND_PASSWORD:-}" "${PBS_ACC_LDAP_USER_PASSWORD:-}"; do
+            if [ -n "$secret" ]; then echo "::add-mask::${secret}"; fi
+          done
           if [ -n "${PBS_ACC_S3_SECRET_KEY:-}" ]; then
             echo "::add-mask::${PBS_ACC_S3_SECRET_KEY}"
           fi
@@ -223,6 +226,7 @@ jobs:
         run: |
           docker logs --tail 200 pbs-tfprovider-test || true
           docker logs --tail 100 pbs-tfprovider-test-pebble || true
+          docker logs --tail 100 pbs-tfprovider-test-ldap || true
           docker logs --tail 100 pbs-tfprovider-test-s3 || true
           if [ "$PBS_TEST_VARIANT" = packages ]; then
             docker exec pbs-tfprovider-test journalctl --no-pager -n 200 \

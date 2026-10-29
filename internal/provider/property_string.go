@@ -28,9 +28,16 @@ import (
 type propertyStringKey struct {
 	attribute string
 	key       string
-	// typ is types.StringType, types.Int64Type or types.BoolType.
+	// typ is types.StringType, types.Int64Type, types.BoolType or
+	// propertyStringListType.
 	typ attr.Type
 }
+
+// propertyStringListType is the type of a key that holds a list, such as
+// remove-vanished in a realm's sync-defaults-options: a set of strings,
+// which the property string separates by semicolons, as commas separate its
+// keys. PBS splits such a list at semicolons, commas and white space.
+var propertyStringListType = types.SetType{ElemType: types.StringType}
 
 // propertyStringFormat is the set of keys of one property string.
 type propertyStringFormat struct {
@@ -84,6 +91,16 @@ func (f propertyStringFormat) object(name, s string, diags *diag.Diagnostics) ty
 // key the string leaves out.
 func propertyValue(typ attr.Type, raw string, ok bool, fail func(error)) attr.Value {
 	switch typ {
+	case propertyStringListType:
+		if !ok {
+			return types.SetNull(types.StringType)
+		}
+		var d diag.Diagnostics
+		set := stringSetOrNull(uniqueStrings(pbsclient.SplitList(raw)), &d)
+		if d.HasError() {
+			fail(fmt.Errorf("%q is not a list", raw))
+		}
+		return set
 	case types.Int64Type:
 		if !ok {
 			return types.Int64Null()
@@ -148,6 +165,8 @@ func (f propertyStringFormat) format(object types.Object) (string, error) {
 			p[k.key] = strconv.FormatInt(v.ValueInt64(), 10)
 		case types.Bool:
 			p[k.key] = pbsclient.FormatBool(v.ValueBool())
+		case types.Set:
+			p[k.key] = strings.Join(sortedStrings(v.Elements()), ";")
 		default:
 			return "", fmt.Errorf("%s has the unexpected type %T", k.attribute, value)
 		}
