@@ -62,7 +62,7 @@ func syncJobDataAttributes(idRequired bool) map[string]schema.Attribute {
 		return schema.StringAttribute{
 			CustomType:          byteSizeType{},
 			Computed:            true,
-			MarkdownDescription: description + ", as PBS writes it, such as `10 MiB`; null for no limit.",
+			MarkdownDescription: description + ", as PBS writes it, such as `10 MiB`; null when not set.",
 		}
 	}
 	return map[string]schema.Attribute{
@@ -94,7 +94,15 @@ func syncJobDataAttributes(idRequired bool) map[string]schema.Attribute {
 		"burst_in":        byteSize("How many bytes over `rate_in` the job may receive at once"),
 		"rate_out":        byteSize("Rate limit on what the job sends, in bytes per second"),
 		"burst_out":       byteSize("How many bytes over `rate_out` the job may send at once"),
-		"comment":         computedString("Comment; null when there is none."),
+		"active_encryption_key": computedString("ID of the sync encryption key a push job encrypts the backups it " +
+			"copies with; null when it copies them as they are."),
+		"associated_key": schema.SetAttribute{
+			ElementType: types.StringType,
+			Computed:    true,
+			MarkdownDescription: "IDs of the sync encryption keys the job keeps for decrypting; null when there are " +
+				"none.",
+		},
+		"comment": computedString("Comment; null when there is none."),
 	}
 }
 

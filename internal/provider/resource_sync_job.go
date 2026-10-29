@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -67,17 +69,21 @@ type syncJobModel struct {
 	BurstIn        byteSizeValue `tfsdk:"burst_in"`
 	RateOut        byteSizeValue `tfsdk:"rate_out"`
 	BurstOut       byteSizeValue `tfsdk:"burst_out"`
-	Comment        types.String  `tfsdk:"comment"`
+	// ActiveEncryptionKey and AssociatedKey are a push job's sync encryption
+	// keys, from PBS 4.2.
+	ActiveEncryptionKey types.String `tfsdk:"active_encryption_key"`
+	AssociatedKey       types.Set    `tfsdk:"associated_key"`
+	Comment             types.String `tfsdk:"comment"`
 }
 
 // syncJobDeletable are the properties PBS lets a sync job update delete.
 // store and remote-store are required, and resync-corrupt cannot be deleted,
-// only set to false. The encryption keys are left alone: see the resource's
-// description.
+// only set to false.
 var syncJobDeletable = []string{
 	"remote", "owner", "comment", "schedule", "remove-vanished", "group-filter",
 	"rate-in", "burst-in", "rate-out", "burst-out", "ns", "remote-ns", "max-depth", "transfer-last",
 	"encrypted-only", "verified-only", "run-on-mount", "unmount-on-done", "sync-direction", "worker-threads",
+	"active-encryption-key", "associated-key",
 }
 
 // maxSyncWorkerThreads bounds worker_threads.
@@ -124,7 +130,7 @@ func rateAttribute(description string) schema.StringAttribute {
 			"`G`, `T` and `P` are powers of 1000, `Ki` to `Pi` powers of 1024, and `B` is optional. PBS writes " +
 			"it back in its own spelling, such as `10 MiB`, which counts as the same: state keeps the " +
 			"configuration's. Only after an import, state has PBS's spelling, and the next plan shows an update " +
-			"that sends nothing. No limit when left out.",
+			"that sends nothing.",
 		Validators: byteSizeValidators(),
 	}
 }
@@ -165,8 +171,12 @@ func (r *syncJobResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"`Datastore.Audit` with `Datastore.Read` on the remote datastore — the role `DatastoreReader` — or " +
 			"`Datastore.Backup` for its own backups; to push, `Datastore.Backup` there, plus `Datastore.Prune` for " +
 			"`remove_vanished` and `Datastore.Modify` to create the namespaces it pushes into.\n\n" +
-			"The resource leaves the sync encryption keys of PBS 4.2, `active-encryption-key` and " +
-			"`associated-key`, alone: a job keeps the ones set in the web interface.",
+			"**Encryption.** From PBS 4.2, a push job can encrypt the backups it copies with a " +
+			"`pbs_sync_encryption_key`, its `active_encryption_key`, so that the remote holds them encrypted. When " +
+			"the active key changes or goes, PBS keeps the one before in `associated_key`, the keys the job keeps " +
+			"for decrypting, so that the key the remote's backups need is not deleted by mistake; with " +
+			"`associated_key` left out, the provider plans that. Using a key needs `Sys.Modify` on " +
+			"`/system/encryption-keys/<key>`, for the user or token the provider signs in as and for `owner` alike.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Required: true,
@@ -323,11 +333,35 @@ func (r *syncJobResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators: []validator.Int64{int64validator.Between(1, maxSyncWorkerThreads)},
 			},
 			"rate_in": rateAttribute("Rate limit on the data the job receives from the remote, the copies of a " +
-				"pull, in bytes per second."),
+				"pull, in bytes per second; no limit when left out."),
 			"burst_in": rateAttribute("How many bytes over `rate_in` the job may receive at once."),
 			"rate_out": rateAttribute("Rate limit on the data the job sends to the remote, the copies of a push, in " +
-				"bytes per second."),
+				"bytes per second; no limit when left out."),
 			"burst_out": rateAttribute("How many bytes over `rate_out` the job may send at once."),
+			"active_encryption_key": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "ID of the `pbs_sync_encryption_key` a push job encrypts the backups it copies " +
+					"with; the backups are copied as they are when left out. The key must not be archived. Push jobs " +
+					"only; needs PBS 4.2 or newer. When it changes or is removed, PBS adds the key before to " +
+					"`associated_key`.",
+				Validators: safeIDValidators(minSafeIDLength),
+			},
+			"associated_key": schema.SetAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Computed:    true,
+				MarkdownDescription: "IDs of the `pbs_sync_encryption_key` resources the job keeps for decrypting: " +
+					"for a push job, the keys it encrypted with before, which the backups on the remote still need; " +
+					"for a pull job, keys to decrypt the backups it pulls. PBS refuses to delete a key a job holds " +
+					"here. When left out, PBS manages it: it adds the key `active_encryption_key` had whenever that " +
+					"changes, and the provider plans that. When set, it is exactly what the job holds: the provider " +
+					"removes the key PBS adds unless it is listed, and `[]` holds none. Needs PBS 4.2 or newer.",
+				Validators: []validator.Set{
+					setvalidator.NoNullValues(),
+					setvalidator.ValueStringsAre(safeIDValidators(minSafeIDLength)...),
+				},
+				PlanModifiers: []planmodifier.Set{associatedKeysPlan{}},
+			},
 			"comment": schema.StringAttribute{
 				Optional:            true,
 				MarkdownDescription: "Free-form comment, up to 128 characters on one line.",
@@ -369,6 +403,11 @@ func (r *syncJobResource) ValidateConfig(ctx context.Context, req resource.Valid
 		resp.Diagnostics.AddAttributeError(path.Root("remote"), "Push needs a remote",
 			"A push job copies backups to another PBS: set remote to the pbs_remote to push to. To copy between "+
 				"two datastores of this server, use a pull job without remote instead.")
+	}
+	if !push && !config.SyncDirection.IsUnknown() && !config.ActiveEncryptionKey.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("active_encryption_key"), "Push jobs only",
+			"Only a push job encrypts the backups it copies; PBS refuses an active_encryption_key on a pull job. "+
+				"A pull job decrypts with the keys in associated_key.")
 	}
 	if push && config.ResyncCorrupt.ValueBool() {
 		resp.Diagnostics.AddAttributeError(path.Root("resync_corrupt"), "Pull jobs only",
@@ -417,6 +456,123 @@ func (r *syncJobResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		r.data.requireRelease(&resp.Diagnostics, path.Root("unmount_on_done"), plan.UnmountOnDone, pbs41)
 	}
 	r.data.requireRelease(&resp.Diagnostics, path.Root("worker_threads"), plan.WorkerThreads, pbs42)
+	r.data.requireRelease(&resp.Diagnostics, path.Root("active_encryption_key"), plan.ActiveEncryptionKey, pbs42)
+	if !plan.AssociatedKey.IsUnknown() && len(plan.AssociatedKey.Elements()) > 0 {
+		r.data.requireRelease(&resp.Diagnostics, path.Root("associated_key"), plan.AssociatedKey, pbs42)
+	}
+
+	// A key the active one before was, which the configuration drops from
+	// associated_key, is no longer protected from deletion.
+	if req.State.Raw.IsNull() || plan.AssociatedKey.IsUnknown() || plan.ActiveEncryptionKey.IsUnknown() {
+		return
+	}
+	var state syncJobModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !plan.ID.Equal(state.ID) || !plan.SyncDirection.Equal(state.SyncDirection) {
+		warnKeysLostByReplacement(ctx, req, plan, state, &resp.Diagnostics)
+		return
+	}
+	if state.ActiveEncryptionKey.IsNull() || plan.ActiveEncryptionKey.Equal(state.ActiveEncryptionKey) {
+		return
+	}
+	previous := state.ActiveEncryptionKey.ValueString()
+	for _, key := range sortedStrings(plan.AssociatedKey.Elements()) {
+		if key == previous {
+			return
+		}
+	}
+	resp.Diagnostics.AddAttributeWarning(path.Root("associated_key"), "Previous encryption key dropped",
+		fmt.Sprintf("This plan replaces the job's active_encryption_key %q, and associated_key does not keep it. PBS "+
+			"would keep it there, so that a key the backups pushed with it need cannot be deleted by mistake; with "+
+			"it dropped, it can be. Keep a copy of key %q for as long as the remote holds backups it encrypted: "+
+			"they cannot be restored without it.", previous, previous))
+}
+
+// warnKeysLostByReplacement warns when replacing a job leaves keys the old
+// job held, as its active or an associated key, out of the new one: PBS
+// creates the new job with the configured keys only, and the others are no
+// longer protected from deletion.
+func warnKeysLostByReplacement(ctx context.Context, req resource.ModifyPlanRequest, plan, state syncJobModel, diags *diag.Diagnostics) {
+	var configured types.Set
+	diags.Append(req.Config.GetAttribute(ctx, path.Root("associated_key"), &configured)...)
+	if diags.HasError() || configured.IsUnknown() {
+		return
+	}
+	kept := map[string]bool{plan.ActiveEncryptionKey.ValueString(): true}
+	for _, key := range sortedStrings(configured.Elements()) {
+		kept[key] = true
+	}
+	held := sortedStrings(state.AssociatedKey.Elements())
+	if !state.ActiveEncryptionKey.IsNull() {
+		held = append(held, state.ActiveEncryptionKey.ValueString())
+	}
+	var lost []string
+	for _, key := range held {
+		if !kept[key] && !slices.Contains(lost, key) {
+			lost = append(lost, key)
+		}
+	}
+	if len(lost) == 0 {
+		return
+	}
+	slices.Sort(lost)
+	diags.AddAttributeWarning(path.Root("associated_key"), "Encryption keys dropped by the replacement",
+		fmt.Sprintf("This plan replaces sync job %q, and PBS creates the new job without the keys the old one held, "+
+			"%s, so they are no longer protected from deletion. Set associated_key to keep them, and keep a copy of "+
+			"each key for as long as the remote holds backups it encrypted: they cannot be restored without it.",
+			state.ID.ValueString(), strings.Join(lost, ", ")))
+}
+
+// associatedKeysPlan plans associated_key when the configuration leaves it
+// out, and PBS manages it: null for a new job, and otherwise what state has,
+// plus the key active_encryption_key has in state when the plan changes or
+// removes it, as PBS then adds that key. A configured value is planned as it
+// is.
+type associatedKeysPlan struct{}
+
+func (associatedKeysPlan) Description(_ context.Context) string {
+	return "PBS's associated keys, with the active key a change replaces"
+}
+
+func (m associatedKeysPlan) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (associatedKeysPlan) PlanModifySet(ctx context.Context, req planmodifier.SetRequest, resp *planmodifier.SetResponse) {
+	if !req.ConfigValue.IsNull() {
+		return
+	}
+	if req.State.Raw.IsNull() {
+		resp.PlanValue = types.SetNull(types.StringType)
+		return
+	}
+	var planned, prior types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("active_encryption_key"), &planned)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("active_encryption_key"), &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	switch {
+	case planned.IsUnknown():
+		resp.PlanValue = types.SetUnknown(types.StringType)
+	case prior.IsNull() || planned.Equal(prior):
+		resp.PlanValue = req.StateValue
+	default:
+		keys := map[string]bool{prior.ValueString(): true}
+		for _, key := range sortedStrings(req.StateValue.Elements()) {
+			keys[key] = true
+		}
+		elements := make([]attr.Value, 0, len(keys))
+		for key := range keys {
+			elements = append(elements, types.StringValue(key))
+		}
+		set, d := types.SetValue(types.StringType, elements)
+		resp.Diagnostics.Append(d...)
+		resp.PlanValue = set
+	}
 }
 
 // syncJobDefaults is the model of a sync job as PBS creates it when a
@@ -442,7 +598,10 @@ var syncJobDefaults = syncJobModel{
 	BurstIn:        byteSizeOrNull(""),
 	RateOut:        byteSizeOrNull(""),
 	BurstOut:       byteSizeOrNull(""),
-	Comment:        types.StringNull(),
+	// Null in the plan of a new job whose configuration leaves them out.
+	ActiveEncryptionKey: types.StringNull(),
+	AssociatedKey:       types.SetNull(types.StringType),
+	Comment:             types.StringNull(),
 }
 
 // createParams are the parameters of the call that creates the job m
@@ -489,7 +648,44 @@ func (m *syncJobModel) changes(prior syncJobModel, c *propertyChanges) {
 	c.String("burst-in", sameSize(m.BurstIn, prior.BurstIn), prior.BurstIn.StringValue)
 	c.String("rate-out", sameSize(m.RateOut, prior.RateOut), prior.RateOut.StringValue)
 	c.String("burst-out", sameSize(m.BurstOut, prior.BurstOut), prior.BurstOut.StringValue)
+	c.String("active-encryption-key", m.ActiveEncryptionKey, prior.ActiveEncryptionKey)
+	c.StringSet("associated-key", emptySetAsNull(m.AssociatedKey), emptySetAsNull(prior.AssociatedKey))
 	c.String("comment", m.Comment, prior.Comment)
+}
+
+// forceAssociatedKeys sends associated_key in an update that would not send
+// it otherwise. A configured associated_key goes out whenever the active key
+// changes: PBS appends the key the update replaces to the associated keys
+// unless the update sets them. And associated_key goes out whenever the
+// update sets a new owner of a job with associated keys: PBS checks each of
+// them then as an active key, which fails for an archived one, unless the
+// update sets them. state is the prior state; configured tells whether the
+// configuration sets associated_key.
+func (m *syncJobModel) forceAssociatedKeys(state syncJobModel, configured bool, c *propertyChanges) {
+	planned, current := emptySetAsNull(m.AssociatedKey), emptySetAsNull(state.AssociatedKey)
+	if planned.IsUnknown() || (configured && !planned.Equal(current)) {
+		return
+	}
+	activeReplaced := configured && !state.ActiveEncryptionKey.IsNull() && !m.ActiveEncryptionKey.Equal(state.ActiveEncryptionKey)
+	ownerChecksKeys := !current.IsNull() && !m.Owner.IsNull() && !m.Owner.Equal(state.Owner)
+	if !activeReplaced && !ownerChecksKeys {
+		return
+	}
+	before := types.SetNull(types.StringType)
+	if planned.IsNull() {
+		// Anything but null, so that the change deletes the property.
+		before = types.SetValueMust(types.StringType, []attr.Value{types.StringValue("")})
+	}
+	c.StringSet("associated-key", planned, before)
+}
+
+// emptySetAsNull is a known empty set as null, the property left out, which
+// is how PBS reports an empty list.
+func emptySetAsNull(s types.Set) types.Set {
+	if !s.IsNull() && !s.IsUnknown() && len(s.Elements()) == 0 {
+		return types.SetNull(s.ElementType(context.Background()))
+	}
+	return s
 }
 
 // fromSyncJob records a sync job as PBS reports it. The ID is the one it was
@@ -518,7 +714,19 @@ func (m *syncJobModel) fromSyncJob(id string, job pbsclient.SyncJob, diags *diag
 	m.BurstIn = byteSizeOrNull(job.BurstIn)
 	m.RateOut = byteSizeOrNull(job.RateOut)
 	m.BurstOut = byteSizeOrNull(job.BurstOut)
+	m.ActiveEncryptionKey = stringOrNull(job.ActiveEncryptionKey)
+	m.AssociatedKey = associatedKeysFromPBS(job.AssociatedKey, m.AssociatedKey, diags)
 	m.Comment = stringOrNull(job.Comment)
+}
+
+// associatedKeysFromPBS is the associated keys PBS reports, or, when it
+// reports none, an empty set where the configuration — prior holds it — has
+// one, so that `associated_key = []` reads back as written.
+func associatedKeysFromPBS(keys []string, prior types.Set, diags *diag.Diagnostics) types.Set {
+	if len(keys) == 0 && !prior.IsNull() && !prior.IsUnknown() && len(prior.Elements()) == 0 {
+		return prior
+	}
+	return stringSetOrNull(keys, diags)
 }
 
 // aclPath is a datastore or remote ACL path, with the namespace below it.
@@ -569,6 +777,11 @@ func syncJobReadPrivileges(m syncJobModel) string {
 // of a sync job with 400 "permission check failed", which names none.
 func syncJobErrorDetail(client *pbsclient.Client, privileges string, err error) string {
 	var apiErr *pbsclient.Error
+	if errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Message, "no such key or cannot access key") {
+		return fmt.Sprintf("PBS cannot use a sync encryption key of the job: the key must exist — and the active "+
+			"key must not be archived — and both %q and the job's owner need Sys.Modify on "+
+			"/system/encryption-keys/<key>. %s", client.AuthID(), err)
+	}
 	if errors.As(err, &apiErr) && apiErr.StatusCode == 400 && strings.HasPrefix(apiErr.Message, "permission check failed") {
 		detail := fmt.Sprintf("%q lacks a privilege the job needs: %s.", client.AuthID(), privileges)
 		if client.UsesAPIToken() {
@@ -662,7 +875,17 @@ func (r *syncJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	client := r.data.client
 
 	changes := newPropertyChanges(&resp.Diagnostics, syncJobDeletable...)
-	plan.changes(state, changes)
+	// With associated_key left out, PBS manages the associated keys: it
+	// appends the active key an update replaces, which the plan has, by
+	// itself, so the planned keys are not sent.
+	var configured types.Set
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("associated_key"), &configured)...)
+	prior := state
+	if configured.IsNull() {
+		prior.AssociatedKey = plan.AssociatedKey
+	}
+	plan.changes(prior, changes)
+	plan.forceAssociatedKeys(state, !configured.IsNull(), changes)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -695,6 +918,12 @@ func (r *syncJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	job, err := client.GetSyncJob(ctx, id)
+	if err == nil {
+		job, err = r.writeAssociatedKeys(ctx, req, plan, job, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
 	if err != nil {
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		setIdentity(ctx, resp.Identity, "id", id, &resp.Diagnostics)
@@ -706,6 +935,33 @@ func (r *syncJobResource) Update(ctx context.Context, req resource.UpdateRequest
 	plan.fromSyncJob(id, job, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	setIdentity(ctx, resp.Identity, "id", id, &resp.Diagnostics)
+}
+
+// writeAssociatedKeys writes a configured associated_key again when PBS,
+// after the update, holds other keys: PBS adds the key a change of
+// active_encryption_key replaces, even when the same update sets
+// associated-key. It returns the job as PBS then reports it.
+func (r *syncJobResource) writeAssociatedKeys(ctx context.Context, req resource.UpdateRequest, plan syncJobModel, job pbsclient.SyncJob, diags *diag.Diagnostics) (pbsclient.SyncJob, error) {
+	var configured types.Set
+	diags.Append(req.Config.GetAttribute(ctx, path.Root("associated_key"), &configured)...)
+	if diags.HasError() || configured.IsNull() || plan.AssociatedKey.IsUnknown() {
+		return job, nil
+	}
+	changes := newPropertyChanges(diags, "associated-key")
+	changes.StringSet("associated-key", emptySetAsNull(plan.AssociatedKey), stringSetOrNull(job.AssociatedKey, diags))
+	if diags.HasError() || changes.Empty() {
+		return job, nil
+	}
+	client := r.data.client
+	id := plan.ID.ValueString()
+	tflog.Info(ctx, "PBS kept the replaced encryption key as associated; writing associated_key as configured",
+		map[string]any{"id": id})
+	err := client.WithConfigLock(pbsclient.ConfigSyncJobs, func() error { return client.UpdateSyncJob(ctx, id, changes.Values()) })
+	if err != nil {
+		diags.AddError("Unable to update PBS sync job", syncJobErrorDetail(client, syncJobPrivileges(plan), err))
+		return job, nil
+	}
+	return client.GetSyncJob(ctx, id)
 }
 
 // syncJobGone reports whether PBS has no sync job id.

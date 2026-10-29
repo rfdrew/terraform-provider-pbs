@@ -4,6 +4,87 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pbs_s3_endpoint` resource: the connection to an S3-compatible object
+  store that datastores on S3 use — its host name, with the `{{bucket}}` and
+  `{{region}}` templates PBS fills in, port, region, path-style addressing,
+  the fingerprint of a self-signed certificate, the access key, kept in state
+  as sensitive since PBS returns it, and a write-only secret key
+  (`secret_key_wo` and `secret_key_wo_version`), which creating an endpoint
+  requires; provider quirks, rate and burst limits (PBS 4.1), request limits
+  and the use of the node's HTTP proxy (`limit_active_requests`,
+  `limit_passive_requests`, `use_node_proxy`, PBS 4.2.4). PBS contacts
+  nothing when it saves an endpoint, and refuses to delete one a datastore
+  uses. Imported by ID.
+- Data sources `pbs_s3_endpoint` and `pbs_s3_endpoints`, without the secret
+  key, and `pbs_s3_buckets`, which has PBS connect to the object store and
+  list the buckets the endpoint's key may see, and so checks an endpoint.
+- Datastores on S3 object storage in `pbs_datastore`: `backend`, with the
+  endpoint, the bucket and the most space the local cache may take, which
+  PBS cannot change, so a change replaces the datastore; `overwrite_in_use`,
+  with `reuse_datastore`, to take over a datastore that its bucket marks in
+  use, after the loss of the PBS that had it; and `notification_thresholds`
+  and `counter_reset_schedule` (PBS 4.2), which notify when the requests or
+  traffic to the bucket pass a threshold. Datastores on S3 can now be
+  imported. The plan warns when a replacement would delete the backups in
+  the bucket, or start without them, and refuses one that would have the
+  next garbage collection delete them — a datastore on S3 replaced under the
+  same name in the same bucket without `reuse_datastore` — and moving a
+  datastore to S3 or off it in the same directory. A change of spelling of
+  `max_cache_size` alone is no change. A datastore that PBS's task created
+  but could not read all of its backups from the bucket for is recorded in
+  state with a warning, in maintenance mode `s3-refresh`, and an update
+  leaves such a maintenance mode, which PBS sets itself, alone. The data sources
+  `pbs_datastore` and `pbs_datastores` show the same attributes.
+- `pbs_traffic_control_rule` resource: a bandwidth limit on the connections
+  clients from some networks open to PBS, optionally only for some users
+  (PBS 4.1) and at some times of the day, with rate and burst limits in each
+  direction, compared by value like those of sync jobs. Imported by name.
+- Data sources `pbs_traffic_control_rule` and `pbs_traffic_control_rules`,
+  the rules with the rates their connections reach.
+- `pbs_sync_encryption_key` resource (PBS 4.2): a key with which push sync
+  jobs encrypt the backups they copy to a remote, either one of yours,
+  write-only (`key_wo` and `key_wo_version`), or one PBS generates, which
+  never reaches Terraform. A key cannot change, so a new version replaces
+  it — after an import only when the key file holds another key, as the
+  fingerprints tell —, and removing the version keeps it; the plan warns
+  before a replacement deletes a key. `archived` retires it in place.
+  Destroying it archives it first, as PBS deletes only archived keys.
+  Imported by ID.
+- Data source `pbs_sync_encryption_keys`, without the keys themselves.
+- `active_encryption_key` and `associated_key` on `pbs_sync_job` and its data
+  sources (PBS 4.2): the key a push job encrypts with, and the keys a job
+  keeps for decrypting. When the active key changes or goes, PBS keeps it
+  in `associated_key`, and with `associated_key` left out the plan says so;
+  set, `associated_key` is exactly what the job holds. The plan warns when
+  a change drops a key the job held, which PBS then no longer protects from
+  deletion.
+- Guide: back up to S3 object storage, with an S3 endpoint, a datastore on
+  it, notifications about its costs, and what keeps or loses the backups in
+  the bucket.
+
+### Changed
+
+- `pbs_sync_job` manages the sync encryption keys of PBS 4.2, which it left
+  alone before: a job whose active key was set outside Terraform plans to
+  remove it unless the configuration sets `active_encryption_key`. The
+  associated keys stay unless the configuration sets `associated_key`.
+- `pbs_namespace` creates and deletes namespaces one at a time with the
+  datastores of the same provider configuration: while PBS reads the
+  backups of a datastore on S3 from its bucket, it holds a lock that every
+  datastore needs, and other calls would fail after 10 seconds.
+
+### Fixed
+
+- An element PBS holds twice in a list — a recipient of a sendmail or SMTP
+  endpoint, a group filter of a sync job, a value of a notification
+  matcher, given twice outside Terraform — made reading the resource or its
+  data source fail with "Duplicate Set Element". It is read once now, and
+  the next change that sends the list writes it once.
+
 ## [0.2.0] - 2026-10-28
 
 Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
@@ -242,5 +323,6 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0

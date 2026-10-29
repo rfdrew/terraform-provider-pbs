@@ -26,6 +26,10 @@ type pbsRelease struct {
 // them need.
 var pbs41 = pbsRelease{4, 1, 0}
 
+// pbs416 is what an S3 endpoint's provider quirk
+// delete-objects-via-delete-object needs.
+var pbs416 = pbsRelease{4, 1, 6}
+
 // pbs42 is what running garbage collection before unmounting a removable
 // datastore, sync job worker threads and a remote's use of the node's proxy
 // need.
@@ -33,6 +37,10 @@ var pbs42 = pbsRelease{4, 2, 0}
 
 // pbs421 is what the extra audiences of an OpenID realm need.
 var pbs421 = pbsRelease{4, 2, 1}
+
+// pbs424 is what the request limits of an S3 endpoint and its use of the
+// node's proxy need.
+var pbs424 = pbsRelease{4, 2, 4}
 
 func (r pbsRelease) String() string {
 	if r.release == 0 {

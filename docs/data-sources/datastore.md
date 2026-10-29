@@ -42,19 +42,33 @@ output "usb_mounted" {
 
 ### Read-Only
 
+- `backend` (Attributes) For a datastore on S3, where its backups are; null for one in a directory or on a removable disk. (see [below for nested schema](#nestedatt--backend))
 - `backend_type` (String) Where the datastore keeps its chunks: `filesystem` or `s3`.
 - `backing_device` (String) For a removable datastore, the UUID of the file system on its disk; null otherwise.
 - `comment` (String) Comment; null when there is none.
+- `counter_reset_schedule` (String) For a datastore on S3, when PBS resets its request and traffic counters, as a calendar event; null for never.
 - `gc_on_unmount` (Boolean) Whether PBS runs garbage collection on a removable datastore before it unmounts it.
 - `gc_schedule` (String) When garbage collection runs, as a calendar event; null when it runs only when started.
 - `maintenance_mode` (Attributes) The datastore's maintenance mode; null when there is none. Besides `read-only` and `offline`, which are set by hand, PBS sets `unmount`, `delete` and `s3-refresh` itself while it unmounts, deletes or refreshes the datastore. (see [below for nested schema](#nestedatt--maintenance_mode))
 - `mount_status` (String) Whether a removable datastore is mounted: `mounted` or `notmounted`; `nonremovable` for any other datastore.
 - `notification_mode` (String) `notification-system` or `legacy-sendmail`.
+- `notification_thresholds` (Attributes) For a datastore on S3, how many requests and bytes to its bucket make PBS send a notification; null when none do. (see [below for nested schema](#nestedatt--notification_thresholds))
 - `notify` (Attributes) With `legacy-sendmail`, which mails PBS sends; null when it sends its defaults. (see [below for nested schema](#nestedatt--notify))
 - `notify_user` (String) With `legacy-sendmail`, the user who gets the mails; null for `root@pam`.
 - `path` (String) Absolute path of the datastore's directory, or for a removable datastore the directory's path on its device; for a datastore on S3 object storage, the local cache.
 - `tuning` (Attributes) Tuning options; null when all are at PBS's defaults, and each one left out is. (see [below for nested schema](#nestedatt--tuning))
 - `verify_new` (Boolean) Whether PBS verifies every new backup.
+
+<a id="nestedatt--backend"></a>
+### Nested Schema for `backend`
+
+Read-Only:
+
+- `bucket` (String) Bucket that holds the backups, under the datastore's name.
+- `client` (String) ID of the S3 endpoint.
+- `max_cache_size` (String) Most space the local cache of chunks may take, as PBS stores it; null for the free space of `path`.
+- `type` (String) `s3`.
+
 
 <a id="nestedatt--maintenance_mode"></a>
 ### Nested Schema for `maintenance_mode`
@@ -63,6 +77,20 @@ Read-Only:
 
 - `message` (String) Why, as PBS shows it to clients; null when there is no message.
 - `type` (String) `read-only`, `offline`, `unmount`, `delete` or `s3-refresh`.
+
+
+<a id="nestedatt--notification_thresholds"></a>
+### Nested Schema for `notification_thresholds`
+
+Read-Only:
+
+- `s3_delete` (Number) Number of `DELETE` requests.
+- `s3_download` (String) Bytes downloaded, as PBS stores them.
+- `s3_get` (Number) Number of `GET` requests.
+- `s3_head` (Number) Number of `HEAD` requests.
+- `s3_post` (Number) Number of `POST` requests.
+- `s3_put` (Number) Number of `PUT` requests.
+- `s3_upload` (String) Bytes uploaded, as PBS stores them.
 
 
 <a id="nestedatt--notify"></a>

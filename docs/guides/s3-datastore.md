@@ -1,0 +1,402 @@
+---
+page_title: "Back up to S3 object storage"
+subcategory: ""
+description: |-
+  A datastore that keeps its backups in a bucket of an S3-compatible object store, such as Amazon S3, Cloudflare R2, MinIO or Ceph RGW: the S3 endpoint, a check that PBS reaches the bucket, the datastore with its jobs, notifications about requests and traffic, and what keeps the backups in the bucket.
+---
+
+# Back up to S3 object storage
+
+A Proxmox Backup Server can keep a datastore's backups in a bucket of an
+S3-compatible object store — Amazon S3, Cloudflare R2, Backblaze B2, MinIO,
+Ceph RGW and the like — instead of on a disk of its own. The bucket holds
+everything; a local cache keeps the backups' indexes and the chunks used
+last, so that not every backup, restore or verification fetches all it needs
+from the bucket. Otherwise the datastore works like any other: Proxmox VE
+backs up to it, and prune, verify and sync jobs and garbage collection look
+after it.
+
+This guide configures, in one Terraform configuration:
+
+* an **S3 endpoint**, the connection to the object store: its address, its
+  region and an access key, whose secret key is write-only;
+* a **check** that PBS reaches the bucket through it;
+* a **datastore** on the bucket, with garbage collection, a prune job and a
+  verify job;
+* **notifications** when the requests or the traffic to the bucket pass a
+  threshold, as object stores bill both;
+
+and then goes through what keeps the backups in the bucket, and what loses
+them.
+
+`pbs.example.com`, `s3store1` and the bucket `pbs-backups` are placeholders.
+Proxmox VE backs up to the datastore as to any other: give it access and add
+the storage as the guide **Set up PBS for a Proxmox VE cluster** shows.
+
+## Before you start
+
+* **PBS 4.0 or newer; 4.2 recommended.** Datastores on S3 were a technology
+  preview until PBS 4.1.9; the endpoint's rate limits below need PBS 4.1,
+  and the notification thresholds PBS 4.2. Terraform or OpenTofu 1.11 or
+  newer, the first releases with write-only attributes, which the secret key
+  is.
+* **A bucket and an access key, created at the object store.** PBS creates
+  neither. The key must be allowed to list the objects in the bucket and to
+  get, put and delete them — at AWS, `s3:ListBucket` on the bucket and
+  `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on its objects.
+* **A disk for the local cache**, mounted outside Terraform, here at
+  `/mnt/datastore/s3store1`. PBS recommends 64 to 128 GiB, on a disk,
+  partition or ZFS dataset of its own, as the cache takes the space it is
+  given. It must not be another datastore's directory, nor lie inside one.
+* **PBS reaches the object store over HTTPS**, the only protocol it speaks
+  to S3: directly, or through the HTTP proxy of its node configuration with
+  the endpoint's `use_node_proxy`.
+* **An API token for Terraform** that may manage the whole server, such as
+  one with the `Admin` role on `/`, for the token and for its user both.
+
+## Provider
+
+Configure the provider as in the guide **Set up PBS for a Proxmox VE
+cluster**, from the environment. The object store's keys come from there
+too, so that neither is in the configuration:
+
+```shell
+export PBS_API_TOKEN='terraform@pbs!provider:<secret>'
+export PBS_TLS_FINGERPRINT='<fingerprint, as the PBS dashboard shows it>'
+export TF_VAR_s3_access_key='<access key ID>'
+export TF_VAR_s3_secret_key='<secret key>'
+```
+
+## S3 endpoint
+
+```terraform
+locals {
+  bucket = "pbs-backups"
+}
+
+resource "pbs_s3_endpoint" "store" {
+  id         = "aws"
+  endpoint   = "{{bucket}}.s3.{{region}}.amazonaws.com"
+  region     = "eu-central-1"
+  access_key = var.s3_access_key
+
+  secret_key_wo         = var.s3_secret_key
+  secret_key_wo_version = 1
+
+  rate_out = "50MB"
+}
+
+variable "s3_access_key" {
+  description = "Access key ID PBS signs its requests to the object store with."
+  type        = string
+  sensitive   = true
+}
+
+variable "s3_secret_key" {
+  description = "Secret key of that access key."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+}
+```
+
+An endpoint serves every bucket its key reaches: the datastores on it each
+name their own. Amazon S3 takes the bucket in the host name, so PBS replaces
+`{{bucket}}` with a datastore's bucket, and `{{region}}` with
+`region`, which it also signs every request for: it must be the bucket's
+region. Left out, PBS signs for `us-west-1`.
+
+PBS returns the access key, which state keeps, marked sensitive. The secret
+key is write-only: Terraform passes it to PBS without storing it in the plan
+or state. To change it, set the new key and increment
+`secret_key_wo_version`. PBS contacts nothing when it saves an endpoint, so a
+wrong address, key or region shows only when a datastore uses the endpoint —
+or in the check below.
+
+`rate_out` limits what all the datastores on the endpoint upload together to
+50 MB per second, so that backups to S3 leave bandwidth for the rest;
+`rate_in` limits downloads, such as restores and verification, and
+`burst_out` and `burst_in` how much passes at once after a quiet period (PBS
+4.1 or newer). Where the object store bills or throttles requests,
+`limit_active_requests` caps the writes and deletes per second, and
+`limit_passive_requests` the reads (PBS 4.2.4 or newer; before PBS 4.2.7,
+the second replaced the first when both were set). **Traffic control
+rules do not limit S3 traffic**: a `pbs_traffic_control_rule` applies to the
+connections clients open to PBS, not to those PBS opens to the object store.
+The endpoint's own limits do that.
+
+### Other object stores
+
+**Cloudflare R2** takes the bucket in the path of a request rather than in
+the host name, and needs the region `auto`, as otherwise PBS's requests fail
+authentication. The host name starts with your account ID, as the R2
+overview in the Cloudflare dashboard shows it:
+
+```terraform
+resource "pbs_s3_endpoint" "store" {
+  id         = "cloudflare"
+  endpoint   = "0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com"
+  region     = "auto"
+  path_style = true
+  access_key = var.s3_access_key
+
+  secret_key_wo         = var.s3_secret_key
+  secret_key_wo_version = 1
+}
+```
+
+**MinIO** and **Ceph RGW** in your own network usually take the bucket in
+the path as well, listen on a port of their own, and have a self-signed
+certificate, which PBS accepts by its SHA-256 fingerprint. Set `region` to
+the store's own, if it has one configured.
+
+```terraform
+resource "pbs_s3_endpoint" "store" {
+  id          = "minio"
+  endpoint    = "minio.example.com"
+  port        = 9000
+  path_style  = true
+  fingerprint = "71:fe:7c:21:f4:67:8f:50:47:23:ff:99:36:2f:9c:a3:84:ee:48:95:fc:54:03:6a:ac:9a:4c:91:f1:67:4e:4a"
+  access_key  = var.s3_access_key
+
+  secret_key_wo         = var.s3_secret_key
+  secret_key_wo_version = 1
+}
+```
+
+Some S3-compatible stores lack parts of the API PBS uses, which
+`provider_quirks` has PBS work around: `skip-if-none-match-header` for a
+store that does not understand the `If-None-Match` header, with which PBS
+uploads a chunk only if the bucket does not have it yet, and
+`delete-objects-via-delete-object` (PBS 4.1.6 or newer) for one without the
+`DeleteObjects` call, with which garbage collection deletes chunks in bulk —
+PBS then sends one request per chunk, each billed where requests are. Set
+one only for a store that needs it: its documentation says so, or backups or
+garbage collection fail without it.
+
+Changing an endpoint's address or keys in place points the datastores on it
+elsewhere at once: do it only to reach the same object store. A new `id`
+replaces the endpoint, and with it the datastores whose `backend` names it.
+
+## Checking the endpoint
+
+```terraform
+check "s3_bucket_is_reachable" {
+  data "pbs_s3_buckets" "store" {
+    s3_endpoint = pbs_s3_endpoint.store.id
+  }
+
+  assert {
+    condition     = contains(data.pbs_s3_buckets.store.buckets[*].name, local.bucket)
+    error_message = "The access key of S3 endpoint ${pbs_s3_endpoint.store.id} sees no bucket ${local.bucket}."
+  }
+}
+```
+
+PBS connects to the object store to list its buckets, so the list checks the
+endpoint before a datastore uses it: a wrong address, port, key, region or
+fingerprint fails the read. PBS reports the failure without its cause; its
+journal shows the cause of a refused certificate or of an answer from the
+object store, such as a wrong key or region, but not of a wrong address or
+port. Inside a `check` block, a failing read or condition is a
+warning that does not stop the apply. An address that drops connection
+attempts makes PBS try for over half a minute, longer than the provider's
+`request_timeout`, 30 seconds by default, which then reports a timeout
+instead.
+
+Listing needs the key to be allowed to list the buckets of its account —
+`s3:ListAllMyBuckets` at AWS —, which a key limited to one bucket may not be,
+and the provider's token needs `Sys.Audit` on `/`. Datastores need neither:
+leave the check out for such a key. PBS checks the bucket anyway when it
+creates the datastore.
+
+## Datastore
+
+```terraform
+resource "pbs_datastore" "s3store1" {
+  name    = "s3store1"
+  path    = "/mnt/datastore/s3store1"
+  comment = "Backups of cluster1, on S3"
+
+  backend = {
+    type           = "s3"
+    client         = pbs_s3_endpoint.store.id
+    bucket         = local.bucket
+    max_cache_size = "100GiB"
+  }
+
+  gc_schedule     = "daily"
+  reuse_datastore = true
+
+  notification_thresholds = {
+    s3_put      = 2000000
+    s3_get      = 5000000
+    s3_upload   = "1TB"
+    s3_download = "200GB"
+  }
+  counter_reset_schedule = "monthly"
+}
+```
+
+`backend` puts the datastore on S3: `client` names the endpoint and `bucket`
+the bucket. The reference to the endpoint also has Terraform create the
+endpoint before the datastore and destroy it after, as PBS deletes no
+endpoint a datastore uses. PBS keeps the datastore's objects in the bucket
+under a prefix that is the datastore's name, `s3store1/`, so several
+datastores can share a bucket. `path` is the local cache, and
+`max_cache_size` bounds the chunks it keeps; left out, the cache takes the
+free space of `path`. PBS cannot change `backend`: a change of any of its
+attributes replaces the datastore, as does a new `name` or `path`. The
+section **Keeping the backups** below says what that does to the backups.
+
+When it creates the datastore, PBS checks that it reaches the bucket, marks
+the datastore there as in use by this host and creates the cache; the
+provider waits for that task. `reuse_datastore = true` has PBS read
+the backups the bucket holds under the datastore's name: a new datastore
+finds none, and loses nothing by it, while one created again, after a
+destroy or on another PBS, keeps its backups only with it.
+
+Garbage collection, here daily, lists the chunks under the datastore's name
+in the bucket and deletes those no backup uses any more, after a prune. The
+datastore reports it, and its jobs, through PBS's notification system, as
+any datastore does by default.
+
+## Retention and verification
+
+```terraform
+resource "pbs_prune_job" "s3store1" {
+  id       = "daily-s3store1"
+  store    = pbs_datastore.s3store1.name
+  schedule = "daily"
+
+  keep = {
+    last    = 3
+    daily   = 7
+    weekly  = 4
+    monthly = 6
+  }
+}
+
+resource "pbs_verify_job" "s3store1" {
+  id             = "verify-s3store1"
+  store          = pbs_datastore.s3store1.name
+  schedule       = "sat 03:00"
+  outdated_after = 60
+}
+```
+
+Retention lives in the prune job, as for any datastore: every day it prunes
+each backup group to the 3 most recent backups and one for each of 7 more
+days, 4 more weeks and 6 more months, and garbage collection then deletes
+the chunks of the pruned backups from the bucket. The guide **Set up PBS for
+a Proxmox VE cluster** says more about both jobs.
+
+Verification reads every chunk of the backups it checks, from the bucket
+unless the cache has it: requests and download traffic, which most object
+stores bill. The job runs every Saturday at 03:00 and skips the backups
+verified in the last 60 days, so that each backup is read about every two
+months.
+
+## Notifications about costs
+
+Object stores bill the space, and often the requests and the traffic as
+well. PBS counts the requests of each datastore on S3 — `GET`, `PUT`,
+`POST`, `HEAD` and `DELETE` — and the bytes it uploads and downloads, and
+`notification_thresholds` on the datastore above has it send a notification
+when a counter passes its threshold: here two million `PUT` requests, which
+backups and syncs make, five million `GET` requests, which restores,
+verification and garbage collection make, 1 TB uploaded or 200 GB
+downloaded. Pick the thresholds from the object store's prices. A threshold
+left out, or `0`, is none.
+
+PBS notifies once per counter, until `counter_reset_schedule` resets the
+counters: here on the first day of every month, like a monthly bill. Both
+need PBS 4.2 or newer.
+
+The notification has the type `thresholds`, the severity `warning`, and the
+datastore's name in the field `datastore`. PBS's built-in `default-matcher`
+routes it like everything but successful prune jobs — to `mail-to-root`, or
+to SMTP as in the guide **Set up PBS for a Proxmox VE cluster**. A matcher
+of its own sends it to whoever pays the bill as well:
+
+```terraform
+resource "pbs_notification_endpoint_sendmail" "billing" {
+  name   = "billing"
+  mailto = ["billing@example.com"]
+}
+
+resource "pbs_notification_matcher" "s3_costs" {
+  name        = "s3-costs"
+  comment     = "Requests and traffic to S3 over their thresholds"
+  target      = [pbs_notification_endpoint_sendmail.billing.name]
+  match_field = ["exact:type=thresholds"]
+}
+```
+
+## Keeping the backups
+
+The bucket outlives the datastore. What a datastore finds there, and what
+PBS deletes, depends on the datastore's name and on a few settings:
+
+* **The name is the prefix.** A datastore finds its backups under its own
+  name, in its own bucket. PBS cannot rename a datastore, so a new `name`
+  replaces it with one that starts empty, and so does a new `bucket`. The
+  old backups stay in the bucket, still billed, until something deletes
+  them. The plan warns when that is about to happen.
+* **Existing backups need `reuse_datastore = true`.** To take up the backups
+  the bucket holds — after the datastore was destroyed without
+  `destroy_data`, or on a new PBS after the old one was lost — create the
+  datastore with the same name and bucket, through an endpoint to the same
+  object store, with `reuse_datastore = true`. PBS then empties the local
+  cache and reads the backups' indexes from the bucket, in maintenance mode
+  `s3-refresh`, which takes a while for many backups; the provider waits for
+  it, up to its `task_timeout`. Meanwhile PBS keeps its datastore
+  configuration locked, which holds up the other datastores of the server
+  too: take a quiet time for it. **Without `reuse_datastore`, the new
+  datastore starts empty, and its next garbage collection deletes every
+  chunk under its name: the backups are lost.** The plan refuses a
+  replacement under the same name without it, but cannot tell whether a new
+  datastore's name already holds backups in the bucket. Should that happen,
+  run an S3 refresh before that garbage collection —
+  `proxmox-backup-manager datastore s3-refresh s3store1`, or S3 Refresh in
+  the datastore's content in the web interface —, which reads the indexes
+  from the bucket and should save the backups.
+* **`overwrite_in_use = true` only when the old PBS no longer uses the
+  datastore.** A PBS marks a datastore in the bucket as in use by its host
+  when it creates it, and removes the mark when it destroys it. After the
+  loss of that PBS, the mark stays, and another PBS refuses to create the
+  datastore — `Bucket already contains datastore in use by host <host>` —
+  until `overwrite_in_use = true`, with `reuse_datastore = true`, takes it
+  over. Set it only when the old PBS is gone for good, and back to `false`
+  after the takeover.
+* **One datastore, one PBS.** Never have two PBS use the same datastore,
+  not even for a test: each one's garbage collection deletes the chunks of
+  the backups only the other knows. To have the backups on a second PBS,
+  sync them, as the guide **Copy backups to an offsite PBS** shows.
+* **`destroy_data = true` deletes the backups.** Destroying the datastore
+  with it deletes every object under its name in the bucket, and the local
+  cache. Without it, the default, PBS removes only the mark that the
+  datastore is in use, and the backups stay, ready for `reuse_datastore`.
+  It is read from state: set it in an apply before the one that destroys or
+  replaces the datastore. The plan warns when a replacement would delete
+  the backups.
+* **Destroying needs the bucket.** Either way, PBS deletes from the bucket
+  when it destroys a datastore, so the object store must be reachable, with
+  the endpoint's keys. Otherwise the deletion fails, and PBS keeps the
+  datastore in maintenance mode `delete`, with no way to forget it but a
+  deletion that succeeds: destroying it again retries. Keep the endpoint,
+  its keys and the bucket until the datastore is gone.
+* **A replacement deletes the jobs.** A change of `name`, `path` or
+  `backend` — `max_cache_size` included — replaces the datastore, and PBS
+  deletes its prune, verify and sync jobs and its ACL entries with it,
+  unless `keep_job_configs` is set; Terraform creates those it manages
+  again. The new datastore keeps the backups only with the same name and
+  bucket and `reuse_datastore = true`. Choose `max_cache_size` with that in
+  mind.
+* **No tape.** PBS backs up no datastore on S3 to tape: a tape backup job
+  refuses it. To have the backups on tape as well, sync them to a datastore
+  on disk, and back that up.
+
+A datastore on S3 that PBS already has, such as one created in the web
+interface, is imported by name like any other, not created: an import
+neither reads its backups again nor touches the bucket.

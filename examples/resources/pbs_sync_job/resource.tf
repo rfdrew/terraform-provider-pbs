@@ -28,3 +28,20 @@ resource "pbs_sync_job" "archive" {
   schedule     = "sat 04:00"
   group_filter = ["type:vm", "exclude:group:vm/100"]
 }
+
+# A push to a PBS someone else runs, set up outside Terraform as the remote
+# hosted, which is to hold the backups encrypted (PBS 4.2+): the job
+# encrypts the backups it copies with the key of the pbs_sync_encryption_key
+# example, which never leaves this server. Backups a client encrypted already
+# are copied as they are. When active_encryption_key changes, PBS keeps the
+# key before in associated_key, so that the key the remote's backups need
+# cannot be deleted by mistake.
+resource "pbs_sync_job" "hosted" {
+  id                    = "push-hosted"
+  sync_direction        = "push"
+  store                 = pbs_datastore.store1.name
+  remote                = "hosted"
+  remote_store          = "customer1"
+  schedule              = "sun 02:00"
+  active_encryption_key = pbs_sync_encryption_key.hosted.id
+}

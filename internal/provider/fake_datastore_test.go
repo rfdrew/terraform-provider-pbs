@@ -37,11 +37,30 @@ import (
 //   - a removable datastore, with a backing-device, has a path relative to
 //     its device, which must be connected — in devices — for the create task
 //     to mount it, and stays mounted after; destroy-data needs it mounted,
-//     and gc-on-unmount is refused for a datastore that is not removable.
+//     and gc-on-unmount is refused for a datastore that is not removable;
+//   - a datastore on S3, with a backend "type=s3,client=<endpoint>,
+//     bucket=<bucket>" in any key order, its type bare or not, keeps its
+//     path as a local cache, and its backups in the bucket under its name,
+//     as PBS 4.2.8's src/api2/config/datastore.rs and
+//     pbs-datastore/src/datastore.rs have it. POST fails with 400 "no '<client>' in config" for an endpoint PBS does
+//     not have, and "failed to access bucket: bucket does not exist or no
+//     permission to access it" for a bucket the endpoint does not reach,
+//     before any task. The task fails when the bucket marks the datastore in
+//     use by a host, unless overwrite-in-use, and without reuse-datastore on
+//     a local chunk store, with the EEXIST on .chunks: there is no check
+//     that the directory is empty. With reuse-datastore, it saves the
+//     datastore in maintenance mode s3-refresh, whatever mode was sent, and
+//     refreshes it from the bucket, which clears the mode; when failRefresh
+//     is set, the refresh fails and the mode stays. The task marks the
+//     datastore in use by this host, fakeTaskNode. A PUT cannot change
+//     backend, path or backing-device. The delete task needs the bucket
+//     reachable — or it fails, in maintenance mode "delete" — and deletes
+//     the in-use mark, and with destroy-data the backups in the bucket too.
 //
 // Tests set up state with addDatastore, addPruneJob, addVerifyJob,
-// addChunkStore, connectDevice and setMounted, and look at it with
-// datastore, pruneJob, verifyJob, hasChunkStore and isMounted.
+// addChunkStore, connectDevice, setMounted, addS3Bucket, setBucketReachable,
+// addS3Marker and addS3Backups, and look at it with datastore, pruneJob,
+// verifyJob, hasChunkStore, isMounted, s3Marker and hasS3Backups.
 type fakeDatastores struct {
 	fake *fakePBS
 
@@ -65,6 +84,17 @@ type fakeDatastores struct {
 	// and mounted the removable datastores mounted.
 	devices map[string]bool
 	mounted map[string]bool
+	// s3Buckets are the S3 endpoints PBS has, by ID, with the buckets each
+	// knows: true for one it reaches, false for one that is gone or that
+	// its access key may not use. s3Markers are the in-use marks of the
+	// datastores in the buckets, with the host each names, and s3Backups
+	// the datastores with backups in a bucket, both by s3ObjectKey.
+	s3Buckets map[string]map[string]bool
+	s3Markers map[string]string
+	s3Backups map[string]bool
+	// failRefresh makes the S3 refresh of the next create-datastore task
+	// that reuses a datastore on S3 fail.
+	failRefresh bool
 }
 
 // fakeProperties are the properties of one section of a configuration file,
@@ -105,6 +135,9 @@ func newFakeDatastores(fake *fakePBS) *fakeDatastores {
 		tasks:       map[string]func() string{},
 		devices:     map[string]bool{},
 		mounted:     map[string]bool{},
+		s3Buckets:   map[string]map[string]bool{},
+		s3Markers:   map[string]string{},
+		s3Backups:   map[string]bool{},
 	}
 	fake.handle("POST /config/datastore", d.createDatastore)
 	fake.handle("POST /config/prune", d.createJob("prune"))
@@ -226,6 +259,61 @@ func (d *fakeDatastores) hasChunkStore(path string) bool {
 	return d.chunkStores[path]
 }
 
+// addS3Bucket gives PBS an S3 endpoint, if it does not have it yet, and a
+// bucket the endpoint reaches.
+func (d *fakeDatastores) addS3Bucket(endpoint, bucket string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.s3Buckets[endpoint] == nil {
+		d.s3Buckets[endpoint] = map[string]bool{}
+	}
+	d.s3Buckets[endpoint][bucket] = true
+}
+
+// setBucketReachable makes a bucket of an endpoint reachable or not, as
+// when it is deleted or the endpoint's access key loses the right to use it.
+func (d *fakeDatastores) setBucketReachable(endpoint, bucket string, reachable bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.s3Buckets[endpoint][bucket] = reachable
+}
+
+// s3ObjectKey is where the objects of datastore name are: its name is the
+// prefix of their keys in the bucket.
+func s3ObjectKey(bucket, name string) string {
+	return bucket + "/" + name
+}
+
+// addS3Marker marks datastore name in bucket in use by host, as PBS does
+// when it creates the datastore.
+func (d *fakeDatastores) addS3Marker(bucket, name, host string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.s3Markers[s3ObjectKey(bucket, name)] = host
+}
+
+// s3Marker returns the host that marks datastore name in bucket in use.
+func (d *fakeDatastores) s3Marker(bucket, name string) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	host, ok := d.s3Markers[s3ObjectKey(bucket, name)]
+	return host, ok
+}
+
+// addS3Backups puts backups of datastore name in bucket, as a datastore on
+// S3 leaves when it is deleted without destroy-data.
+func (d *fakeDatastores) addS3Backups(bucket, name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.s3Backups[s3ObjectKey(bucket, name)] = true
+}
+
+func (d *fakeDatastores) hasS3Backups(bucket, name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.s3Backups[s3ObjectKey(bucket, name)]
+}
+
 func cloneProperties(props fakeProperties) fakeProperties {
 	out := make(fakeProperties, len(props))
 	for k, v := range props {
@@ -301,6 +389,12 @@ func (d *fakeDatastores) createDatastore(w http.ResponseWriter, req *http.Reques
 	}
 	name, path, device := params.Get("name"), params.Get("path"), params.Get("backing-device")
 	reuse := fakeBool(params.Get("reuse-datastore"))
+	// PBS verifies backend against its schema before the handler runs.
+	backend, refusal := fakeParseBackend(params.Get("backend"))
+	if refusal != "" {
+		writeError(w, "parameter verification failed - 'backend': %s", refusal)
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, exists := d.datastores[name]; exists {
@@ -318,10 +412,26 @@ func (d *fakeDatastores) createDatastore(w http.ResponseWriter, req *http.Reques
 		writeError(w, "parameter verification failed - 'gc-on-unmount': only supported on removable datastores")
 		return
 	}
+	// Before the task, PBS builds the S3 client of the endpoint and checks
+	// that it reaches the bucket.
+	if backend.s3 {
+		buckets, ok := d.s3Buckets[backend.client]
+		if !ok {
+			writeError(w, "no '%s' in config", backend.client)
+			return
+		}
+		if !buckets[backend.bucket] {
+			writeError(w, "failed to access bucket: bucket does not exist or no permission to access it")
+			return
+		}
+	}
 	props := fakeProperties{}
 	applyFakeForm(props, params, nil, fakeDatastoreBools, "reuse-datastore", "overwrite-in-use")
 	key := chunkStoreKey(props)
 	upid := d.startTaskLocked("create-datastore", name, func() string {
+		if backend.s3 {
+			return d.createS3DatastoreLocked(name, path, backend.bucket, props, reuse, fakeBool(params.Get("overwrite-in-use")))
+		}
 		switch {
 		case device != "" && !d.devices[device]:
 			return fmt.Sprintf("mounting to tmp path failed: command \"mount\" \"UUID=%s\" \"/run/proxmox-backup/mount/0a1b\" "+
@@ -343,6 +453,80 @@ func (d *fakeDatastores) createDatastore(w http.ResponseWriter, req *http.Reques
 	writeData(w, upid, "")
 }
 
+// fakeBackend is a datastore's backend: on S3, with the endpoint and the
+// bucket, or not, for a datastore in a directory or on a removable disk.
+type fakeBackend struct {
+	s3             bool
+	client, bucket string
+}
+
+// fakeParseBackend reads a backend as PBS's schema does, with type as its
+// default key and filesystem as the default type. It returns the text PBS
+// refuses the backend with, or "".
+func fakeParseBackend(s string) (fakeBackend, string) {
+	if s == "" {
+		return fakeBackend{}, ""
+	}
+	parsed, err := pbsclient.ParsePropertyString(s, "type")
+	if err != nil {
+		return fakeBackend{}, err.Error()
+	}
+	for key := range parsed {
+		if !slices.Contains([]string{"type", "client", "bucket", "max-cache-size"}, key) {
+			return fakeBackend{}, fmt.Sprintf("unknown key %q", key)
+		}
+	}
+	switch typ := parsed["type"]; typ {
+	case "", pbsclient.BackendFilesystem:
+		for _, key := range []string{"client", "bucket", "max-cache-size"} {
+			if _, ok := parsed[key]; ok {
+				return fakeBackend{}, fmt.Sprintf("additional option %s, not allowed for backend type filesystem", key)
+			}
+		}
+		return fakeBackend{}, ""
+	case pbsclient.BackendS3:
+		for _, key := range []string{"client", "bucket"} {
+			if parsed[key] == "" {
+				return fakeBackend{}, fmt.Sprintf("missing option %s, required for backend type s3", key)
+			}
+		}
+		return fakeBackend{s3: true, client: parsed["client"], bucket: parsed["bucket"]}, ""
+	default:
+		return fakeBackend{}, fmt.Sprintf("unknown variant `%s`, expected `filesystem` or `s3`", typ)
+	}
+}
+
+// createS3DatastoreLocked runs the create-datastore task of a datastore on
+// S3 and returns its exit status. Reusing the datastore, PBS saves it, in
+// maintenance mode s3-refresh, before it refreshes the local cache from the
+// bucket, so that a failed refresh leaves it configured in that mode.
+func (d *fakeDatastores) createS3DatastoreLocked(name, path, bucket string, props fakeProperties, reuse, overwrite bool) string {
+	object := s3ObjectKey(bucket, name)
+	if host, inUse := d.s3Markers[object]; inUse && !overwrite {
+		return "Bucket already contains datastore in use by host " + host
+	}
+	// Reusing the datastore empties the local cache. Otherwise creating
+	// .chunks fails on a chunk store left there, but nothing else in the
+	// directory is in the way.
+	if !reuse && d.chunkStores[path] {
+		return fmt.Sprintf("unable to create chunk store '%s' subdir %q - EEXIST: File exists", name, path+"/.chunks")
+	}
+	d.chunkStores[path] = true
+	d.s3Markers[object] = fakeTaskNode
+	if !reuse {
+		d.datastores[name] = props
+		return "OK"
+	}
+	props["maintenance-mode"] = pbsclient.MaintenanceS3Refresh
+	d.datastores[name] = props
+	if d.failRefresh {
+		d.failRefresh = false
+		return "failed to list object: unexpected status code 503"
+	}
+	delete(props, "maintenance-mode")
+	return "OK"
+}
+
 // serveDatastore serves /config/datastore/{name}.
 func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request) {
 	name := strings.TrimPrefix(req.URL.Path, fakeAPIPrefix+"/config/datastore/")
@@ -362,6 +546,14 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 		if !exists {
 			writeError(w, "no such datastore '%s'", name)
 			return
+		}
+		// PBS sets these at creation only, so an update's schema does not
+		// have them.
+		for _, key := range []string{"backend", "path", "backing-device"} {
+			if params.Has(key) {
+				writeError(w, "parameter verification failed - '%s': schema does not allow additional properties.", key)
+				return
+			}
 		}
 		if !checkDelete(w, params, fakeDatastoreDeletable...) {
 			return
@@ -424,6 +616,26 @@ func (d *fakeDatastores) serveDatastore(w http.ResponseWriter, req *http.Request
 				return "datastore is currently in use"
 			case "warnings":
 				return "WARNINGS: 1"
+			}
+			// On S3, PBS deletes the datastore's objects in the bucket with
+			// destroy-data, and its in-use mark without, and fails when it
+			// cannot reach the bucket.
+			backendProperty, _ := props["backend"].(string)
+			if backend, _ := fakeParseBackend(backendProperty); backend.s3 {
+				buckets, ok := d.s3Buckets[backend.client]
+				switch {
+				case !ok:
+					return fmt.Sprintf("no '%s' in config: no such s3-endpoint '%s'", backend.client, backend.client)
+				case !buckets[backend.bucket] && destroy:
+					return "deleting objects failed"
+				case !buckets[backend.bucket]:
+					return "failed to delete in-use marker: unexpected status code 403"
+				}
+				object := s3ObjectKey(backend.bucket, name)
+				delete(d.s3Markers, object)
+				if destroy {
+					delete(d.s3Backups, object)
+				}
 			}
 			delete(d.datastores, name)
 			delete(d.mounted, name)

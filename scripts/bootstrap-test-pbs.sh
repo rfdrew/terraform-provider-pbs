@@ -28,18 +28,22 @@
 # and starts Pebble, Let's Encrypt's test CA, in the PBS container's network
 # namespace, as the ACME directory https://localhost:14000/dir for PBS. Pebble
 # validates every challenge without looking (PEBBLE_VA_ALWAYS_VALID), so
-# ordering a certificate needs neither DNS nor a reachable port 80. The
-# packages stand also gets a file system on a loop device, for removable
-# datastores.
+# ordering a certificate needs neither DNS nor a reachable port 80. It also
+# starts an S3 server, Silo (a maintained fork of MinIO, whose own images are
+# gone), in the same network namespace at https://127.0.0.1:9000, with the
+# buckets tfacc-s3 and tfacc-s3-spare, for the S3 endpoint and S3 datastore
+# tests. The packages stand also gets a file system on a loop device, for
+# removable datastores.
 #
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
 # variant, the PBS version, the ACME directory, the files of PBS's own
 # certificate and key, which the certificate tests put back when they end,
-# the UUID of the file system for removable datastores, and the address at
+# the UUID of the file system for removable datastores, the address at
 # which the container reaches this host, where the notification tests
-# receive what PBS sends.
+# receive what PBS sends, and the S3 server's address, port, region, keys,
+# certificate fingerprint, buckets and container.
 # The test user's credentials are not exported as PBS_USERNAME and
 # PBS_PASSWORD, which the provider would read alongside the token.
 #
@@ -78,6 +82,15 @@
 #     privileged container sees the device nodes the host had when it
 #     started, so the script creates the node of a newer one, and detaches
 #     the device again when it removes the container.
+#   * PBS talks to S3 over HTTPS only and never creates buckets. It accepts
+#     the server's certificate when OpenSSL trusts it and, only failing that,
+#     when the certificate's SHA-256 fingerprint matches the endpoint's. So
+#     the S3 server's certificate is self-signed and not signed by the test
+#     CA PBS trusts for Pebble: a trusted certificate would let any
+#     fingerprint pass. The buckets are made with mc in the S3 container.
+#   * The S3 server has no region of its own, so it accepts any region PBS
+#     signs with; PBS defaults to us-west-1. Requests use path style, as the
+#     endpoint is an IP address.
 #
 # Usage:
 #   eval "$(scripts/bootstrap-test-pbs.sh)"                         # official packages
@@ -98,6 +111,9 @@
 #   PBS_TEST_STATE_DIR       where credentials are kept
 #   PBS_TEST_PEBBLE          set to 0 to start no Pebble; the ACME tests then skip
 #   PBS_TEST_PEBBLE_IMAGE    Pebble image (default ghcr.io/letsencrypt/pebble:2.10.1)
+#   PBS_TEST_S3              set to 0 to start no S3 server; the S3 tests then skip
+#   PBS_TEST_S3_IMAGE        S3 server image (default pgsty/silo:RELEASE.2026-09-16T00-00-00Z)
+#   PBS_TEST_S3_PORT         port of the S3 server in PBS's network namespace (default 9000)
 #   PBS_TEST_REMOVABLE       packages variant: set to 0 to make no file system for
 #                            removable datastores; their tests then skip
 #
@@ -133,6 +149,23 @@ REMOVABLE="${PBS_TEST_REMOVABLE:-1}"
 REMOVABLE_IMAGE="/var/lib/proxmox-backup/tfacc-removable.img"
 REMOVABLE_LOOP_FILE="/var/lib/proxmox-backup/tfacc-removable.loop"
 REMOVABLE_UUID=""
+S3="${PBS_TEST_S3:-1}"
+S3_IMAGE="${PBS_TEST_S3_IMAGE:-pgsty/silo:RELEASE.2026-09-16T00-00-00Z}"
+S3_CONTAINER="${CONTAINER}-s3"
+# PBS reaches the server over the shared loopback. An IP address needs no
+# name resolution, and PBS sends no SNI for it.
+S3_ENDPOINT="127.0.0.1"
+S3_PORT="${PBS_TEST_S3_PORT:-9000}"
+# Offered to the tests; the server itself accepts any region.
+S3_REGION="us-east-1"
+# The first bucket is the one the datastore tests use; every bucket is
+# listed by list-buckets, and PBS fails to parse an empty bucket list.
+S3_BUCKETS=(tfacc-s3 tfacc-s3-spare)
+# mc's name for the server in its container, left there for the tests.
+S3_MC_ALIAS="tfacc"
+# The endpoint the script creates in PBS to try the server, and removes.
+S3_PROBE_ID="tfacc-s3-probe"
+S3_FINGERPRINT=""
 
 TEST_USER="tfacc@pbs"
 TEST_TOKEN_NAME="acc"
@@ -170,12 +203,14 @@ release_removable_device() {
 }
 
 if [[ "${1:-}" == "--teardown" ]]; then
+  # The containers sharing PBS's network go before the one that owns it.
   docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f -v "$S3_CONTAINER" >/dev/null 2>&1 || true
   release_removable_device
   docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR"
-  log "removed $CONTAINER, $PEBBLE_CONTAINER, the volumes and $STATE_DIR"
+  log "removed $CONTAINER, $PEBBLE_CONTAINER, $S3_CONTAINER, the volumes and $STATE_DIR"
   exit 0
 fi
 
@@ -183,8 +218,8 @@ trap 'status=$?; if [[ $status -ne 0 ]]; then echo false; fi' EXIT
 
 command -v docker >/dev/null || { log "docker not found"; exit 1; }
 command -v jq >/dev/null || { log "jq not found"; exit 1; }
-if [[ "$PEBBLE" != "0" ]]; then
-  command -v openssl >/dev/null || { log "openssl not found; it makes Pebble's certificate (PBS_TEST_PEBBLE=0 starts no Pebble)"; exit 1; }
+if [[ "$PEBBLE" != "0" || "$S3" != "0" ]]; then
+  command -v openssl >/dev/null || { log "openssl not found; it makes the certificates of Pebble and the S3 server (PBS_TEST_PEBBLE=0 PBS_TEST_S3=0 start neither)"; exit 1; }
 fi
 
 case "$VARIANT" in
@@ -202,6 +237,16 @@ case "$VARIANT" in
     ;;
 esac
 TEST_PASS="tfacc-$(rand_hex)"
+# The S3 server's only account. MinIO wants at least 3 characters for the
+# access key and 8 for the secret.
+S3_ACCESS_KEY="tfacc-$(rand_hex | cut -c1-12)"
+S3_SECRET_KEY="$(rand_hex)"
+case "$S3_PORT" in
+  82 | 8007 | 5001 | 5002 | 14000 | 15000)
+    log "PBS_TEST_S3_PORT=$S3_PORT is taken in PBS's network namespace (PBS: 82, 8007; Pebble: 5001, 5002, 14000, 15000)"
+    exit 1
+    ;;
+esac
 
 container_running() {
   [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)" == "true" ]]
@@ -213,6 +258,10 @@ dump_logs() {
   if docker inspect "$PEBBLE_CONTAINER" >/dev/null 2>&1; then
     log "--- docker logs $PEBBLE_CONTAINER (tail)"
     docker logs --tail 50 "$PEBBLE_CONTAINER" >&2 2>&1 || true
+  fi
+  if docker inspect "$S3_CONTAINER" >/dev/null 2>&1; then
+    log "--- docker logs $S3_CONTAINER (tail)"
+    docker logs --tail 50 "$S3_CONTAINER" >&2 2>&1 || true
   fi
   if [[ "$VARIANT" == "packages" ]]; then
     log "--- journal of the PBS services (tail)"
@@ -538,6 +587,136 @@ start_pebble() {
   timing "pebble" "$t"
 }
 
+# s3_files writes, to dir, the S3 server's key and its self-signed
+# certificate, for 127.0.0.1 only, in the names MinIO looks for: any other
+# name, such as localhost, is then a mismatch the fingerprint overrides. It
+# is deliberately not signed by the CA PBS trusts for Pebble: PBS compares
+# the fingerprint only when OpenSSL rejects the certificate, so a trusted one
+# would let any fingerprint pass. Nothing reaches stdout, which is evaluated.
+s3_files() {
+  local dir="$1"
+  mkdir -p "$dir"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$dir/private.key" >&2
+  openssl req -x509 -new -key "$dir/private.key" -sha256 -days 30 -set_serial "0x$(rand_hex)" \
+    -subj "/CN=terraform-provider-pbs test S3" \
+    -config <(printf '[req]\ndistinguished_name = dn\nx509_extensions = ext\n[dn]\n[ext]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = IP:127.0.0.1\nsubjectKeyIdentifier = hash\n') \
+    -out "$dir/public.crt" >&2
+}
+
+# s3_mc runs mc in the S3 container. --insecure: mc only sets the stand up;
+# pinning the certificate is PBS's job.
+s3_mc() { docker exec "$S3_CONTAINER" mc --insecure --no-color --quiet "$@"; }
+
+# start_s3 starts the S3 server in the PBS container's network namespace,
+# makes the buckets once the server answers, and has PBS use it once.
+start_s3() {
+  local t deadline dir
+  t="$(date +%s)"
+  dir="${STATE_DIR}/s3"
+  (umask 077 && s3_files "$dir")
+  S3_FINGERPRINT="$(openssl x509 -noout -fingerprint -sha256 -in "$dir/public.crt" | sed 's/^.*=//')"
+  docker image inspect "$S3_IMAGE" >/dev/null 2>&1 || docker pull -q "$S3_IMAGE" >&2
+  # The root credentials are the stand's only S3 account. No region is set,
+  # so the server accepts whatever region a request is signed for. The
+  # files are copied in rather than mounted, as for Pebble. The image's
+  # entrypoint runs "server ..." as the server binary's subcommand.
+  docker create \
+    --name "$S3_CONTAINER" \
+    --network "container:${CONTAINER}" \
+    -e MINIO_ROOT_USER="$S3_ACCESS_KEY" \
+    -e MINIO_ROOT_PASSWORD="$S3_SECRET_KEY" \
+    -e MINIO_BROWSER=off \
+    "$S3_IMAGE" server --address ":${S3_PORT}" --certs-dir /certs /data >/dev/null
+  docker cp "${dir}/." "${S3_CONTAINER}:/certs" >&2
+  docker start "$S3_CONTAINER" >/dev/null
+
+  # Ready means the buckets exist: mc fails until the server answers over
+  # TLS with the root keys. The secret comes from the container's own
+  # environment, so it never shows in a process list on this host.
+  deadline=$(($(date +%s) + WAIT_SECONDS))
+  while :; do
+    # shellcheck disable=SC2016 # expanded by the container's shell
+    if docker exec "$S3_CONTAINER" sh -c \
+      'mc --insecure --no-color --quiet alias set "$1" "$2" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" --api S3v4' \
+      sh "$S3_MC_ALIAS" "https://127.0.0.1:${S3_PORT}" >/dev/null 2>&1 &&
+      s3_mc mb --ignore-existing "${S3_BUCKETS[@]/#/${S3_MC_ALIAS}/}" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$S3_CONTAINER" 2>/dev/null || echo false)" != "true" ]]; then
+      log "$S3_CONTAINER stopped"
+      dump_logs
+      exit 1
+    fi
+    check_deadline "$deadline" "the S3 server did not make the buckets"
+    sleep 1
+  done
+  probe_s3
+  timing "s3" "$t"
+}
+
+# s3_supported tells whether this PBS has S3 endpoints, which PBS 4.0.4
+# added: GET /config/s3 answers 200, or on an older PBS 404 "Path '...' not
+# found.". Any other answer is a fault of the stand, not a missing feature,
+# and ends the script rather than leave the S3 tests to skip unnoticed.
+s3_supported() {
+  local out code
+  out="$(mktemp)"
+  code="$(curl -s -o "$out" -w '%{http_code}' \
+    -b "PBSAuthCookie=${TICKET}" "$(api_url /config/s3)")" || true
+  case "${code:-000}" in
+    200)
+      rm -f "$out"
+      return 0
+      ;;
+    404)
+      if grep -q "Path '[^']*' not found" "$out"; then
+        rm -f "$out"
+        return 1
+      fi
+      ;;
+  esac
+  log "GET /config/s3 answered HTTP ${code:-000}: $(cat "$out")"
+  rm -f "$out"
+  dump_logs
+  exit 1
+}
+
+# probe_s3 has PBS use the S3 server once, the way the tests will: an
+# endpoint with the pinned fingerprint and path-style requests, its bucket
+# list, and PBS's own sanity check (HeadBucket, PutObject, GetObject,
+# DeleteObject). The endpoint is removed again, so that the tests start
+# without one.
+probe_s3() {
+  local body name
+  if ! api POST /config/s3 \
+    --data-urlencode "id=${S3_PROBE_ID}" \
+    --data-urlencode "endpoint=${S3_ENDPOINT}" \
+    --data-urlencode "port=${S3_PORT}" \
+    --data-urlencode "region=${S3_REGION}" \
+    --data-urlencode "path-style=true" \
+    --data-urlencode "fingerprint=${S3_FINGERPRINT}" \
+    --data-urlencode "access-key=${S3_ACCESS_KEY}" \
+    --data-urlencode "secret-key=${S3_SECRET_KEY}" >/dev/null; then
+    dump_logs
+    exit 1
+  fi
+  if ! body="$(api GET "/config/s3/${S3_PROBE_ID}/list-buckets")" ||
+    ! api PUT "/admin/s3/${S3_PROBE_ID}/check" --data-urlencode "bucket=${S3_BUCKETS[0]}" >/dev/null; then
+    api DELETE "/config/s3/${S3_PROBE_ID}" >/dev/null || true
+    # PBS answers only "failed to list buckets"; the cause is in its log.
+    log "PBS could not use the S3 server at https://${S3_ENDPOINT}:${S3_PORT} with fingerprint ${S3_FINGERPRINT}"
+    dump_logs
+    exit 1
+  fi
+  api DELETE "/config/s3/${S3_PROBE_ID}" >/dev/null
+  for name in "${S3_BUCKETS[@]}"; do
+    if ! jq -e --arg n "$name" 'any(.data[]; .name == $n)' <<<"$body" >/dev/null; then
+      log "PBS lists the buckets $(jq -c '[.data[].name]' <<<"$body"), without $name"
+      exit 1
+    fi
+  done
+}
+
 # save_certificate keeps PBS's own certificate and key, which the
 # certificate tests put back, so that PBS_TLS_FINGERPRINT holds again. The
 # key is written through the shell, so that it gets the umask's mode.
@@ -590,6 +769,7 @@ save_state() {
       printf 'VARIANT=%q\nIMAGE=%q\nPORT=%q\n' "$VARIANT" "$IMAGE" "$PORT"
       printf 'ADMIN_USER=%q\nADMIN_PASS=%q\n' "$ADMIN_USER" "$ADMIN_PASS"
       printf 'TEST_PASS=%q\nAPI_TOKEN=%q\n' "$TEST_PASS" "${API_TOKEN:-}"
+      printf 'S3_ACCESS_KEY=%q\nS3_SECRET_KEY=%q\n' "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
     } >"${STATE_DIR}/env"
   )
 }
@@ -618,6 +798,20 @@ print_exports() {
     # Clear what an earlier run exported in the same shell.
     printf 'unset PBS_ACC_ACME_DIRECTORY\n'
   fi
+  if [[ "$S3" != "0" ]]; then
+    printf 'export PBS_ACC_S3_CONTAINER=%q\n' "$S3_CONTAINER"
+    printf 'export PBS_ACC_S3_ENDPOINT=%q\n' "$S3_ENDPOINT"
+    printf 'export PBS_ACC_S3_PORT=%q\n' "$S3_PORT"
+    printf 'export PBS_ACC_S3_REGION=%q\n' "$S3_REGION"
+    printf 'export PBS_ACC_S3_ACCESS_KEY=%q\n' "$S3_ACCESS_KEY"
+    printf 'export PBS_ACC_S3_SECRET_KEY=%q\n' "$S3_SECRET_KEY"
+    printf 'export PBS_ACC_S3_FINGERPRINT=%q\n' "$S3_FINGERPRINT"
+    printf 'export PBS_ACC_S3_BUCKET=%q\n' "${S3_BUCKETS[0]}"
+    printf 'export PBS_ACC_S3_BUCKETS=%q\n' "$(IFS=,; echo "${S3_BUCKETS[*]}")"
+    printf 'export PBS_ACC_S3_MC_ALIAS=%q\n' "$S3_MC_ALIAS"
+  else
+    printf 'unset PBS_ACC_S3_CONTAINER PBS_ACC_S3_ENDPOINT PBS_ACC_S3_PORT PBS_ACC_S3_REGION PBS_ACC_S3_ACCESS_KEY PBS_ACC_S3_SECRET_KEY PBS_ACC_S3_FINGERPRINT PBS_ACC_S3_BUCKET PBS_ACC_S3_BUCKETS PBS_ACC_S3_MC_ALIAS\n'
+  fi
   if [[ -n "$REMOVABLE_UUID" ]]; then
     printf 'export PBS_ACC_REMOVABLE_UUID=%q\n' "$REMOVABLE_UUID"
   else
@@ -627,6 +821,7 @@ print_exports() {
 
 # Always a fresh server, so that every test run starts from the same state.
 docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f -v "$S3_CONTAINER" >/dev/null 2>&1 || true
 release_removable_device
 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
@@ -656,6 +851,14 @@ save_state
 check_token
 if [[ "$PEBBLE" != "0" ]]; then
   start_pebble
+fi
+if [[ "$S3" != "0" ]]; then
+  if s3_supported; then
+    start_s3
+  else
+    log "this PBS has no S3 endpoints (PBS 4.0.4 added them); starting no S3 server"
+    S3=0
+  fi
 fi
 if [[ "$VARIANT" == "packages" && "$REMOVABLE" != "0" ]]; then
   t="$(date +%s)"

@@ -94,6 +94,8 @@ func propertyValue(typ attr.Type, raw string, ok bool, fail func(error)) attr.Va
 			return types.Int64Null()
 		}
 		return types.Int64Value(n)
+	case byteSizeType{}:
+		return byteSizeValue{StringValue: stringOrNull(raw)}
 	case types.BoolType:
 		if !ok {
 			return types.BoolNull()
@@ -140,6 +142,8 @@ func (f propertyStringFormat) format(object types.Object) (string, error) {
 		switch v := value.(type) {
 		case types.String:
 			p[k.key] = v.ValueString()
+		case byteSizeValue:
+			p[k.key] = v.ValueString()
 		case types.Int64:
 			p[k.key] = strconv.FormatInt(v.ValueInt64(), 10)
 		case types.Bool:
@@ -165,14 +169,20 @@ func sortedStrings(elements []attr.Value) []string {
 }
 
 // stringSetOrNull maps a list PBS answers to a set, the empty list — a
-// property PBS leaves out — to null.
+// property PBS leaves out — to null. PBS keeps an element given twice, which
+// a set cannot hold: it is read once, and the next change that sends the set
+// writes it once.
 func stringSetOrNull(values []string, diags *diag.Diagnostics) types.Set {
 	if len(values) == 0 {
 		return types.SetNull(types.StringType)
 	}
-	elements := make([]attr.Value, len(values))
-	for i, v := range values {
-		elements[i] = types.StringValue(v)
+	elements := make([]attr.Value, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			elements = append(elements, types.StringValue(v))
+		}
 	}
 	set, d := types.SetValue(types.StringType, elements)
 	diags.Append(d...)

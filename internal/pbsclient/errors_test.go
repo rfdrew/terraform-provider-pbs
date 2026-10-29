@@ -32,6 +32,7 @@ func TestIsNotFound(t *testing.T) {
 		{404, "remote 'probe-missing' does not exist."},
 		{404, "job 'probe-missing' does not exist."},
 		{404, "traffic control rule 'probe-missing' does not exist."},
+		{404, "s3 client config 'probe-missing' do not exist."},
 		{400, "user 'probe-missing@pbs' does not exist."},
 		{400, "token 'probe-missing' of user 'tfacc@pbs' does not exist."},
 		{400, "name 'probe-missing' does not exist."},

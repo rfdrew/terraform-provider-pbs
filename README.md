@@ -10,9 +10,11 @@ Manage the configuration of a [Proxmox Backup Server](https://www.proxmox.com/en
 
 **Status: early development.** Users, API tokens and ACL entries
 (`pbs_user`, `pbs_api_token`, `pbs_acl`), OpenID Connect realms
-(`pbs_realm_openid`), datastores — removable ones too —
+(`pbs_realm_openid`), datastores — removable ones and those on S3 object
+storage too, with their S3 endpoints (`pbs_s3_endpoint`) —
 with their namespaces and their prune and verify jobs (`pbs_datastore`,
-`pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`) and
+`pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`), traffic control
+rules (`pbs_traffic_control_rule`) and
 notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 `pbs_notification_matcher`) and a Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
@@ -21,11 +23,13 @@ users, tokens and ACL entries, the roles and the effective permissions,
 the realms, the datastores, their namespaces, usage and garbage
 collection, the notification targets and matcher fields, besides `pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
-`pbs_sync_job`) copy backups between servers, with data sources for them and
+`pbs_sync_job`) copy backups between servers, encrypted with keys PBS keeps
+(`pbs_sync_encryption_key`) if need be, with data sources for them and
 for the other jobs. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
-puts them together, and [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
-adds a second server.
+puts them together, [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
+adds a second server, and [Back up to S3 object storage](docs/guides/s3-datastore.md)
+puts a datastore on S3.
 
 ## Requirements
 
@@ -75,7 +79,10 @@ pins an older release line, and `PBS_TEST_VARIANT=image` uses the community
 image `ayufan/proxmox-backup-server` instead, which needs no privileges but
 has no `root@pam`. The packages stand also gets a file system on a loop
 device, for the tests of removable datastores; `PBS_TEST_REMOVABLE=0` leaves
-it out, and those tests skip.
+it out, and those tests skip. Next to PBS runs an S3 server, Silo — a
+maintained fork of MinIO, whose own images are gone — with a self-signed
+certificate, for the tests of S3 endpoints and datastores on S3;
+`PBS_TEST_S3=0` leaves it out, and those tests skip.
 
 Run the acceptance tests only against such a throwaway server: they create,
 change and delete real configuration.
