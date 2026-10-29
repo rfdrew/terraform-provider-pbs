@@ -516,6 +516,8 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewOpenIDRealmResource,
 		NewLDAPRealmResource,
 		NewADRealmResource,
+		NewAPTRepositoryResource,
+		NewAPTStandardRepositoryResource,
 	}
 }
 
@@ -548,6 +550,7 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewPruneJobDataSource,
 		NewPruneJobsDataSource,
 		NewRealmsDataSource,
+		NewAPTRepositoriesDataSource,
 	}
 }
 
