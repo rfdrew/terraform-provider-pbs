@@ -33,6 +33,9 @@ const (
 	ConfigNode          = "node.cfg"
 	ConfigNetwork       = "interfaces"
 	ConfigACMEPlugins   = "acme/plugins.cfg"
+	// ConfigAPTSources stands for every APT source file of the node, which
+	// share one digest.
+	ConfigAPTSources = "apt/sources.list"
 )
 
 type configLocks struct {

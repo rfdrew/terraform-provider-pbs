@@ -24,12 +24,17 @@ var nodeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])
 
 // nodeAttribute is the node attribute of a node resource, what describes it.
 func nodeAttribute(what string) schema.StringAttribute {
+	return nodeAttributeDescribed("Node whose " + what + " to manage: `localhost`, which every PBS answers to, or the " +
+		"node's host name. Defaults to the provider's `node`. PBS is a single node, so both name the same " +
+		"settings: manage them with one resource only. Changing it replaces the resource.")
+}
+
+// nodeAttributeDescribed is a node attribute with the given description.
+func nodeAttributeDescribed(description string) schema.StringAttribute {
 	return schema.StringAttribute{
-		Optional: true,
-		Computed: true,
-		MarkdownDescription: "Node whose " + what + " to manage: `localhost`, which every PBS answers to, or the " +
-			"node's host name. Defaults to the provider's `node`. PBS is a single node, so both name the same " +
-			"settings: manage them with one resource only. Changing it replaces the resource.",
+		Optional:            true,
+		Computed:            true,
+		MarkdownDescription: description,
 		Validators: []validator.String{
 			stringvalidator.LengthBetween(1, 63),
 			stringvalidator.RegexMatches(nodeNamePattern, "must be a node name such as localhost or pbs1"),

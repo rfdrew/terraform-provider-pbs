@@ -8,6 +8,27 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pbs_apt_repository` resource: enables or disables an existing entry of a
+  node's APT source files, addressed by `file_path` and `index`, such as the
+  enterprise repository on a host without a subscription — the counterpart
+  of `proxmox_apt_repository` in bpg/proxmox, imported by
+  `<node>,<file path>,<index>`. It neither adds nor removes an entry:
+  creating the resource takes over the entry, and destroying it leaves the
+  entry as it is. Every write carries the digest of the source files. Should
+  entries before the managed one be added or removed outside Terraform, a
+  refresh warns, says where the entry went and keeps it in state, and an
+  update refuses to change the entry that took its place.
+- `pbs_apt_standard_repository` resource: adds one of PBS's standard
+  repositories — `enterprise`, `no-subscription` or `test` — or enables its
+  entry when the node has one, and tells where the entry is (`file_path`,
+  `index`) for a `pbs_apt_repository`; imported by `<node>,<handle>`.
+  Destroying it disables the repository, as PBS cannot remove it; the
+  counterpart in bpg/proxmox leaves it enabled. Manage a repository with one
+  resource, and move it with a `moved` block.
+- `pbs_apt_repositories` data source: every entry of a node's APT source
+  files, with the standard repository it belongs to, the standard
+  repositories with whether the node has them and where, the files PBS
+  cannot parse, and PBS's notes on the entries.
 - `pbs_s3_endpoint` resource: the connection to an S3-compatible object
   store that datastores on S3 use — its host name, with the `{{bucket}}` and
   `{{region}}` templates PBS fills in, port, region, path-style addressing,

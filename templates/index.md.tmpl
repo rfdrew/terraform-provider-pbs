@@ -78,6 +78,12 @@ never returns.
 * **Traffic control** — bandwidth limits on the connections of clients by
   network, user and time of day (`pbs_traffic_control_rule`); to read them,
   `pbs_traffic_control_rule` and `pbs_traffic_control_rules`.
+* **APT repositories** — the standard Proxmox repositories of the node
+  (`pbs_apt_standard_repository`), such as `no-subscription` for a host
+  without a subscription, and whether an entry of its APT source files is
+  enabled (`pbs_apt_repository`), such as the enterprise repository PBS
+  installs; `pbs_apt_repositories` lists the entries and the standard
+  repositories. PBS cannot remove an entry, only disable it.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.

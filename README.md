@@ -25,7 +25,9 @@ collection, the notification targets and matcher fields, besides `pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
 `pbs_sync_job`) copy backups between servers, encrypted with keys PBS keeps
 (`pbs_sync_encryption_key`) if need be, with data sources for them and
-for the other jobs. The guide
+for the other jobs. APT repositories (`pbs_apt_standard_repository`,
+`pbs_apt_repository`, and the data source `pbs_apt_repositories`) switch a host
+from the enterprise repository to the no-subscription one. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
 puts them together, [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
 adds a second server, and [Back up to S3 object storage](docs/guides/s3-datastore.md)
