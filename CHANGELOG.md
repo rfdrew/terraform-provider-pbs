@@ -29,6 +29,28 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files, with the standard repository it belongs to, the standard
   repositories with whether the node has them and where, the files PBS
   cannot parse, and PBS's notes on the entries.
+- `pbs_realm_ldap` resource: an LDAP realm, to sign in to PBS with the
+  accounts of a directory such as OpenLDAP or FreeIPA, with its servers,
+  port, `mode` (`ldap`, `ldaps` or `ldap+starttls`), certificate check
+  (`verify`, `capath`), `base_dn`, `bind_dn`, the `user_attr` whose value
+  is the user name, and what a sync does with the directory: `filter`,
+  `user_classes`, `sync_attributes` and `sync_defaults`. PBS connects to
+  the server on every create and update, even of `comment` alone, from its
+  own host: it binds as `bind_dn`, reads `base_dn` and saves nothing when
+  that fails, and the error says what to check. The bind password is
+  write-only (`password_wo` and `password_wo_version`); PBS needs it to
+  create a realm with a `bind_dn`, so the plan fails without it, a
+  replacement included, while removing it keeps the password PBS has. PBS
+  ignores `capath` in an update, so setting, changing or removing it
+  replaces the realm; `default = true` takes the flag from the realm that
+  had it. Users still come from `pbs_user` or a sync, which the provider
+  does not start.
+- `pbs_realm_ad` resource: an Active Directory realm, with the attributes of
+  `pbs_realm_ldap` but `user_attr`: users sign in as
+  `<sAMAccountName>@<realm>`, and `bind_dn` may be a user principal name
+  such as `pbs@example.com`. Without `base_dn`, PBS asks the domain
+  controller for the domain's naming context when it creates the realm, and
+  keeps it.
 
 ## [0.2.0] - 2026-10-28
 

@@ -108,6 +108,16 @@ func (c *propertyChanges) StringSet(name string, plan, prior types.Set) {
 // as the scopes of an OpenID realm, from a set or list of strings: PBS gets
 // the elements separated by spaces, a list's in order and a set's sorted.
 func (c *propertyChanges) SpaceSeparated(name string, plan, prior attr.Value) {
+	c.separated(name, plan, prior, " ")
+}
+
+// CommaSeparated is SpaceSeparated with commas, for lists PBS documents as
+// comma-separated, such as the user classes of an LDAP realm.
+func (c *propertyChanges) CommaSeparated(name string, plan, prior attr.Value) {
+	c.separated(name, plan, prior, ",")
+}
+
+func (c *propertyChanges) separated(name string, plan, prior attr.Value, sep string) {
 	c.change(name, plan, prior, func() string {
 		var elements []string
 		switch v := plan.(type) {
@@ -123,7 +133,7 @@ func (c *propertyChanges) SpaceSeparated(name string, plan, prior attr.Value) {
 			c.diags.AddError("Unexpected planned value",
 				fmt.Sprintf("The PBS property %q was planned as %T, not as a set or list of strings. This is a bug in the provider.", name, plan))
 		}
-		return strings.Join(elements, " ")
+		return strings.Join(elements, sep)
 	})
 }
 
