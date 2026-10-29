@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pbs_apt_repository` resource: enables or disables an existing entry of a
+  node's APT source files, addressed by `file_path` and `index`, such as the
+  enterprise repository on a host without a subscription — the counterpart
+  of `proxmox_apt_repository` in bpg/proxmox, imported by
+  `<node>,<file path>,<index>`. It neither adds nor removes an entry:
+  creating the resource takes over the entry, and destroying it leaves the
+  entry as it is. Every write carries the digest of the source files. Should
+  entries before the managed one be added or removed outside Terraform, a
+  refresh warns, says where the entry went and keeps it in state, and an
+  update refuses to change the entry that took its place.
+- `pbs_apt_standard_repository` resource: adds one of PBS's standard
+  repositories — `enterprise`, `no-subscription` or `test` — or enables its
+  entry when the node has one, and tells where the entry is (`file_path`,
+  `index`) for a `pbs_apt_repository`; imported by `<node>,<handle>`.
+  Destroying it disables the repository, as PBS cannot remove it; the
+  counterpart in bpg/proxmox leaves it enabled. Manage a repository with one
+  resource, and move it with a `moved` block.
+- `pbs_apt_repositories` data source: every entry of a node's APT source
+  files, with the standard repository it belongs to, the standard
+  repositories with whether the node has them and where, the files PBS
+  cannot parse, and PBS's notes on the entries.
+
 ## [0.2.0] - 2026-10-28
 
 Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
@@ -242,5 +268,6 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0
