@@ -34,12 +34,13 @@ never returns.
 ## What it manages
 
 * **Access** — users (`pbs_user`), their API tokens (`pbs_api_token`) and
-  the roles they have on ACL paths (`pbs_acl`), and OpenID Connect realms,
-  to sign in through an identity provider such as Authentik
-  (`pbs_realm_openid`); to read them, `pbs_user`, `pbs_users`,
+  the roles they have on ACL paths (`pbs_acl`), and the realms users sign
+  in with: OpenID Connect realms, through an identity provider such as
+  Authentik (`pbs_realm_openid`), LDAP realms, with the accounts of a
+  directory such as FreeIPA or OpenLDAP (`pbs_realm_ldap`), and Active
+  Directory realms (`pbs_realm_ad`); to read them, `pbs_user`, `pbs_users`,
   `pbs_api_tokens`, `pbs_acl`, `pbs_roles`, `pbs_permissions`, which shows
-  what a user or token may actually do, and `pbs_realms`. LDAP and Active
-  Directory realms are not supported yet.
+  what a user or token may actually do, and `pbs_realms`.
 * **Datastores** — datastores in a directory or on a removable disk
   (`pbs_datastore`), their namespaces (`pbs_namespace`), and the jobs
   that look after them: prune jobs (`pbs_prune_job`), which hold the

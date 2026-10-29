@@ -83,3 +83,75 @@ func TestStringSetOrNull(t *testing.T) {
 		t.Errorf("elements = %v", strings)
 	}
 }
+
+// A key that holds a list, such as remove-vanished in a realm's
+// sync-defaults-options, is a set: PBS's list in any order, split at
+// semicolons, commas and white space, reads as the same set, and the
+// provider writes it sorted and separated by semicolons, which need no
+// quoting in a property string.
+func TestPropertyStringListKey(t *testing.T) {
+	format := propertyStringFormat{keys: []propertyStringKey{
+		{"enable_new", "enable-new", types.BoolType},
+		{"remove_vanished", "remove-vanished", propertyStringListType},
+	}}
+	set := func(values ...string) types.Set {
+		elements := make([]attr.Value, len(values))
+		for i, v := range values {
+			elements[i] = types.StringValue(v)
+		}
+		return types.SetValueMust(types.StringType, elements)
+	}
+	aclAndEntry := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+		"enable_new": types.BoolValue(true), "remove_vanished": set("acl", "entry"),
+	})
+
+	for _, input := range []string{
+		"enable-new=1,remove-vanished=acl;entry",
+		"remove-vanished=entry;acl;entry,enable-new=true",
+		`enable-new=yes,remove-vanished="entry, acl"`,
+		"enable-new=on,remove-vanished=entry;;acl",
+	} {
+		var diags diag.Diagnostics
+		got := format.object("sync-defaults-options", input, &diags)
+		requireNoErrors(t, diags)
+		if !got.Equal(aclAndEntry) {
+			t.Errorf("object(%q) = %s, want %s", input, got, aclAndEntry)
+		}
+	}
+
+	var diags diag.Diagnostics
+	onlyFlag := format.object("sync-defaults-options", "enable-new=false", &diags)
+	requireNoErrors(t, diags)
+	if want := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+		"enable_new": types.BoolValue(false), "remove_vanished": types.SetNull(types.StringType),
+	}); !onlyFlag.Equal(want) {
+		t.Errorf("object(enable-new=false) = %s, want %s", onlyFlag, want)
+	}
+
+	for _, tc := range []struct {
+		object types.Object
+		want   string
+	}{
+		{aclAndEntry, "enable-new=true,remove-vanished=acl;entry"},
+		{types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+			"enable_new": types.BoolNull(), "remove_vanished": set("properties", "entry", "acl"),
+		}), "remove-vanished=acl;entry;properties"},
+	} {
+		got, err := format.format(tc.object)
+		if err != nil || got != tc.want {
+			t.Errorf("format(%s) = %q, %v, want %q", tc.object, got, err, tc.want)
+		}
+		var diags diag.Diagnostics
+		if back := format.object("sync-defaults-options", got, &diags); !back.Equal(tc.object) || diags.HasError() {
+			t.Errorf("object(%q) = %s, %v, want %s", got, back, diags, tc.object)
+		}
+	}
+
+	// A list still unknown cannot be written.
+	partlyUnknown := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
+		"enable_new": types.BoolNull(), "remove_vanished": types.SetUnknown(types.StringType),
+	})
+	if _, err := format.format(partlyUnknown); err == nil {
+		t.Error("format() wrote an unknown list")
+	}
+}

@@ -210,6 +210,36 @@ func TestPropertyChangesSetsAndPropertyStrings(t *testing.T) {
 	requireErrorContaining(t, diags, `The PBS property "prompt" was planned as basetypes.StringValue`)
 	diags = nil
 
+	// Lists PBS documents as comma-separated, such as an LDAP realm's user
+	// classes, get commas instead: a set's elements sorted, a list's in
+	// order.
+	c = newPropertyChanges(&diags, "user-classes", "other-classes")
+	c.CommaSeparated("user-classes", set("user", "person", "inetOrgPerson"), set("person"))
+	c.CommaSeparated("ordered", list("user", "person"), types.ListNull(types.StringType))
+	c.CommaSeparated("unchanged", set("person"), set("person"))
+	c.CommaSeparated("other-classes", types.SetNull(types.StringType), set("person"))
+	requireNoErrors(t, diags)
+	values = c.Values()
+	if values.Get("user-classes") != "inetOrgPerson,person,user" || values.Get("ordered") != "user,person" ||
+		values.Get("delete") != "other-classes" || len(values) != 3 {
+		t.Errorf("values = %v", values)
+	}
+	c = newPropertyChanges(&diags)
+	c.CommaSeparated("user-classes", types.StringValue("person"), types.StringNull())
+	requireErrorContaining(t, diags, `The PBS property "user-classes" was planned as basetypes.StringValue`)
+	diags = nil
+
+	// A property string with a list writes it separated by semicolons.
+	vanished := propertyStringFormat{keys: []propertyStringKey{{"remove_vanished", "remove-vanished", propertyStringListType}}}
+	c = newPropertyChanges(&diags)
+	c.PropertyString("sync-defaults-options", types.ObjectValueMust(vanished.attributeTypes(), map[string]attr.Value{
+		"remove_vanished": set("entry", "acl"),
+	}), types.ObjectNull(vanished.attributeTypes()), vanished)
+	requireNoErrors(t, diags)
+	if got := c.Values().Get("sync-defaults-options"); got != "remove-vanished=acl;entry" {
+		t.Errorf("sync-defaults-options = %q", got)
+	}
+
 	partlyUnknown := types.ObjectValueMust(format.attributeTypes(), map[string]attr.Value{
 		"sync_level": types.StringUnknown(), "cutoff": types.Int64Null(),
 	})

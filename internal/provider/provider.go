@@ -514,6 +514,8 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewRemoteResource,
 		NewSyncJobResource,
 		NewOpenIDRealmResource,
+		NewLDAPRealmResource,
+		NewADRealmResource,
 	}
 }
 

@@ -66,15 +66,8 @@ type openIDRealmModel struct {
 var openIDRealmDeletable = []string{"acr-values", "audiences", "autocreate", "client-key", "comment", "default",
 	"prompt", "scopes"}
 
-// Privileges the realm resources need, for error messages.
-const (
-	realmReadPrivilege   = "Sys.Audit on /access/domains"
-	realmModifyPrivilege = "Realm.Allocate on /access/domains"
-)
-
 // Lengths PBS allows in an OpenID realm.
 const (
-	minRealmLength         = 2
 	maxUsernameClaimLength = 64
 	maxAudienceLength      = 256
 )
@@ -91,17 +84,6 @@ var openIDListItemPattern = regexp.MustCompile(`^[^\p{Cc}\p{Z}<>#",;]+$`)
 var defaultOpenIDScopes = types.SetValueMust(types.StringType, []attr.Value{
 	types.StringValue("email"), types.StringValue("profile"),
 })
-
-// realmValidators check the name of a realm a resource creates: not one of
-// the built-in realms, which PBS refuses as existing, so that the plan says
-// so already.
-func realmValidators() []validator.String {
-	return []validator.String{
-		stringvalidator.LengthBetween(minRealmLength, maxSafeIDLength),
-		stringvalidator.RegexMatches(realmPattern, "must start with a letter, a digit or an underscore, followed by letters, digits, underscores, dots and hyphens"),
-		stringvalidator.NoneOf(pbsclient.RealmTypePAM, pbsclient.RealmTypePBS),
-	}
-}
 
 // issuerURLValidator accepts an absolute http:// or https:// URL with a
 // host, and without credentials, a query, a fragment or white space: an
@@ -360,10 +342,7 @@ var openIDRealmDefaults = openIDRealmModel{
 // the scopes deletes them instead of writing the default, and a create does
 // not send it.
 func scopesWithoutDefault(v types.Set) types.Set {
-	if !v.IsUnknown() && v.Equal(defaultOpenIDScopes) {
-		return types.SetNull(types.StringType)
-	}
-	return v
+	return setWithoutDefault(v, defaultOpenIDScopes)
 }
 
 // changes records the properties that differ between prior and m. The
@@ -465,23 +444,13 @@ func (r *openIDRealmResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	// The realm is read back under the same lock, so that no other realm of
-	// this provider takes the default flag in between.
 	var realm pbsclient.OpenIDRealm
-	var readErr error
-	err := client.WithConfigLock(pbsclient.ConfigDomains, func() error {
-		if err := client.CreateOpenIDRealm(ctx, params); err != nil {
-			return err
-		}
-		realm, _, readErr = client.GetOpenIDRealm(ctx, name)
-		return nil
-	})
+	readErr, err := writeRealm(client,
+		func() error { return client.CreateOpenIDRealm(ctx, params) },
+		func() (err error) { realm, _, err = client.GetOpenIDRealm(ctx, name); return err })
 	if err != nil {
 		if pbsclient.IsAlreadyExists(err) {
-			resp.Diagnostics.AddAttributeError(path.Root("realm"), "PBS realm already exists",
-				fmt.Sprintf("PBS already has a realm %q; realms of every type share one namespace. If it is an OpenID "+
-					"realm, import it to manage it with Terraform, with an import block whose id is %q or with "+
-					"`terraform import`; otherwise choose another name. %s", name, name, err))
+			addRealmExistsError(&resp.Diagnostics, openIDRealmKind, name, err)
 			return
 		}
 		resp.Diagnostics.AddError("Unable to create PBS OpenID realm", apiErrorDetail(client, realmModifyPrivilege, err))
@@ -518,18 +487,7 @@ func (r *openIDRealmResource) Read(ctx context.Context, req resource.ReadRequest
 
 	realm, _, err := r.data.client.GetOpenIDRealm(ctx, name)
 	if err != nil {
-		switch {
-		case pbsclient.IsNotFound(err):
-			resp.State.RemoveResource(ctx)
-		case pbsclient.IsRealmOfOtherType(err):
-			resp.Diagnostics.AddWarning("PBS realm is no OpenID realm",
-				fmt.Sprintf("PBS has a realm %q, but not of type openid: it was replaced outside Terraform. It is "+
-					"removed from state, and Terraform leaves it alone; creating the OpenID realm again fails while "+
-					"it exists. %s", name, err))
-			resp.State.RemoveResource(ctx)
-		default:
-			resp.Diagnostics.AddError("Unable to read PBS OpenID realm", apiErrorDetail(r.data.client, realmReadPrivilege, err))
-		}
+		readRealmFailed(ctx, resp, r.data.client, openIDRealmKind, name, err)
 		return
 	}
 	state.fromRealm(name, realm, &resp.Diagnostics)
@@ -569,18 +527,15 @@ func (r *openIDRealmResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	// As in Create, the realm is read back under the lock of the write.
 	var realm pbsclient.OpenIDRealm
-	var readErr error
-	err := client.WithConfigLock(pbsclient.ConfigDomains, func() error {
-		if len(params) > 0 {
-			if err := client.UpdateOpenIDRealm(ctx, name, params); err != nil {
-				return err
+	readErr, err := writeRealm(client,
+		func() error {
+			if len(params) == 0 {
+				return nil
 			}
-		}
-		realm, _, readErr = client.GetOpenIDRealm(ctx, name)
-		return nil
-	})
+			return client.UpdateOpenIDRealm(ctx, name, params)
+		},
+		func() (err error) { realm, _, err = client.GetOpenIDRealm(ctx, name); return err })
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to update PBS OpenID realm", apiErrorDetail(client, realmModifyPrivilege, err))
 		return
@@ -598,36 +553,15 @@ func (r *openIDRealmResource) Update(ctx context.Context, req resource.UpdateReq
 	setIdentity(ctx, resp.Identity, "realm", name, &resp.Diagnostics)
 }
 
-// Delete deletes the realm; one already gone is not an error. PBS's delete
-// removes a realm of any type, so the realm is read first, and deleted only
-// while it is still an OpenID realm — with the digest of that read, so that
-// nothing replaces it in between.
+// Delete deletes the realm, while it is still an OpenID realm; see
+// deleteRealm.
 func (r *openIDRealmResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state openIDRealmModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	name := state.Realm.ValueString()
-	client := r.data.client
-	err := client.WithConfigLock(pbsclient.ConfigDomains, func() error {
-		return client.RetryOnDigestConflict(ctx, func() error {
-			_, digest, err := client.GetOpenIDRealm(ctx, name)
-			if err != nil {
-				return err
-			}
-			return client.DeleteOpenIDRealm(ctx, name, digest)
-		})
-	})
-	switch {
-	case err == nil || pbsclient.IsNotFound(err):
-	case pbsclient.IsRealmOfOtherType(err):
-		resp.Diagnostics.AddWarning("PBS realm is no OpenID realm",
-			fmt.Sprintf("PBS has a realm %q, but not of type openid: it was replaced outside Terraform, so it was not "+
-				"deleted. %s", name, err))
-	default:
-		resp.Diagnostics.AddError("Unable to delete PBS OpenID realm", apiErrorDetail(client, realmModifyPrivilege, err))
-	}
+	deleteRealm(ctx, r.data.client, openIDRealmKind, state.Realm.ValueString(), &resp.Diagnostics)
 }
 
 // ImportState imports an OpenID realm by name, given either as the import id

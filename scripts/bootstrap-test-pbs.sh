@@ -32,14 +32,26 @@
 # packages stand also gets a file system on a loop device, for removable
 # datastores.
 #
+# For the LDAP and Active Directory realms, it starts an OpenLDAP server,
+# slapd from Debian's package, the same way, in a container of its own in the
+# PBS container's network namespace: PBS reaches it at 127.0.0.1, with plain
+# LDAP and StartTLS on port 389 and LDAPS on 636. The directory has a bind
+# account and a user, alice, whose entry also carries the sAMAccountName an
+# Active Directory realm looks users up by; its root DSE names the base DN as
+# defaultNamingContext, as a domain controller does. Anonymous clients read
+# the root DSE and the schema, and nothing else.
+#
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
 # variant, the PBS version, the ACME directory, the files of PBS's own
 # certificate and key, which the certificate tests put back when they end,
-# the UUID of the file system for removable datastores, and the address at
+# the UUID of the file system for removable datastores, the address at
 # which the container reaches this host, where the notification tests
-# receive what PBS sends.
+# receive what PBS sends, and the LDAP server: the address PBS connects to,
+# the base DN, the bind account and its password, the user and its password,
+# and the file of the CA that signed the server's certificate, in the PBS
+# container.
 # The test user's credentials are not exported as PBS_USERNAME and
 # PBS_PASSWORD, which the provider would read alongside the token.
 #
@@ -78,6 +90,30 @@
 #     privileged container sees the device nodes the host had when it
 #     started, so the script creates the node of a newer one, and detaches
 #     the device again when it removes the container.
+#   * PBS connects to an LDAP server whenever a realm is created or changed,
+#     from its own host, so slapd shares the PBS container's network
+#     namespace. It listens on 127.0.0.1 only, not on every address: Linux
+#     routes all of 127.0.0.0/8 to the loopback interface, so 127.0.0.2
+#     refuses connections, which the tests take for a server that is down.
+#   * with TLS and verify, PBS checks the server's certificate and its name,
+#     the address it connects to. The certificate names DNS:localhost and
+#     IP:127.0.0.1 and is signed by a throwaway CA of its own, not Pebble's,
+#     which PBS does not trust unless a realm's capath names it: the CA's
+#     certificate is the only file in its directory in the PBS container, so
+#     that the directory works as a capath too — PBS reads every file of a
+#     capath directory as a certificate. Debian's slapd links OpenSSL, as of
+#     trixie; the server key is RSA all the same, which any TLS library takes.
+#   * Debian's slapd package sets up a database of its own when it is
+#     installed, unless debconf is told slapd/no_configuration; slapd then
+#     runs in the foreground from a slapd.conf the script copies in, after
+#     slapadd has loaded the directory. The image is built on first use, but
+#     CI caches only the PBS image, so there the LDAP image is built on every
+#     run, in about half a minute.
+#   * OpenLDAP lets no schema file define an operational attribute, so
+#     defaultNamingContext is a user attribute of a small schema of the
+#     script's own, along with Microsoft's sAMAccountName; slapd adds it to
+#     the root DSE from an LDIF file (rootDSE). PBS asks the root DSE
+#     anonymously.
 #
 # Usage:
 #   eval "$(scripts/bootstrap-test-pbs.sh)"                         # official packages
@@ -100,6 +136,10 @@
 #   PBS_TEST_PEBBLE_IMAGE    Pebble image (default ghcr.io/letsencrypt/pebble:2.10.1)
 #   PBS_TEST_REMOVABLE       packages variant: set to 0 to make no file system for
 #                            removable datastores; their tests then skip
+#   PBS_TEST_LDAP            set to 0 to start no LDAP server; the LDAP and Active
+#                            Directory realm tests then skip
+#   PBS_TEST_LDAP_BASE_IMAGE base image of the LDAP server's image
+#                            (default debian:trixie-slim)
 #
 # The script logs "timing: <phase> <seconds>s" lines on stderr, so that CI can
 # report how long the stand takes to come up.
@@ -133,6 +173,24 @@ REMOVABLE="${PBS_TEST_REMOVABLE:-1}"
 REMOVABLE_IMAGE="/var/lib/proxmox-backup/tfacc-removable.img"
 REMOVABLE_LOOP_FILE="/var/lib/proxmox-backup/tfacc-removable.loop"
 REMOVABLE_UUID=""
+
+# The LDAP server: its container, the address PBS connects to, the
+# directory, and where the files go — slapd's, in the LDAP container, and the
+# CA's certificate, alone in its directory, in the PBS container. The image
+# and the passwords are set when the server starts.
+LDAP="${PBS_TEST_LDAP:-1}"
+LDAP_BASE_IMAGE="${PBS_TEST_LDAP_BASE_IMAGE:-debian:trixie-slim}"
+LDAP_CONTAINER="${CONTAINER}-ldap"
+LDAP_SERVER="127.0.0.1"
+LDAP_BASE_DN="dc=example,dc=org"
+LDAP_BIND_DN="cn=pbs-bind,ou=services,${LDAP_BASE_DN}"
+LDAP_USER="alice"
+LDAP_USER_DN="uid=${LDAP_USER},ou=people,${LDAP_BASE_DN}"
+LDAP_CONFIG_DIR="/etc/ldap/tfacc"
+LDAP_CA_FILE="/usr/local/share/tfacc-ldap/ca.pem"
+LDAP_IMAGE=""
+LDAP_BIND_PASS=""
+LDAP_USER_PASS=""
 
 TEST_USER="tfacc@pbs"
 TEST_TOKEN_NAME="acc"
@@ -171,11 +229,12 @@ release_removable_device() {
 
 if [[ "${1:-}" == "--teardown" ]]; then
   docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f -v "$LDAP_CONTAINER" >/dev/null 2>&1 || true
   release_removable_device
   docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR"
-  log "removed $CONTAINER, $PEBBLE_CONTAINER, the volumes and $STATE_DIR"
+  log "removed $CONTAINER, $PEBBLE_CONTAINER, $LDAP_CONTAINER, the volumes and $STATE_DIR"
   exit 0
 fi
 
@@ -185,6 +244,9 @@ command -v docker >/dev/null || { log "docker not found"; exit 1; }
 command -v jq >/dev/null || { log "jq not found"; exit 1; }
 if [[ "$PEBBLE" != "0" ]]; then
   command -v openssl >/dev/null || { log "openssl not found; it makes Pebble's certificate (PBS_TEST_PEBBLE=0 starts no Pebble)"; exit 1; }
+fi
+if [[ "$LDAP" != "0" ]]; then
+  command -v openssl >/dev/null || { log "openssl not found; it makes the LDAP server's certificate (PBS_TEST_LDAP=0 starts no LDAP server)"; exit 1; }
 fi
 
 case "$VARIANT" in
@@ -213,6 +275,10 @@ dump_logs() {
   if docker inspect "$PEBBLE_CONTAINER" >/dev/null 2>&1; then
     log "--- docker logs $PEBBLE_CONTAINER (tail)"
     docker logs --tail 50 "$PEBBLE_CONTAINER" >&2 2>&1 || true
+  fi
+  if docker inspect "$LDAP_CONTAINER" >/dev/null 2>&1; then
+    log "--- docker logs $LDAP_CONTAINER (tail)"
+    docker logs --tail 50 "$LDAP_CONTAINER" >&2 2>&1 || true
   fi
   if [[ "$VARIANT" == "packages" ]]; then
     log "--- journal of the PBS services (tail)"
@@ -538,6 +604,274 @@ start_pebble() {
   timing "pebble" "$t"
 }
 
+# ldap_dockerfile prints the Dockerfile of the LDAP server's image: Debian's
+# slapd and ldap-utils, with debconf told to leave slapd unconfigured, and a
+# policy-rc.d that keeps the package from starting it during the build. The
+# configuration below loads back_mdb from /usr/lib/ldap, so the build fails
+# when it is not there.
+ldap_dockerfile() {
+  cat <<EOF
+FROM ${LDAP_BASE_IMAGE}
+ENV DEBIAN_FRONTEND=noninteractive
+RUN printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d \\
+ && chmod +x /usr/sbin/policy-rc.d \\
+ && echo 'slapd slapd/no_configuration boolean true' | debconf-set-selections \\
+ && apt-get update \\
+ && apt-get install -y --no-install-recommends slapd ldap-utils \\
+ && apt-get clean \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && test -e /usr/lib/ldap/back_mdb.so
+EOF
+}
+
+# build_ldap_image builds the LDAP server's image unless it exists, and sets
+# LDAP_IMAGE. The tag carries a checksum of the Dockerfile, so that changing
+# it builds a new image.
+build_ldap_image() {
+  local ctx base sum
+  base="$(printf '%s' "${LDAP_BASE_IMAGE##*/}" | tr -c 'A-Za-z0-9_.-' '-')"
+  sum="$(ldap_dockerfile | cksum | cut -d' ' -f1)"
+  LDAP_IMAGE="pbs-tfprovider-test-ldap:${base}-${sum}"
+  if docker image inspect "$LDAP_IMAGE" >/dev/null 2>&1; then
+    log "reusing image $LDAP_IMAGE"
+    return 0
+  fi
+  ctx="$(mktemp -d)"
+  ldap_dockerfile >"$ctx/Dockerfile"
+  log "building $LDAP_IMAGE from $LDAP_BASE_IMAGE"
+  docker build --progress=plain -t "$LDAP_IMAGE" "$ctx" >&2
+  rm -rf "$ctx"
+}
+
+# ldap_files writes, to dir, a throwaway CA, and, to dir/slapd, what slapd
+# needs: its configuration; a schema with the Active Directory attributes,
+# sAMAccountName and defaultNamingContext, and an auxiliary class for the
+# former; the root DSE's defaultNamingContext; the directory's entries; and
+# a certificate for localhost and 127.0.0.1, signed by the CA, with its key
+# and the CA's certificate. The passwords are random and in plain text, which
+# slapd compares as it is; the files are for this owner only. Nothing
+# reaches stdout, which is evaluated.
+ldap_files() {
+  local dir="$1" rootpw dc
+  rootpw="root-$(rand_hex)"
+  dc="${LDAP_BASE_DN%%,*}"
+  dc="${dc#dc=}"
+  (
+    umask 077
+    mkdir -p "$dir/slapd"
+    openssl genrsa -out "$dir/ca.key" 2048 >&2
+    openssl req -x509 -new -key "$dir/ca.key" -sha256 -days 30 -subj "/CN=terraform-provider-pbs test LDAP CA" \
+      -config <(printf '[req]\ndistinguished_name = dn\nx509_extensions = ca\n[dn]\n[ca]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\nsubjectKeyIdentifier = hash\n') \
+      -out "$dir/ca.pem" >&2
+    openssl genrsa -out "$dir/slapd/key.pem" 2048 >&2
+    openssl req -new -key "$dir/slapd/key.pem" -subj "/CN=localhost" \
+      -config <(printf '[req]\ndistinguished_name = dn\n[dn]\n') -out "$dir/cert.csr" >&2
+    openssl x509 -req -in "$dir/cert.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" -set_serial "0x$(rand_hex)" \
+      -sha256 -days 30 -out "$dir/slapd/cert.pem" \
+      -extfile <(printf 'basicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature, keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:localhost, IP:127.0.0.1\nauthorityKeyIdentifier = keyid\n') >&2
+    cp "$dir/ca.pem" "$dir/slapd/ca.pem"
+
+    # Anyone reads the root DSE, where PBS asks for defaultNamingContext
+    # anonymously, and the schema. Everything else needs a bind, and a
+    # password serves only to bind.
+    cat >"$dir/slapd/slapd.conf" <<EOF
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+include /etc/ldap/schema/inetorgperson.schema
+include /etc/ldap/schema/nis.schema
+include ${LDAP_CONFIG_DIR}/ad.schema
+
+modulepath /usr/lib/ldap
+moduleload back_mdb
+
+rootDSE ${LDAP_CONFIG_DIR}/rootdse.ldif
+
+TLSCACertificateFile ${LDAP_CONFIG_DIR}/ca.pem
+TLSCertificateFile ${LDAP_CONFIG_DIR}/cert.pem
+TLSCertificateKeyFile ${LDAP_CONFIG_DIR}/key.pem
+
+access to dn.base="" by * read
+access to dn.base="cn=Subschema" by * read
+access to attrs=userPassword
+  by self write
+  by anonymous auth
+  by * none
+access to *
+  by users read
+  by anonymous auth
+  by * none
+
+database mdb
+suffix "${LDAP_BASE_DN}"
+rootdn "cn=admin,${LDAP_BASE_DN}"
+rootpw ${rootpw}
+directory /var/lib/tfacc-ldap
+index objectClass eq
+index uid,sAMAccountName eq
+EOF
+
+    # OIDs: Microsoft's for sAMAccountName, and below 1.3.6.1.4.1.32473,
+    # IANA's arc for examples, for the rest.
+    cat >"$dir/slapd/ad.schema" <<'EOF'
+attributetype ( 1.2.840.113556.1.4.221 NAME 'sAMAccountName'
+  DESC 'Active Directory: the name an account signs in with'
+  EQUALITY caseIgnoreMatch
+  SUBSTR caseIgnoreSubstringsMatch
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.32473.1.1.1 NAME 'defaultNamingContext'
+  DESC 'Active Directory root DSE: the root of the domain'
+  EQUALITY distinguishedNameMatch
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.12
+  SINGLE-VALUE )
+
+objectclass ( 1.3.6.1.4.1.32473.1.2.1 NAME 'tfaccADAccount'
+  DESC 'An entry Active Directory realms find by sAMAccountName'
+  SUP top AUXILIARY
+  MAY sAMAccountName )
+EOF
+
+    printf 'dn:\ndefaultNamingContext: %s\n' "$LDAP_BASE_DN" >"$dir/slapd/rootdse.ldif"
+
+    cat >"$dir/slapd/seed.ldif" <<EOF
+dn: ${LDAP_BASE_DN}
+objectClass: dcObject
+objectClass: organization
+dc: ${dc}
+o: terraform-provider-pbs acceptance tests
+
+dn: ou=people,${LDAP_BASE_DN}
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=services,${LDAP_BASE_DN}
+objectClass: organizationalUnit
+ou: services
+
+dn: ${LDAP_BIND_DN}
+objectClass: organizationalRole
+objectClass: simpleSecurityObject
+cn: pbs-bind
+description: The account PBS binds as to look users up
+userPassword: ${LDAP_BIND_PASS}
+
+dn: ${LDAP_USER_DN}
+objectClass: inetOrgPerson
+objectClass: tfaccADAccount
+uid: ${LDAP_USER}
+sAMAccountName: ${LDAP_USER}
+cn: Alice Example
+givenName: Alice
+sn: Example
+mail: ${LDAP_USER}@example.org
+userPassword: ${LDAP_USER_PASS}
+EOF
+  )
+}
+
+# check_ldap checks, from the LDAP container, what the tests rely on: the
+# root DSE names the base DN as defaultNamingContext to anonymous clients,
+# which read nothing else; the bind account finds the user by uid and by
+# sAMAccountName; LDAPS and StartTLS work with the certificate verified
+# against the CA, for the address PBS connects to; and the user binds with
+# its password.
+check_ldap() {
+  docker exec -i "$LDAP_CONTAINER" bash -s -- "${LDAP_CONFIG_DIR}/ca.pem" "$LDAP_SERVER" "$LDAP_BASE_DN" \
+    "$LDAP_BIND_DN" "$LDAP_BIND_PASS" "$LDAP_USER" "$LDAP_USER_DN" "$LDAP_USER_PASS" >&2 <<'SCRIPT'
+set -euo pipefail
+ca="$1" server="$2" base="$3" bind_dn="$4" bind_pass="$5" user="$6" user_dn="$7" user_pass="$8"
+fail() { echo "the LDAP server is not as the tests expect: $*" >&2; exit 1; }
+search() { ldapsearch -x -LLL -o ldif_wrap=no -o nettimeout=5 "$@"; }
+[[ "$(search -H "ldap://$server:389/" -b "" -s base defaultNamingContext)" == *"defaultNamingContext: $base"* ]] ||
+  fail "the root DSE names no defaultNamingContext $base"
+if search -H "ldap://$server:389/" -b "$base" -s base dn >/dev/null 2>&1; then
+  fail "anonymous clients read $base"
+fi
+for attr in uid sAMAccountName; do
+  [[ "$(search -H "ldap://$server:389/" -D "$bind_dn" -w "$bind_pass" -b "$base" "($attr=$user)" dn)" == "dn: $user_dn" ]] ||
+    fail "$bind_dn does not find $user_dn by $attr"
+done
+export LDAPTLS_CACERT="$ca" LDAPTLS_REQCERT=demand
+search -H "ldaps://$server:636/" -D "$bind_dn" -w "$bind_pass" -b "$base" -s base dn >/dev/null ||
+  fail "LDAPS, verifying the certificate, failed"
+search -ZZ -H "ldap://$server:389/" -D "$bind_dn" -w "$bind_pass" -b "$base" -s base dn >/dev/null ||
+  fail "StartTLS, verifying the certificate, failed"
+ldapwhoami -x -o nettimeout=5 -H "ldap://$server:389/" -D "$user_dn" -w "$user_pass" >/dev/null ||
+  fail "$user_dn cannot bind with its password"
+SCRIPT
+}
+
+# start_ldap starts slapd in the PBS container's network namespace, puts the
+# CA's certificate into the PBS container, at LDAP_CA_FILE, and waits until
+# the bind account reads the directory. slapd logs every operation, with its
+# result, for dump_logs and the CI's logs.
+start_ldap() {
+  local t dir deadline
+  t="$(date +%s)"
+  build_ldap_image
+  timing "ldap-build" "$t"
+  LDAP_BIND_PASS="bind-$(rand_hex)"
+  LDAP_USER_PASS="${LDAP_USER}-$(rand_hex)"
+  dir="${STATE_DIR}/ldap"
+  ldap_files "$dir"
+  # The files are copied in, as Pebble's are; slapadd loads the directory
+  # before slapd starts.
+  # shellcheck disable=SC2016 # expanded by the container's shell
+  docker create \
+    --name "$LDAP_CONTAINER" \
+    --network "container:${CONTAINER}" \
+    "$LDAP_IMAGE" \
+    sh -c 'mkdir -p /var/lib/tfacc-ldap && slapadd -q -f "$1/slapd.conf" -l "$1/seed.ldif" && exec slapd -d stats -f "$1/slapd.conf" -h "$2"' \
+    sh "$LDAP_CONFIG_DIR" "ldap://${LDAP_SERVER}:389/ ldaps://${LDAP_SERVER}:636/" >/dev/null
+  docker cp "${dir}/slapd/." "${LDAP_CONTAINER}:${LDAP_CONFIG_DIR}" >&2
+  docker start "$LDAP_CONTAINER" >/dev/null
+
+  docker exec "$CONTAINER" mkdir -p "${LDAP_CA_FILE%/*}"
+  docker cp "${dir}/ca.pem" "${CONTAINER}:${LDAP_CA_FILE}" >&2
+  docker exec "$CONTAINER" chmod 0644 "$LDAP_CA_FILE"
+
+  deadline=$(($(date +%s) + WAIT_SECONDS))
+  until docker exec "$LDAP_CONTAINER" ldapsearch -x -LLL -o nettimeout=2 -H "ldap://${LDAP_SERVER}:389/" \
+    -D "$LDAP_BIND_DN" -w "$LDAP_BIND_PASS" -b "$LDAP_BASE_DN" -s base dn >/dev/null 2>&1; do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$LDAP_CONTAINER" 2>/dev/null || echo false)" != "true" ]]; then
+      log "$LDAP_CONTAINER stopped"
+      dump_logs
+      exit 1
+    fi
+    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      log "$LDAP_BIND_DN could not read $LDAP_BASE_DN within ${WAIT_SECONDS}s"
+      dump_logs
+      exit 1
+    fi
+    sleep 1
+  done
+  if ! check_ldap; then
+    dump_logs
+    exit 1
+  fi
+  timing "ldap" "$t"
+}
+
+# print_ldap_exports prints the facts about the LDAP server, or, when there
+# is none, unsets what an earlier run exported in the same shell.
+print_ldap_exports() {
+  local name
+  if [[ "$LDAP" == "0" ]]; then
+    for name in SERVER BASE_DN BIND_DN BIND_PASSWORD USER USER_PASSWORD CA_FILE; do
+      printf 'unset PBS_ACC_LDAP_%s\n' "$name"
+    done
+    return 0
+  fi
+  printf 'export PBS_ACC_LDAP_SERVER=%q\n' "$LDAP_SERVER"
+  printf 'export PBS_ACC_LDAP_BASE_DN=%q\n' "$LDAP_BASE_DN"
+  printf 'export PBS_ACC_LDAP_BIND_DN=%q\n' "$LDAP_BIND_DN"
+  printf 'export PBS_ACC_LDAP_BIND_PASSWORD=%q\n' "$LDAP_BIND_PASS"
+  printf 'export PBS_ACC_LDAP_USER=%q\n' "$LDAP_USER"
+  printf 'export PBS_ACC_LDAP_USER_PASSWORD=%q\n' "$LDAP_USER_PASS"
+  printf 'export PBS_ACC_LDAP_CA_FILE=%q\n' "$LDAP_CA_FILE"
+}
+
 # save_certificate keeps PBS's own certificate and key, which the
 # certificate tests put back, so that PBS_TLS_FINGERPRINT holds again. The
 # key is written through the shell, so that it gets the umask's mode.
@@ -623,10 +957,12 @@ print_exports() {
   else
     printf 'unset PBS_ACC_REMOVABLE_UUID\n'
   fi
+  print_ldap_exports
 }
 
 # Always a fresh server, so that every test run starts from the same state.
 docker rm -f -v "$PEBBLE_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f -v "$LDAP_CONTAINER" >/dev/null 2>&1 || true
 release_removable_device
 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
@@ -656,6 +992,9 @@ save_state
 check_token
 if [[ "$PEBBLE" != "0" ]]; then
   start_pebble
+fi
+if [[ "$LDAP" != "0" ]]; then
+  start_ldap
 fi
 if [[ "$VARIANT" == "packages" && "$REMOVABLE" != "0" ]]; then
   t="$(date +%s)"
