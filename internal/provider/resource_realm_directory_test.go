@@ -893,7 +893,7 @@ func TestDirectoryRealmResourceImport(t *testing.T) {
 			inst := h.importByID(t, k.typeName, "corp")
 			requireNoPlannedChange(t, h, inst, k.config(t, h, attrs))
 			attrs["comment"] = "Imported realm"
-			inst = h.update(t, inst, k.config(t, h, attrs))
+			h.update(t, inst, k.config(t, h, attrs))
 			requireForm(t, "PUT", fake.lastCall(t, k.route(http.MethodPut, "corp")).form,
 				map[string]string{"comment": "Imported realm", "default": "true"})
 
