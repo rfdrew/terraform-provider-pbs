@@ -206,7 +206,7 @@ func TestAPTRepositoryResourceSameEntryAfterRewrite(t *testing.T) {
 		t.Fatalf("refreshed state = %s", inst.state)
 	}
 	apt.setEntry(testProxmoxSources, 0, legacy)
-	inst = h.update(t, inst, aptRepositoryConfig(t, h, testProxmoxSources, 0, true))
+	h.update(t, inst, aptRepositoryConfig(t, h, testProxmoxSources, 0, true))
 	if e, _ := apt.entry(testProxmoxSources, 0); !e.Enabled || fake.count("POST /nodes/localhost/apt/repositories") != 1 {
 		t.Fatalf("entry = %+v", e)
 	}
