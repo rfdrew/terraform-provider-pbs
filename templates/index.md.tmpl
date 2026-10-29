@@ -70,6 +70,12 @@ never returns.
   `pbs_remote_datastores` and `pbs_remote_namespaces`, which sign in to a
   remote and list what it holds. `pbs_verify_job`, `pbs_verify_jobs`,
   `pbs_prune_job` and `pbs_prune_jobs` read the other jobs.
+* **APT repositories** — the standard Proxmox repositories of the node
+  (`pbs_apt_standard_repository`), such as `no-subscription` for a host
+  without a subscription, and whether an entry of its APT source files is
+  enabled (`pbs_apt_repository`), such as the enterprise repository PBS
+  installs; `pbs_apt_repositories` lists the entries and the standard
+  repositories. PBS cannot remove an entry, only disable it.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
