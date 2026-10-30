@@ -292,7 +292,7 @@ func TestDatastoreResourceDelete(t *testing.T) {
 }
 
 // Both import forms read a datastore back in full, with the flags that exist
-// only in Terraform at their defaults; datastores of other kinds are refused.
+// only in Terraform at their defaults; a datastore on S3 with its backend.
 func TestDatastoreResourceImport(t *testing.T) {
 	h, _, datastores := newDatastoreHarness(t)
 	datastores.addDatastore("store1", fakeProperties{
@@ -310,18 +310,25 @@ func TestDatastoreResourceImport(t *testing.T) {
 	} {
 		if stringAt(t, inst.state, "comment") != "Imported" || stringAt(t, inst.state, "notification_mode") != "legacy-sendmail" ||
 			stringAt(t, inst.state, "maintenance_mode", "type") != "offline" || boolAt(t, inst.state, "tuning", "gc_atime_safety_check") ||
-			boolAt(t, inst.state, "reuse_datastore") || boolAt(t, inst.state, "destroy_data") || boolAt(t, inst.state, "keep_job_configs") {
+			boolAt(t, inst.state, "reuse_datastore") || boolAt(t, inst.state, "destroy_data") || boolAt(t, inst.state, "keep_job_configs") ||
+			!isNullAt(t, inst.state, "backend") {
 			t.Errorf("import by %s = %s", name, inst.state)
 		}
 	}
 
-	resp := h.importResource(t, "pbs_datastore", "s3", nil)
-	requireNoProtocolErrors(t, resp.Diagnostics)
-	imported := resp.ImportedResources[0]
-	read := h.read(t, &resourceInstance{typeName: "pbs_datastore", state: h.decodeResource(t, "pbs_datastore", imported.State), identity: imported.Identity})
-	requireProtocolErrorContaining(t, read.Diagnostics, "is on S3 object storage")
+	for name, inst := range map[string]*resourceInstance{
+		"id":       h.importByID(t, "pbs_datastore", "s3"),
+		"identity": h.importByIdentity(t, "pbs_datastore", map[string]any{"name": "s3"}),
+	} {
+		if stringAt(t, inst.state, "backend", "type") != "s3" || stringAt(t, inst.state, "backend", "client") != "minio" ||
+			stringAt(t, inst.state, "backend", "bucket") != "pbs" || !isNullAt(t, inst.state, "backend", "max_cache_size") ||
+			stringAt(t, inst.state, "path") != "/mnt/cache" || boolAt(t, inst.state, "reuse_datastore") ||
+			boolAt(t, inst.state, "overwrite_in_use") || boolAt(t, inst.state, "destroy_data") || boolAt(t, inst.state, "keep_job_configs") {
+			t.Errorf("import of the datastore on S3 by %s = %s", name, inst.state)
+		}
+	}
 
-	resp = h.importResource(t, "pbs_datastore", "no/such", nil)
+	resp := h.importResource(t, "pbs_datastore", "no/such", nil)
 	requireProtocolErrorContaining(t, resp.Diagnostics, "Import a PBS datastore by its name")
 }
 

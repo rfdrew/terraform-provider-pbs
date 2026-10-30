@@ -41,12 +41,15 @@ never returns.
   Directory realms (`pbs_realm_ad`); to read them, `pbs_user`, `pbs_users`,
   `pbs_api_tokens`, `pbs_acl`, `pbs_roles`, `pbs_permissions`, which shows
   what a user or token may actually do, and `pbs_realms`.
-* **Datastores** — datastores in a directory or on a removable disk
-  (`pbs_datastore`), their namespaces (`pbs_namespace`), and the jobs
+* **Datastores** — datastores in a directory, on a removable disk or on S3
+  object storage (`pbs_datastore`), the S3 endpoints those on S3 use
+  (`pbs_s3_endpoint`), their namespaces (`pbs_namespace`), and the jobs
   that look after them: prune jobs (`pbs_prune_job`), which hold the
   retention, and verify jobs (`pbs_verify_job`); to read them,
-  `pbs_datastore`, `pbs_datastores` and `pbs_namespaces`, and how they are
-  doing, `pbs_datastore_status` and `pbs_gc_status`.
+  `pbs_datastore`, `pbs_datastores`, `pbs_namespaces`, `pbs_s3_endpoint`,
+  `pbs_s3_endpoints` and `pbs_s3_buckets`, which lists the buckets an
+  endpoint reaches, and how they are doing, `pbs_datastore_status` and
+  `pbs_gc_status`.
 * **Notifications** — endpoints that deliver notifications: by the host's
   sendmail (`pbs_notification_endpoint_sendmail`), the built-in
   `mail-to-root` included, by SMTP (`pbs_notification_endpoint_smtp`), to
@@ -66,11 +69,16 @@ never returns.
   are not supported yet.
 * **Replication** — other PBS servers as remotes (`pbs_remote`), and sync
   jobs that pull backups from them, push backups to them or copy them
-  between two datastores of one server (`pbs_sync_job`); to read them,
-  `pbs_remote`, `pbs_remotes`, `pbs_sync_job` and `pbs_sync_jobs`, and
+  between two datastores of one server (`pbs_sync_job`), with the keys
+  push jobs encrypt the backups with (`pbs_sync_encryption_key`, PBS 4.2);
+  to read them, `pbs_remote`, `pbs_remotes`, `pbs_sync_job`,
+  `pbs_sync_jobs` and `pbs_sync_encryption_keys`, and
   `pbs_remote_datastores` and `pbs_remote_namespaces`, which sign in to a
   remote and list what it holds. `pbs_verify_job`, `pbs_verify_jobs`,
   `pbs_prune_job` and `pbs_prune_jobs` read the other jobs.
+* **Traffic control** — bandwidth limits on the connections of clients by
+  network, user and time of day (`pbs_traffic_control_rule`); to read them,
+  `pbs_traffic_control_rule` and `pbs_traffic_control_rules`.
 * **APT repositories** — the standard Proxmox repositories of the node
   (`pbs_apt_standard_repository`), such as `no-subscription` for a host
   without a subscription, and whether an entry of its APT source files is
@@ -117,7 +125,8 @@ configuration: a datastore with prune and verify
 jobs, notifications by mail, this access, outputs with what the storage
 in Proxmox VE needs, and a certificate from Let's Encrypt. The guide
 **Copy backups to an offsite PBS** adds a second server, with a remote and
-a sync job.
+a sync job, and the guide **Back up to S3 object storage** puts a datastore
+on an S3-compatible object store.
 
 ## Authentication
 

@@ -101,7 +101,8 @@ func asError(err error) (*Error, bool) {
 // answers 400 "no such remote 'x'" for most objects and 404 "endpoint 'x'
 // not found" for notification targets; deleting one answers 404 "remote 'x'
 // does not exist." for some objects and 400 "user 'x' does not exist." or
-// "no such prune 'x'" for others. The text is what identifies it. A 404
+// "no such prune 'x'" for others, and an S3 endpoint's 404 "s3 client config
+// 'x' do not exist.". The text is what identifies it. A 404
 // "Path '...' not found." is not one of them: that is a route the server does
 // not have, which IsEndpointMissing reports.
 func IsNotFound(err error) bool {
@@ -115,8 +116,9 @@ func IsNotFound(err error) bool {
 		return false
 	}
 	message := strings.ToLower(apiErr.Message)
+	trimmed := strings.TrimSuffix(message, ".")
 	return strings.HasPrefix(message, "no such ") ||
-		strings.HasSuffix(strings.TrimSuffix(message, "."), " does not exist") ||
+		strings.HasSuffix(trimmed, " does not exist") || strings.HasSuffix(trimmed, " do not exist") ||
 		strings.HasSuffix(message, " not found")
 }
 

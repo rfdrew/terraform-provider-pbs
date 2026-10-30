@@ -17,6 +17,8 @@
 # Next to PBS, sharing its network, the script starts Pebble, Let's
 # Encrypt's test CA, for the ACME tests: it issues certificates without
 # validating anything, so neither DNS nor port 80 needs to be reachable.
+# It also starts an S3 server there, Silo, a MinIO fork, with a self-signed
+# certificate, for the S3 endpoint and S3 datastore tests.
 #
 # Building the packages image takes about half a minute, so it is cached per
 # release line and week: a new PBS release is picked up within a week, and
@@ -202,6 +204,9 @@ jobs:
           for secret in "${PBS_ACC_LDAP_BIND_PASSWORD:-}" "${PBS_ACC_LDAP_USER_PASSWORD:-}"; do
             if [ -n "$secret" ]; then echo "::add-mask::${secret}"; fi
           done
+          if [ -n "${PBS_ACC_S3_SECRET_KEY:-}" ]; then
+            echo "::add-mask::${PBS_ACC_S3_SECRET_KEY}"
+          fi
           for name in "${!PBS_@}"; do
             echo "${name}=${!name}" >> "$GITHUB_ENV"
           done
@@ -222,6 +227,7 @@ jobs:
           docker logs --tail 200 pbs-tfprovider-test || true
           docker logs --tail 100 pbs-tfprovider-test-pebble || true
           docker logs --tail 100 pbs-tfprovider-test-ldap || true
+          docker logs --tail 100 pbs-tfprovider-test-s3 || true
           if [ "$PBS_TEST_VARIANT" = packages ]; then
             docker exec pbs-tfprovider-test journalctl --no-pager -n 200 \
               -u proxmox-backup.service -u proxmox-backup-proxy.service || true

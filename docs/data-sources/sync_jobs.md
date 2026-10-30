@@ -41,8 +41,10 @@ output "store1_copies" {
 
 Read-Only:
 
-- `burst_in` (String) How many bytes over `rate_in` the job may receive at once, as PBS writes it, such as `10 MiB`; null for no limit.
-- `burst_out` (String) How many bytes over `rate_out` the job may send at once, as PBS writes it, such as `10 MiB`; null for no limit.
+- `active_encryption_key` (String) ID of the sync encryption key a push job encrypts the backups it copies with; null when it copies them as they are.
+- `associated_key` (Set of String) IDs of the sync encryption keys the job keeps for decrypting; null when there are none.
+- `burst_in` (String) How many bytes over `rate_in` the job may receive at once, as PBS writes it, such as `10 MiB`; null when not set.
+- `burst_out` (String) How many bytes over `rate_out` the job may send at once, as PBS writes it, such as `10 MiB`; null when not set.
 - `comment` (String) Comment; null when there is none.
 - `encrypted_only` (Boolean) Whether the job copies only encrypted backups.
 - `group_filter` (Set of String) Which backup groups the job syncs; null for all of them.
@@ -50,8 +52,8 @@ Read-Only:
 - `max_depth` (Number) How many levels of namespaces below the source namespace the job syncs too; null for all of them.
 - `ns` (String) Namespace in `store`; null for the datastore's root namespace.
 - `owner` (String) User or API token the job acts as; null for `root@pam`.
-- `rate_in` (String) Rate limit on what the job receives, in bytes per second, as PBS writes it, such as `10 MiB`; null for no limit.
-- `rate_out` (String) Rate limit on what the job sends, in bytes per second, as PBS writes it, such as `10 MiB`; null for no limit.
+- `rate_in` (String) Rate limit on what the job receives, in bytes per second, as PBS writes it, such as `10 MiB`; null when not set.
+- `rate_out` (String) Rate limit on what the job sends, in bytes per second, as PBS writes it, such as `10 MiB`; null when not set.
 - `remote` (String) Name of the remote; null for a local pull.
 - `remote_ns` (String) Namespace in `remote_store`; null for its root namespace.
 - `remote_store` (String) Datastore on the remote, or the local datastore a local pull copies from.

@@ -52,6 +52,11 @@ type datastoreDataModel struct {
 	BackingDevice    types.String `tfsdk:"backing_device"`
 	MountStatus      types.String `tfsdk:"mount_status"`
 	BackendType      types.String `tfsdk:"backend_type"`
+	// Backend, NotificationThresholds and CounterResetSchedule are for a
+	// datastore on S3.
+	Backend                types.Object `tfsdk:"backend"`
+	NotificationThresholds types.Object `tfsdk:"notification_thresholds"`
+	CounterResetSchedule   types.String `tfsdk:"counter_reset_schedule"`
 }
 
 // datastoreData records a datastore as PBS reports it, with its mount
@@ -73,7 +78,20 @@ func datastoreData(ds pbsclient.Datastore, mountStatus string, diags *diag.Diagn
 		BackingDevice:    stringOrNull(ds.BackingDevice),
 		MountStatus:      stringOrNull(mountStatus),
 		BackendType:      types.StringValue(ds.BackendType()),
+		Backend:          datastoreBackendData(ds, diags),
+		NotificationThresholds: datastoreThresholdsFormat.object("notification-thresholds",
+			ds.NotificationThresholds, diags),
+		CounterResetSchedule: stringOrNull(ds.CounterResetSchedule),
 	}
+}
+
+// datastoreBackendData is the backend of a datastore on S3, as PBS reports
+// it; null for one in a directory or on a removable disk.
+func datastoreBackendData(ds pbsclient.Datastore, diags *diag.Diagnostics) types.Object {
+	if ds.BackendType() == pbsclient.BackendFilesystem {
+		return types.ObjectNull(datastoreBackendFormat.attributeTypes())
+	}
+	return datastoreBackendFormat.object("backend", ds.Backend, diags)
 }
 
 // computedNested is a computed single nested attribute whose attributes are
@@ -86,6 +104,10 @@ func computedNested(description string, format propertyStringFormat, description
 			attributes[k.attribute] = schema.Int64Attribute{Computed: true, MarkdownDescription: descriptions[k.attribute]}
 		case types.BoolType:
 			attributes[k.attribute] = schema.BoolAttribute{Computed: true, MarkdownDescription: descriptions[k.attribute]}
+		case byteSizeType{}:
+			attributes[k.attribute] = schema.StringAttribute{
+				CustomType: byteSizeType{}, Computed: true, MarkdownDescription: descriptions[k.attribute],
+			}
 		default:
 			attributes[k.attribute] = schema.StringAttribute{Computed: true, MarkdownDescription: descriptions[k.attribute]}
 		}
@@ -161,6 +183,27 @@ func datastoreDataAttributes(nameRequired bool) map[string]schema.Attribute {
 		"backend_type": schema.StringAttribute{
 			Computed:            true,
 			MarkdownDescription: "Where the datastore keeps its chunks: `filesystem` or `s3`.",
+		},
+		"backend": computedNested("For a datastore on S3, where its backups are; null for one in a directory or "+
+			"on a removable disk.", datastoreBackendFormat, map[string]string{
+			"type":           "`s3`.",
+			"client":         "ID of the S3 endpoint.",
+			"bucket":         "Bucket that holds the backups, under the datastore's name.",
+			"max_cache_size": "Most space the local cache of chunks may take, as PBS stores it; null for the free space of `path`.",
+		}),
+		"notification_thresholds": computedNested("For a datastore on S3, how many requests and bytes to its "+
+			"bucket make PBS send a notification; null when none do.", datastoreThresholdsFormat, map[string]string{
+			"s3_get":      "Number of `GET` requests.",
+			"s3_put":      "Number of `PUT` requests.",
+			"s3_post":     "Number of `POST` requests.",
+			"s3_head":     "Number of `HEAD` requests.",
+			"s3_delete":   "Number of `DELETE` requests.",
+			"s3_upload":   "Bytes uploaded, as PBS stores them.",
+			"s3_download": "Bytes downloaded, as PBS stores them.",
+		}),
+		"counter_reset_schedule": schema.StringAttribute{
+			Computed:            true,
+			MarkdownDescription: "For a datastore on S3, when PBS resets its request and traffic counters, as a calendar event; null for never.",
 		},
 	}
 }

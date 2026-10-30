@@ -32,6 +32,13 @@ import (
 //     "job 'x' does not exist." on DELETE; IsNotFound covers both.
 //   - Deleting a datastore deletes the jobs whose store it is, of both
 //     directions, unless keep-job-configs is set.
+//   - active-encryption-key, from PBS 4.2, is for push jobs only. Whenever an
+//     update replaces or deletes it, PBS appends the key it had to
+//     associated-key, unless that holds it already — even when the same
+//     update sets associated-key, except when it deletes the active key. A
+//     key the owner or the caller may not use, Sys.Modify on
+//     /system/encryption-keys/{key}, or an archived active key, is 400 "no
+//     such key or cannot access key 'k'".
 
 // Sync directions. A job without one pulls.
 const (
@@ -78,7 +85,12 @@ type SyncJob struct {
 	BurstIn  string `json:"burst-in,omitempty"`
 	RateOut  string `json:"rate-out,omitempty"`
 	BurstOut string `json:"burst-out,omitempty"`
-	Comment  string `json:"comment,omitempty"`
+	// ActiveEncryptionKey is the sync encryption key a push job encrypts
+	// with, from PBS 4.2; AssociatedKey the keys it keeps for decrypting,
+	// those it encrypted with before among them.
+	ActiveEncryptionKey string   `json:"active-encryption-key,omitempty"`
+	AssociatedKey       []string `json:"associated-key,omitempty"`
+	Comment             string   `json:"comment,omitempty"`
 }
 
 // Direction is the job's sync direction, pull when PBS reports none.

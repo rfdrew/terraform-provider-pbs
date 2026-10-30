@@ -34,7 +34,20 @@ import (
 //   - rate and burst limits read back in PBS's spelling, such as "10 MiB",
 //     and group filters without an "include:" prefix;
 //   - with datastores, deleting a datastore without keep-job-configs deletes
-//     the sync jobs whose store it is.
+//     the sync jobs whose store it is;
+//   - associated-key is a list, sent as repeated parameters, and
+//     active-encryption-key is for push jobs only;
+//   - with sync encryption keys (newFakeEncryptionKeys), a job's keys follow
+//     PBS 4.2.8's rules (src/api2/config/sync.rs): a create checks a push
+//     job's active key, which must exist and not be archived, or each
+//     associated key of a pull job, archived or not, and nothing else; an
+//     update that replaces or deletes the active key appends the key it had
+//     to associated-key, unless that holds it — the list the update sends,
+//     or else the job's —, so that an active key sent again unchanged lands
+//     there too; an owner change checks the job's active key and every
+//     associated key as active ones, unless the update sends them; the keys
+//     an update sends are checked, the associated ones archived or not. A key
+//     that fails is 400 "no such key or cannot access key 'k'".
 //
 // Tests set up state with addRemote, addSyncJob, addRemoteDatastore and
 // addRemoteNamespace, and look at it with remote, remotePassword and
@@ -53,6 +66,10 @@ type fakeSync struct {
 	// unreachable are the remotes whose scans fail as PBS's fail when it
 	// cannot connect or sign in.
 	unreachable map[string]bool
+	// keys are the sync encryption keys the jobs' keys are checked against,
+	// which share mu; nil without newFakeEncryptionKeys, and then every key
+	// passes.
+	keys *fakeEncryptionKeys
 }
 
 // The properties of remotes and sync jobs that are not strings.
@@ -361,7 +378,7 @@ func fakeHumanByte(size string) string {
 
 // applySyncJobForm sets the properties a form carries, as PBS stores them.
 func applySyncJobForm(props fakeProperties, params url.Values) {
-	applyFakeForm(props, params, fakeSyncJobInts, fakeSyncJobBools, "group-filter")
+	applyFakeForm(props, params, fakeSyncJobInts, fakeSyncJobBools, "group-filter", "associated-key")
 	for _, key := range fakeByteSizes {
 		if v, ok := params[key]; ok {
 			props[key] = fakeHumanByte(v[0])
@@ -374,10 +391,66 @@ func applySyncJobForm(props fakeProperties, params url.Values) {
 		}
 		props["group-filter"] = stored
 	}
+	if keys, ok := params["associated-key"]; ok {
+		setFakeKeyList(props, slices.Clone(keys))
+	}
 	if comment, ok := props["comment"].(string); ok && comment == "" {
 		delete(props, "comment")
 	}
 }
+
+// fakeKeyList is a job's associated keys, in the order PBS keeps them.
+func fakeKeyList(job fakeProperties) []string {
+	keys, _ := job["associated-key"].([]string)
+	return slices.Clone(keys)
+}
+
+// setFakeKeyList stores a job's associated keys; none leaves the property
+// out, as PBS cannot store an empty list.
+func setFakeKeyList(job fakeProperties, keys []string) {
+	if len(keys) == 0 {
+		delete(job, "associated-key")
+		return
+	}
+	job["associated-key"] = keys
+}
+
+// keepPreviousFakeKey appends previous, an active key an update replaces or
+// deletes, to keys unless they hold it, as PBS's
+// keep_previous_key_as_associated does.
+func keepPreviousFakeKey(previous string, keys []string) []string {
+	if previous == "" || slices.Contains(keys, previous) {
+		return keys
+	}
+	return append(keys, previous)
+}
+
+// checkKeyLocked fails like PBS when a job may not use key: a key that does
+// not exist or, with failOnArchived, an archived one. The caller holds the
+// lock.
+func (s *fakeSync) checkKeyLocked(w http.ResponseWriter, key string, failOnArchived bool) bool {
+	if s.keys == nil || s.keys.usableLocked(key, failOnArchived) {
+		return true
+	}
+	writeError(w, "no such key or cannot access key '%s'", key)
+	return false
+}
+
+// keyUsersLocked returns, sorted, the jobs that hold key as their active key
+// or, with associated, as an associated one. The caller holds the lock.
+func (s *fakeSync) keyUsersLocked(key string, associated bool) []string {
+	var ids []string
+	for id, job := range s.syncJobs {
+		if job["active-encryption-key"] == key || (associated && slices.Contains(fakeKeyList(job), key)) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// fakeActiveKeyPushOnly is PBS's refusal of an active key on a pull job.
+const fakeActiveKeyPushOnly = "'active-encryption-key' only applies to push sync jobs"
 
 // checkSyncJobLocked fails like PBS on what a job cannot be, after a create
 // or an update; the caller holds the lock.
@@ -415,9 +488,26 @@ func (s *fakeSync) createSyncJob(w http.ResponseWriter, req *http.Request) {
 		writeError(w, "source and target datastore can't be the same")
 		return
 	}
-	if fakeSyncDirection(props) == pbsclient.SyncDirectionPush && params.Has("resync-corrupt") {
+	push := fakeSyncDirection(props) == pbsclient.SyncDirectionPush
+	if push && params.Has("resync-corrupt") {
 		writeError(w, "push jobs do not support resync-corrupt option")
 		return
+	}
+	if !push && params.Has("active-encryption-key") {
+		writeError(w, fakeActiveKeyPushOnly)
+		return
+	}
+	// A push job's active key is checked, but not its associated keys; a
+	// pull job's associated keys may be archived.
+	if active, ok := props["active-encryption-key"].(string); ok && push && !s.checkKeyLocked(w, active, true) {
+		return
+	}
+	if !push {
+		for _, key := range fakeKeyList(props) {
+			if !s.checkKeyLocked(w, key, false) {
+				return
+			}
+		}
 	}
 	if _, exists := s.syncJobs[id]; exists {
 		writeError(w, "parameter verification failed - 'id': job '%s' already exists.", id)
@@ -455,13 +545,63 @@ func (s *fakeSync) serveSyncJob(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		updated := cloneProperties(props)
+		previous := ""
 		for _, key := range params[pbsclient.DeleteParam] {
+			if key == "active-encryption-key" {
+				previous, _ = updated[key].(string)
+			}
 			delete(updated, key)
+		}
+		setFakeKeyList(updated, keepPreviousFakeKey(previous, fakeKeyList(updated)))
+		active, _ := updated["active-encryption-key"].(string)
+		associated := fakeKeyList(updated)
+		requested, listed := params["associated-key"]
+		requested = slices.Clone(requested)
+		if params.Has("owner") {
+			if active != "" && !params.Has("active-encryption-key") && !s.checkKeyLocked(w, active, true) {
+				return
+			}
+			if !listed {
+				for _, key := range associated {
+					if !s.checkKeyLocked(w, key, true) {
+						return
+					}
+				}
+			}
 		}
 		applySyncJobForm(updated, params)
 		if fakeBool(params.Get("unmount-on-done")) && updated["run-on-mount"] != true {
 			writeError(w, "'unmount-on-done' can only be set when 'run-on-mount' is enabled")
 			return
+		}
+		push := fakeSyncDirection(updated) == pbsclient.SyncDirectionPush
+		if params.Has("sync-direction") && !push && active != "" {
+			writeError(w, "cannot switch to pull direction while 'active-encryption-key' is set; delete it in the "+
+				"same request or clear it first")
+			return
+		}
+		if key, ok := params["active-encryption-key"]; ok {
+			if !push {
+				writeError(w, fakeActiveKeyPushOnly)
+				return
+			}
+			if !s.checkKeyLocked(w, key[0], true) {
+				return
+			}
+			if listed {
+				requested = keepPreviousFakeKey(active, requested)
+			} else {
+				setFakeKeyList(updated, keepPreviousFakeKey(active, associated))
+			}
+			updated["active-encryption-key"] = key[0]
+		}
+		if listed {
+			for _, key := range requested {
+				if !s.checkKeyLocked(w, key, false) {
+					return
+				}
+			}
+			setFakeKeyList(updated, requested)
 		}
 		if !checkSyncJobLocked(w, updated) {
 			return

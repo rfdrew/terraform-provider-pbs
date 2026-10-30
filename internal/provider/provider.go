@@ -518,6 +518,9 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewADRealmResource,
 		NewAPTRepositoryResource,
 		NewAPTStandardRepositoryResource,
+		NewS3EndpointResource,
+		NewTrafficControlRuleResource,
+		NewSyncEncryptionKeyResource,
 	}
 }
 
@@ -551,6 +554,12 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewPruneJobsDataSource,
 		NewRealmsDataSource,
 		NewAPTRepositoriesDataSource,
+		NewS3EndpointDataSource,
+		NewS3EndpointsDataSource,
+		NewS3BucketsDataSource,
+		NewTrafficControlRuleDataSource,
+		NewTrafficControlRulesDataSource,
+		NewSyncEncryptionKeysDataSource,
 	}
 }
 

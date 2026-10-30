@@ -94,14 +94,18 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"namespaces below do — fails after removing the empty namespaces below it, and keeps the backups. " +
 			"With `delete_groups`, the backups are deleted, except protected snapshots.\n\n" +
 			"Namespaces live in the datastore's directory, so they follow its chunk store when the datastore is " +
-			"replaced:\n\n" +
-			"* Renamed with `reuse_datastore`, the datastore keeps its namespaces and their backups, but a " +
+			"replaced — on S3 they live in the bucket, under the datastore's name, and follow that:\n\n" +
+			"* Renamed with `reuse_datastore`, the datastore keeps its namespaces and their backups — except on S3, " +
+			"where a datastore finds its backups under its name in the bucket, so a new name starts without them — " +
+			"but a " +
 			"`pbs_namespace` that refers to its name is replaced too, and destroying it in the old datastore " +
 			"fails while it holds backups. Take such namespaces out of state first — with `terraform state rm`, " +
 			"or a `removed` block with `destroy = false` — and the namespaces of the renamed datastore take them " +
 			"over.\n" +
 			"* Moved to another `path` or `backing_device`, the datastore starts without namespaces, and " +
-			"Terraform creates the ones it manages on the next apply.\n\n" +
+			"Terraform creates the ones it manages on the next apply — except on S3, where the datastore, created " +
+			"again with the same name and bucket and `reuse_datastore`, reads them from the bucket: all of them " +
+			"from PBS 4.1.5, before only those with backups in or below them.\n\n" +
 			"Managing a namespace needs `Datastore.Modify` on its parent — `/datastore/<store>` for a namespace " +
 			"at the root, `/datastore/<store>/<parent>` below — and reading it `Datastore.Audit`, " +
 			"`Datastore.Modify` or `Datastore.Backup` on the namespace itself. PBS does not list the namespaces " +
@@ -202,12 +206,20 @@ func (r *namespaceResource) Create(ctx context.Context, req resource.CreateReque
 	// PBS creates a namespace that exists without complaint. Whether it did
 	// is only for the warning below. The lookup lists the parent, which
 	// creating the namespace needs Datastore.Modify on anyway.
-	existed, err := client.NamespaceExists(ctx, store, ns)
+	//
+	// Opening a datastore takes PBS's lock on datastore.cfg, which a datastore
+	// on S3 holds while PBS reads its backups from the bucket — for minutes,
+	// when a pbs_datastore takes one over — and PBS gives up after 10
+	// seconds: the provider's own lock waits for that instead.
+	var existed bool
+	err := client.WithConfigLock(pbsclient.ConfigDatastores, func() error {
+		var err error
+		if existed, err = client.NamespaceExists(ctx, store, ns); err != nil {
+			return err
+		}
+		return client.CreateNamespace(ctx, store, ns)
+	})
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to create PBS namespace", namespaceErrorDetail(client, store, ns, namespacePrivilege(store, ns), err))
-		return
-	}
-	if err := client.CreateNamespace(ctx, store, ns); err != nil {
 		resp.Diagnostics.AddError("Unable to create PBS namespace", namespaceErrorDetail(client, store, ns, namespacePrivilege(store, ns), err))
 		return
 	}
@@ -327,7 +339,13 @@ func (r *namespaceResource) Delete(ctx context.Context, req resource.DeleteReque
 		KeepOnProtected: !state.ErrorOnProtected.IsNull() && !state.ErrorOnProtected.ValueBool(),
 	}
 
-	stats, err := client.DeleteNamespace(ctx, store, ns, deletion)
+	// See Create for the lock.
+	var stats pbsclient.NamespaceDeleteStats
+	err := client.WithConfigLock(pbsclient.ConfigDatastores, func() error {
+		var err error
+		stats, err = client.DeleteNamespace(ctx, store, ns, deletion)
+		return err
+	})
 	message := ""
 	if err != nil {
 		message = err.Error()
@@ -343,7 +361,7 @@ func (r *namespaceResource) Delete(ctx context.Context, req resource.DeleteReque
 				"backups with a namespace only when asked to. It removed the empty namespaces below and kept the "+
 				"rest. To delete the backups too, set delete_groups = true and apply that before destroying the "+
 				"namespace. To keep them — when the namespace is replaced because its datastore is renamed with "+
-				"reuse_datastore, which keeps them anyway —, take the namespace out of state instead, with "+
+				"reuse_datastore, which keeps them anyway, except on S3 —, take the namespace out of state instead, with "+
 				"`terraform state rm` or a removed block with destroy = false. %s", ns, store, err))
 		return
 	case pbsclient.IsDatastoreUnavailable(err):

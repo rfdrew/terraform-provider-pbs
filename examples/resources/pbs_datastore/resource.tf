@@ -36,3 +36,29 @@ resource "pbs_datastore" "offsite" {
   # Free the space of pruned backups before the disk leaves (PBS 4.2+).
   gc_on_unmount = true
 }
+
+# A datastore on S3 object storage: its backups go to the bucket pbs-backups,
+# under the prefix s3store1/, the datastore's name, through the endpoint of
+# the pbs_s3_endpoint example, assumed in the same configuration. path is a
+# local cache, on a disk of its own. PBS checks that it reaches the bucket
+# when it creates the datastore. The guide Back up to S3 object storage has
+# the rest.
+resource "pbs_datastore" "s3store1" {
+  name        = "s3store1"
+  path        = "/mnt/datastore/s3store1"
+  gc_schedule = "daily"
+
+  # PBS cannot change the backend: a change replaces the datastore.
+  backend = {
+    type           = "s3"
+    client         = pbs_s3_endpoint.aws.id
+    bucket         = "pbs-backups"
+    max_cache_size = "100GiB"
+  }
+
+  # Backups the bucket already holds under this name, such as after a
+  # destroy without destroy_data, are found only with reuse_datastore = true.
+  # Created without it, the datastore starts empty, and its next garbage
+  # collection deletes their chunks.
+  reuse_datastore = true
+}

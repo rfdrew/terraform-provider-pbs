@@ -72,6 +72,11 @@ type Datastore struct {
 	// one; both are given at creation only.
 	Backend       string `json:"backend,omitempty"`
 	BackingDevice string `json:"backing-device,omitempty"`
+	// NotificationThresholds and CounterResetSchedule, from PBS 4.1.7, are
+	// for a datastore on S3, which counts the requests to its bucket; PBS
+	// stores them as sent.
+	NotificationThresholds string `json:"notification-thresholds,omitempty"`
+	CounterResetSchedule   string `json:"counter-reset-schedule,omitempty"`
 }
 
 // Datastore backends, as BackendType reports them.
@@ -124,8 +129,11 @@ func (c *Client) GetDatastore(ctx context.Context, name string) (Datastore, erro
 
 // CreateDatastore creates a datastore from params, which must hold "name"
 // and "path", and waits for the create-datastore task, whose exit status
-// carries the errors the answer does not; a failed task is a *TaskError, and
-// leaves no datastore behind. Read the new datastore with WaitForDatastore.
+// carries the errors the answer does not; a failed task is a *TaskError. It
+// mostly leaves no datastore behind, but the task of a datastore taken over
+// on S3 saves it, in maintenance mode s3-refresh, before it reads the
+// backups from the bucket, and a failure there leaves it so. Read the new
+// datastore with WaitForDatastore.
 //
 // The task holds PBS's lock on datastore.cfg while it creates the chunk
 // store, and other writes to the file wait for it for 10 seconds at most, so
