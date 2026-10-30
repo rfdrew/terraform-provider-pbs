@@ -4,7 +4,13 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-30
+
+Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
+requirements are those of 0.2.0, and configurations written for 0.2.0 work
+unchanged but for one change on PBS 4.2: `pbs_sync_job` now removes an
+active encryption key set outside Terraform unless the configuration sets
+`active_encryption_key` (see Changed).
 
 ### Added
 
@@ -368,6 +374,6 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
-[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0
