@@ -2,7 +2,7 @@
 page_title: "Back up to S3 object storage"
 subcategory: ""
 description: |-
-  A datastore that keeps its backups in a bucket of an S3-compatible object store, such as Amazon S3, Cloudflare R2, MinIO or Ceph RGW: the S3 endpoint, a check that PBS reaches the bucket, the datastore with its jobs, notifications about requests and traffic, and what keeps the backups in the bucket.
+  A datastore that keeps its backups in a bucket of an S3-compatible object store, such as Amazon S3, Cloudflare R2, MinIO or Ceph RGW: the S3 endpoint, a check that PBS reaches the object store and the key sees the bucket, the datastore with its jobs, notifications about requests and traffic, and what keeps the backups in the bucket.
 ---
 
 # Back up to S3 object storage
@@ -20,7 +20,8 @@ This guide configures, in one Terraform configuration:
 
 * an **S3 endpoint**, the connection to the object store: its address, its
   region and an access key, whose secret key is write-only;
-* a **check** that PBS reaches the bucket through it;
+* a **check** that PBS reaches the object store through it, and that the
+  access key sees the bucket;
 * a **datastore** on the bucket, with garbage collection, a prune job and a
   verify job;
 * **notifications** when the requests or the traffic to the bucket pass a
@@ -111,7 +112,7 @@ key is write-only: Terraform passes it to PBS without storing it in the plan
 or state. To change it, set the new key and increment
 `secret_key_wo_version`. PBS contacts nothing when it saves an endpoint, so a
 wrong address, key or region shows only when a datastore uses the endpoint —
-or in the check below.
+or in the check below, which a wrong region may pass.
 
 `rate_out` limits what all the datastores on the endpoint upload together to
 50 MB per second, so that backups to S3 leave bandwidth for the rest;
@@ -194,8 +195,11 @@ check "s3_bucket_is_reachable" {
 ```
 
 PBS connects to the object store to list its buckets, so the list checks the
-endpoint before a datastore uses it: a wrong address, port, key, region or
-fingerprint fails the read. PBS reports the failure without its cause; its
+endpoint before a datastore uses it: a wrong address, port, key or
+fingerprint fails the read. A wrong region may not: with `{{"{{region}}"}}` in
+`endpoint`, as here, PBS asks the region set, and AWS lists the buckets of
+every region from any of them; creating the datastore then fails with "failed
+to access bucket". When the read fails, PBS reports no cause; its
 journal shows the cause of a refused certificate or of an answer from the
 object store, such as a wrong key or region, but not of a wrong address or
 port. Inside a `check` block, a failing read or condition is a

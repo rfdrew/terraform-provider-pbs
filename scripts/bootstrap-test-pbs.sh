@@ -304,8 +304,8 @@ TEST_PASS="tfacc-$(rand_hex)"
 S3_ACCESS_KEY="tfacc-$(rand_hex | cut -c1-12)"
 S3_SECRET_KEY="$(rand_hex)"
 case "$S3_PORT" in
-  82 | 8007 | 5001 | 5002 | 14000 | 15000)
-    log "PBS_TEST_S3_PORT=$S3_PORT is taken in PBS's network namespace (PBS: 82, 8007; Pebble: 5001, 5002, 14000, 15000)"
+  82 | 8007 | 5001 | 5002 | 14000 | 15000 | 389 | 636)
+    log "PBS_TEST_S3_PORT=$S3_PORT is taken in PBS's network namespace (PBS: 82, 8007; Pebble: 5001, 5002, 14000, 15000; LDAP: 389, 636)"
     exit 1
     ;;
 esac
@@ -720,19 +720,24 @@ start_s3() {
   timing "s3" "$t"
 }
 
-# s3_supported tells whether this PBS has S3 endpoints, which PBS 4.0.4
-# added: GET /config/s3 answers 200, or on an older PBS 404 "Path '...' not
-# found.". Any other answer is a fault of the stand, not a missing feature,
-# and ends the script rather than leave the S3 tests to skip unnoticed.
+# s3_supported tells whether this PBS lists the buckets of an S3 endpoint,
+# which probe_s3 and the tests need: PBS 4.0.8 added that, and the check
+# without a store prefix probe_s3 runs, to the S3 endpoints of 4.0.4. For an
+# endpoint PBS does not have, GET /config/s3/<id>/list-buckets answers 400
+# "config lookup failed", and an older PBS 404 "Path '...' not found.". Any
+# other answer is a fault of the stand, not a missing feature, and ends the
+# script rather than leave the S3 tests to skip unnoticed.
 s3_supported() {
-  local out code
+  local out code route="/config/s3/tfacc-s3-absent/list-buckets"
   out="$(mktemp)"
   code="$(curl -s -o "$out" -w '%{http_code}' \
-    -b "PBSAuthCookie=${TICKET}" "$(api_url /config/s3)")" || true
+    -b "PBSAuthCookie=${TICKET}" "$(api_url "$route")")" || true
   case "${code:-000}" in
-    200)
-      rm -f "$out"
-      return 0
+    400)
+      if grep -q 'config lookup failed' "$out"; then
+        rm -f "$out"
+        return 0
+      fi
       ;;
     404)
       if grep -q "Path '[^']*' not found" "$out"; then
@@ -741,7 +746,7 @@ s3_supported() {
       fi
       ;;
   esac
-  log "GET /config/s3 answered HTTP ${code:-000}: $(cat "$out")"
+  log "GET $route answered HTTP ${code:-000}: $(cat "$out")"
   rm -f "$out"
   dump_logs
   exit 1
@@ -1192,7 +1197,7 @@ if [[ "$S3" != "0" ]]; then
   if s3_supported; then
     start_s3
   else
-    log "this PBS has no S3 endpoints (PBS 4.0.4 added them); starting no S3 server"
+    log "this PBS cannot list the buckets of an S3 endpoint (PBS 4.0.8 added that); starting no S3 server"
     S3=0
   fi
 fi

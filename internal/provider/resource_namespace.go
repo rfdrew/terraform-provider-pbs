@@ -94,7 +94,7 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"namespaces below do — fails after removing the empty namespaces below it, and keeps the backups. " +
 			"With `delete_groups`, the backups are deleted, except protected snapshots.\n\n" +
 			"Namespaces live in the datastore's directory, so they follow its chunk store when the datastore is " +
-			"replaced:\n\n" +
+			"replaced — on S3 they live in the bucket, under the datastore's name, and follow that:\n\n" +
 			"* Renamed with `reuse_datastore`, the datastore keeps its namespaces and their backups — except on S3, " +
 			"where a datastore finds its backups under its name in the bucket, so a new name starts without them — " +
 			"but a " +
@@ -103,7 +103,9 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"or a `removed` block with `destroy = false` — and the namespaces of the renamed datastore take them " +
 			"over.\n" +
 			"* Moved to another `path` or `backing_device`, the datastore starts without namespaces, and " +
-			"Terraform creates the ones it manages on the next apply.\n\n" +
+			"Terraform creates the ones it manages on the next apply — except on S3, where the datastore, created " +
+			"again with the same name and bucket and `reuse_datastore`, reads them from the bucket: all of them " +
+			"from PBS 4.1.5, before only those with backups in or below them.\n\n" +
 			"Managing a namespace needs `Datastore.Modify` on its parent — `/datastore/<store>` for a namespace " +
 			"at the root, `/datastore/<store>/<parent>` below — and reading it `Datastore.Audit`, " +
 			"`Datastore.Modify` or `Datastore.Backup` on the namespace itself. PBS does not list the namespaces " +

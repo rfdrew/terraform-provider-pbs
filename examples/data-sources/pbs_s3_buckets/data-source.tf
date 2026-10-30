@@ -1,6 +1,9 @@
 # PBS connects to the object store to list its buckets, so reading this
-# checks the endpoint: it fails when the address, the keys, the region or the
-# fingerprint are wrong. The access key must be allowed to list the buckets
+# checks the endpoint: it fails when the address, the keys or the fingerprint
+# are wrong, and when the region is wrong only where the object store checks
+# it — not with {{region}} in the endpoint, as at AWS, where PBS asks the
+# region set, which lists the buckets of every region. Listing needs PBS
+# 4.0.8 or newer. The access key must be allowed to list the buckets
 # of its account, which a key limited to one bucket may not be; the
 # datastores do not need that. In a check block, a failure is a warning, not
 # an error. Referring to the id of pbs_s3_endpoint.aws, of the

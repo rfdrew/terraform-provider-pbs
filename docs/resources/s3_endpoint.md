@@ -4,7 +4,7 @@ page_title: "pbs_s3_endpoint Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Manages a Proxmox Backup Server S3 endpoint: the connection to an S3-compatible object store — Amazon S3, Ceph RGW, MinIO, Backblaze B2, Cloudflare R2 and the like — that datastores on S3 keep their backups in. A pbs_datastore names it in backend.client.
-  PBS contacts nothing when it saves an endpoint: wrong keys, a wrong fingerprint or region show when a datastore uses the endpoint, or when the pbs_s3_buckets data source lists its buckets.
+  PBS contacts nothing when it saves an endpoint: wrong keys or a wrong fingerprint show when a datastore uses the endpoint, or when the pbs_s3_buckets data source lists its buckets; a wrong region shows when a datastore uses it, and in the list only where the object store checks the region requests are signed for.
   S3 endpoints exist from PBS 4.0. Datastores on S3 were a technology preview until PBS 4.1.9.
   ~> PBS refuses to delete an endpoint a datastore uses. Destroy the datastore first. A datastore's backend cannot change, so a change of id, which replaces the endpoint, replaces its datastores too.
   Managing endpoints needs Sys.Modify on /system/s3-endpoint, or on /system/s3-endpoint/<id> for an existing one; reading them Sys.Audit.
@@ -14,7 +14,7 @@ description: |-
 
 Manages a Proxmox Backup Server S3 endpoint: the connection to an S3-compatible object store — Amazon S3, Ceph RGW, MinIO, Backblaze B2, Cloudflare R2 and the like — that datastores on S3 keep their backups in. A `pbs_datastore` names it in `backend.client`.
 
-PBS contacts nothing when it saves an endpoint: wrong keys, a wrong fingerprint or region show when a datastore uses the endpoint, or when the `pbs_s3_buckets` data source lists its buckets.
+PBS contacts nothing when it saves an endpoint: wrong keys or a wrong fingerprint show when a datastore uses the endpoint, or when the `pbs_s3_buckets` data source lists its buckets; a wrong region shows when a datastore uses it, and in the list only where the object store checks the region requests are signed for.
 
 S3 endpoints exist from PBS 4.0. Datastores on S3 were a technology preview until PBS 4.1.9.
 

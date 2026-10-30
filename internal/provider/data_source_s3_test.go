@@ -137,6 +137,12 @@ func TestS3BucketsDataSource(t *testing.T) {
 		requireProtocolErrorContaining(t, resp.Diagnostics, `S3 endpoint "`+id+`"`)
 	}
 
+	// PBS 4.0.4 to 4.0.7 have S3 endpoints but cannot list buckets.
+	fake.reply("GET /config/s3/empty/list-buckets", http.StatusNotFound, "Path '/api2/json/config/s3/empty/list-buckets' not found.")
+	resp = h.readDataSourceResponse(t, "pbs_s3_buckets", h.dataSourceValue(t, "pbs_s3_buckets", map[string]any{"s3_endpoint": "empty"}))
+	requireProtocolErrorContaining(t, resp.Diagnostics, "PBS cannot list the buckets of an S3 endpoint")
+	requireProtocolErrorContaining(t, resp.Diagnostics, "PBS 4.0.8 added listing the buckets")
+
 	// Listing buckets needs more than reading the endpoint.
 	fake.reply("GET /config/s3/wasabi/list-buckets", http.StatusForbidden, "permission check failed")
 	resp = h.readDataSourceResponse(t, "pbs_s3_buckets", h.dataSourceValue(t, "pbs_s3_buckets", map[string]any{"s3_endpoint": "wasabi"}))

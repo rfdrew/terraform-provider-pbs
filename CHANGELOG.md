@@ -63,8 +63,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing when it saves an endpoint, and refuses to delete one a datastore
   uses. Imported by ID.
 - Data sources `pbs_s3_endpoint` and `pbs_s3_endpoints`, without the secret
-  key, and `pbs_s3_buckets`, which has PBS connect to the object store and
-  list the buckets the endpoint's key may see, and so checks an endpoint.
+  key, and `pbs_s3_buckets` (PBS 4.0.8), which has PBS connect to the
+  object store and list the buckets the endpoint's key may see, and so
+  checks an endpoint.
 - Datastores on S3 object storage in `pbs_datastore`: `backend`, with the
   endpoint, the bucket and the most space the local cache may take, which
   PBS cannot change, so a change replaces the datastore; `overwrite_in_use`,
@@ -76,7 +77,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the bucket, or start without them, and refuses one that would have the
   next garbage collection delete them — a datastore on S3 replaced under the
   same name in the same bucket without `reuse_datastore` — and moving a
-  datastore to S3 or off it in the same directory. A change of spelling of
+  datastore to S3 or off it in the same directory, also when a value that
+  decides it is known only during apply. A change of spelling of
   `max_cache_size` alone is no change. A datastore that PBS's task created
   but could not read all of its backups from the bucket for is recorded in
   state with a warning, in maintenance mode `s3-refresh`, and an update

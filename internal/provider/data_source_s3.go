@@ -253,7 +253,10 @@ func (d *s3BucketsDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists the buckets of an object store that the access key of a Proxmox Backup Server " +
 			"S3 endpoint may see. PBS connects to the object store for it, so the list also checks that the " +
-			"endpoint works: its address, keys, region and fingerprint. A wrong host name or a refused port fails within " +
+			"endpoint works: its address, keys and fingerprint, and its region where the object store checks the " +
+			"region requests are signed for — not with `{{region}}` in `endpoint`, as at AWS, where PBS asks the " +
+			"region set, which lists the buckets of every region; creating a datastore checks its bucket's region. " +
+			"PBS 4.0.8 added the list. A wrong host name or a refused port fails within " +
 			"seconds, but an address that drops connection attempts makes PBS try for over half a minute, and one " +
 			"that accepts connections and never answers longer still, which may outlast the provider's " +
 			"`request_timeout`. Needs `" +
@@ -293,6 +296,10 @@ func (d *s3BucketsDataSource) Read(ctx context.Context, req datasource.ReadReque
 		case errors.As(err, &apiErr) && apiErr.Message == "config lookup failed":
 			resp.Diagnostics.AddAttributeError(path.Root("s3_endpoint"), "PBS S3 endpoint not found",
 				fmt.Sprintf("PBS has no S3 endpoint %q. %s", id, err))
+		case pbsclient.IsEndpointMissing(err):
+			resp.Diagnostics.AddError("PBS cannot list the buckets of an S3 endpoint",
+				fmt.Sprintf("PBS 4.0.8 added listing the buckets of an S3 endpoint, and the server at %s runs PBS %s. "+
+					"Upgrade the server, or leave pbs_s3_buckets out. %s", d.data.client.BaseURL(), d.data.version, err))
 		case errors.As(err, &apiErr) && (apiErr.Message == "failed to list buckets" || apiErr.Message == "client creation failed"):
 			resp.Diagnostics.AddError("Unable to list the buckets of a PBS S3 endpoint",
 				fmt.Sprintf("PBS could not list the buckets through S3 endpoint %q. PBS reports no cause; its journal "+

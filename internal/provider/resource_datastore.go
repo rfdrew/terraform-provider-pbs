@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	stdpath "path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -231,10 +233,12 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"to, or after a sync job set to unmount when done. `mount_status` shows which. The provider changes " +
 			"the datastore's settings whether it is mounted or not, but `destroy_data` needs it mounted, and so " +
 			"does creating or destroying its namespaces.\n\n" +
-			"Namespaces live in the datastore's directory: a datastore renamed with `reuse_datastore` keeps them — " +
-			"except on S3, where a new name starts without the backups and their namespaces —, " +
-			"and one moved to another `path` or `backing_device` starts without them. `pbs_namespace` says what " +
-			"that means for the namespaces Terraform manages.\n\n" +
+			"Namespaces live in the datastore's directory: a datastore renamed with `reuse_datastore` keeps them, " +
+			"and one moved to another `path` or `backing_device` starts without them. On S3 they live in the " +
+			"bucket, under the datastore's name: a datastore created again with the same name and bucket and " +
+			"`reuse_datastore` has them, whatever its `path` — all of them from PBS 4.1.5, before only those with " +
+			"backups in or below them —, and a new name or bucket starts without them. " +
+			"`pbs_namespace` says what that means for the namespaces Terraform manages.\n\n" +
 			"A datastore **on S3** keeps its backups in a bucket of an S3-compatible object store, through a " +
 			"`pbs_s3_endpoint` named in `backend`, under a prefix that is the datastore's name; `path` is then a " +
 			"local cache. Several datastores can share a bucket. PBS checks, when it creates the datastore, that it " +
@@ -711,21 +715,50 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 		plan.BackingDevice.Equal(state.BackingDevice) && sameBackend(plan.Backend, state.Backend)) {
 		return
 	}
-	samePlace := plan.Path.Equal(state.Path) && plan.BackingDevice.Equal(state.BackingDevice)
+	samePlace := sameDirectory(plan.Path, state.Path) && plan.BackingDevice.Equal(state.BackingDevice)
 	keepsData := !state.DestroyData.ValueBool()
 	reuses := plan.ReuseDatastore.IsUnknown() || plan.ReuseDatastore.ValueBool()
+	// The guards that keep the backups take a value known only during apply
+	// for the worst it may turn out to be: the same directory, the same name,
+	// the same bucket, another backend, no reuse_datastore. During apply,
+	// Terraform plans the new datastore without the old one's state, so
+	// nothing checks them again.
+	maybeSamePlace := (plan.Path.IsUnknown() || sameDirectory(plan.Path, state.Path)) &&
+		(plan.BackingDevice.IsUnknown() || plan.BackingDevice.Equal(state.BackingDevice))
+	where := "in the same directory, " + state.Path.ValueString()
+	if !samePlace {
+		where = "in a place known only during apply, which may be the same directory, " + state.Path.ValueString()
+	}
+	newName := strconv.Quote(plan.Name.ValueString())
+	if plan.Name.IsUnknown() {
+		newName = "a datastore whose name is known only during apply"
+	}
 
-	// A datastore in a directory and one on S3 cannot take over each other's
+	// A datastore in a directory and one on S3 must not take over each other's
 	// chunk store: PBS empties the chunk store of a datastore on S3 that it
-	// creates with reuse_datastore, and without it refuses the directory.
-	if !plan.Backend.IsUnknown() && isS3(plan.Backend) != isS3(state.Backend) && samePlace && keepsData {
+	// creates with reuse_datastore, and a datastore in a directory would take
+	// over a cache whose evicted chunks are empty files.
+	if keepsData && maybeSamePlace && plan.Backend.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("backend"), "The datastore's new backend is not known yet",
+			fmt.Sprintf("This plan destroys datastore %q and creates %s %s, with a backend known only during "+
+				"apply. Destroying it with destroy_data = false, as in state, leaves its chunk store there, which a "+
+				"datastore with the other backend cannot take over: PBS empties the chunk store of a datastore on S3 "+
+				"it creates with reuse_datastore, deleting the backups in it, and a datastore in a directory would "+
+				"take over the cache of one on S3, in which the chunks the cache evicted are empty files. Make backend "+
+				"known when planning, for example by applying what it "+
+				"depends on first with -target, use another path, or set destroy_data = true and apply that first.",
+				state.Name.ValueString(), newName, where))
+		return
+	}
+	if keepsData && maybeSamePlace && isS3(plan.Backend) != isS3(state.Backend) {
 		resp.Diagnostics.AddAttributeError(path.Root("backend"), "Moving the datastore to or from S3 needs another path",
-			fmt.Sprintf("This plan destroys datastore %q and creates %q with another backend in the same directory, "+
-				"%s. Destroying it with destroy_data = false, as in state, leaves its chunk store there, which the "+
-				"new datastore cannot take over: PBS empties the chunk store of a datastore on S3 it creates with "+
-				"reuse_datastore, deleting the backups in it, and a datastore in a directory cannot use the cache of "+
-				"one on S3. Use another path, or set destroy_data = true and apply that first.",
-				state.Name.ValueString(), plan.Name.ValueString(), state.Path.ValueString()))
+			fmt.Sprintf("This plan destroys datastore %q and creates %s with another backend %s. Destroying it "+
+				"with destroy_data = false, as in state, leaves its chunk store there, which the new datastore "+
+				"cannot take over: PBS empties the chunk store of a datastore on S3 it creates with "+
+				"reuse_datastore, deleting the backups in it, and a datastore in a directory would take over the "+
+				"cache of one on S3, in which the chunks the cache evicted are empty files. Use another path, or set "+
+				"destroy_data = true and apply that first.",
+				state.Name.ValueString(), newName, where))
 		return
 	}
 	if isS3(state.Backend) {
@@ -737,26 +770,34 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	// behind without destroy_data, and PBS refuses to create it there unless
 	// it reuses that — after the old datastore, its jobs and its ACL entries
 	// are already gone.
-	if !plan.Name.IsUnknown() && samePlace && keepsData && !reuses {
+	if samePlace && keepsData && !reuses {
 		keeps := "Set reuse_datastore = true to create the new datastore on it, keeping the backups."
 		switch {
 		case isS3(state.Backend) && plan.Name.Equal(state.Name) && sameBucket(plan.Backend, state.Backend):
 			keeps = "Set reuse_datastore = true to create the new datastore in that directory, which then reads " +
 				"its backups from the bucket again."
+		case isS3(state.Backend) && plan.Name.Equal(state.Name) && backendKey(plan.Backend, "bucket").IsUnknown():
+			keeps = "Set reuse_datastore = true to create the new datastore in that directory, which then reads " +
+				"its backups from the bucket again if the bucket, known only during apply, is the same, and finds " +
+				"none in another."
+		case isS3(state.Backend) && plan.Name.IsUnknown():
+			keeps = fmt.Sprintf("Set reuse_datastore = true to create the new datastore in that directory: it "+
+				"reads the backups its bucket holds under its name, those of %q only if the name and bucket stay the "+
+				"same. Or use another path.", state.Name.ValueString())
 		case isS3(state.Backend):
 			keeps = fmt.Sprintf("Set reuse_datastore = true to create the new datastore in that directory: it "+
 				"reads the backups its bucket holds under %s/, not those of %q, which stay in the old bucket under "+
 				"%s/. Or use another path.", plan.Name.ValueString(), state.Name.ValueString(), state.Name.ValueString())
 		}
 		summary := "Replacing the datastore in place needs reuse_datastore"
-		if !plan.Name.Equal(state.Name) {
+		if !plan.Name.IsUnknown() && !plan.Name.Equal(state.Name) {
 			summary = "Renaming the datastore needs reuse_datastore"
 		}
 		resp.Diagnostics.AddAttributeError(path.Root("reuse_datastore"), summary,
 			fmt.Sprintf("PBS cannot rename a datastore or change its backend, so this plan destroys datastore %q and "+
-				"creates %q in the same directory, %s. Destroying it with destroy_data = false, as in state, leaves "+
+				"creates %s in the same directory, %s. Destroying it with destroy_data = false, as in state, leaves "+
 				"its chunk store there, and PBS creates no datastore on a chunk store unless asked to reuse it. %s",
-				state.Name.ValueString(), plan.Name.ValueString(), state.Path.ValueString(), keeps))
+				state.Name.ValueString(), newName, state.Path.ValueString(), keeps))
 		return
 	}
 	// On S3, a new datastore of the same name in the same bucket finds the
@@ -764,16 +805,58 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	// directory, endpoint and cache size: another endpoint may reach the same
 	// object store. PBS creates it without reusing them all the same, empty,
 	// and its first garbage collection deletes their chunks.
-	if isS3(state.Backend) && isS3(plan.Backend) && plan.Name.Equal(state.Name) && sameBucket(plan.Backend, state.Backend) &&
-		keepsData && !reuses {
+	maybeSameName := plan.Name.IsUnknown() || plan.Name.Equal(state.Name)
+	bucketUnknown := isS3(plan.Backend) && backendKey(plan.Backend, "bucket").IsUnknown()
+	maybeSameBucket := plan.Backend.IsUnknown() || bucketUnknown || sameBucket(plan.Backend, state.Backend)
+	if isS3(state.Backend) && keepsData && maybeSameName && maybeSameBucket && !plan.ReuseDatastore.ValueBool() {
 		name := state.Name.ValueString()
-		resp.Diagnostics.AddAttributeError(path.Root("reuse_datastore"), "Replacing the datastore on S3 needs reuse_datastore",
-			fmt.Sprintf("This plan destroys datastore %q on S3 and creates it again with the same name and bucket, in "+
-				"%s. Destroying it with destroy_data = false, as in state, leaves its backups in the bucket under %s/; "+
-				"created without reuse_datastore, the new datastore starts without them, and its first garbage "+
-				"collection deletes their chunks — also through another endpoint, which may reach the same object "+
-				"store. Set reuse_datastore = true to keep the backups, or set destroy_data = true and apply that "+
-				"first to start without them.", name, plan.Path.ValueString(), name))
+		var unknown []string
+		for _, u := range []struct {
+			name    string
+			unknown bool
+		}{
+			{"name", plan.Name.IsUnknown()},
+			{"backend", plan.Backend.IsUnknown()},
+			{"backend.bucket", bucketUnknown},
+			{"reuse_datastore", plan.ReuseDatastore.IsUnknown()},
+		} {
+			if u.unknown {
+				unknown = append(unknown, u.name)
+			}
+		}
+		if len(unknown) == 0 {
+			in := plan.Path.ValueString()
+			if plan.Path.IsUnknown() {
+				in = "a directory known only during apply"
+			}
+			resp.Diagnostics.AddAttributeError(path.Root("reuse_datastore"), "Replacing the datastore on S3 needs reuse_datastore",
+				fmt.Sprintf("This plan destroys datastore %q on S3 and creates it again with the same name and bucket, in "+
+					"%s. Destroying it with destroy_data = false, as in state, leaves its backups in the bucket under %s/; "+
+					"created without reuse_datastore, the new datastore starts without them, and its first garbage "+
+					"collection deletes their chunks — also through another endpoint, which may reach the same object "+
+					"store. Set reuse_datastore = true to keep the backups, or set destroy_data = true and apply that "+
+					"first to start without them.", name, in, name))
+			return
+		}
+		// On S3, reuse_datastore keeps the backups in the same bucket and
+		// finds none in another; but a backend that may turn out to be a
+		// directory cannot be reused unless it holds a chunk store.
+		reuse := ""
+		if isS3(plan.Backend) && !plan.ReuseDatastore.IsUnknown() {
+			same := "the bucket is"
+			if plan.Name.IsUnknown() {
+				same = "the name and bucket are"
+			}
+			reuse = fmt.Sprintf("set reuse_datastore = true, which keeps the backups if %s the same and finds none "+
+				"otherwise, ", same)
+		}
+		resp.Diagnostics.AddAttributeError(path.Root("reuse_datastore"), "Replacing the datastore on S3 needs known values",
+			fmt.Sprintf("This plan destroys datastore %q on S3 and creates a datastore whose %s Terraform knows only "+
+				"during apply. Destroying it with destroy_data = false, as in state, leaves its backups in the bucket "+
+				"under %s/; should the new datastore have the same name and bucket without reuse_datastore, it starts "+
+				"without them, and its first garbage collection deletes their chunks. Make %s known when planning, "+
+				"for example by applying what it depends on first with -target, %sor set destroy_data = true and apply "+
+				"that first to start without them.", name, strings.Join(unknown, ", "), name, strings.Join(unknown, ", "), reuse))
 		return
 	}
 	if state.KeepJobConfigs.ValueBool() {
@@ -800,14 +883,24 @@ func (r *datastoreResource) warnS3Replacement(plan, state datastoreModel, diags 
 				"destroy_data = false and apply that first to keep them.", name, name))
 		return
 	}
-	if plan.Backend.IsUnknown() || backendKey(plan.Backend, "bucket").IsUnknown() {
-		return
-	}
-	if !plan.Name.Equal(state.Name) || !sameBucket(plan.Backend, state.Backend) {
+	startsEmpty := (!plan.Name.IsUnknown() && !plan.Name.Equal(state.Name)) ||
+		(!plan.Backend.IsUnknown() && !backendKey(plan.Backend, "bucket").IsUnknown() && !sameBucket(plan.Backend, state.Backend))
+	if startsEmpty {
 		diags.AddAttributeWarning(path.Root("backend"), "The new datastore starts without the backups",
 			fmt.Sprintf("This plan replaces datastore %q on S3. Its backups stay in its bucket under %s/, but a "+
 				"datastore finds the backups under its own name, in its own bucket, so the new datastore starts "+
 				"without them. Keep the name and backend, with reuse_datastore = true, to keep them.", name, name))
+		return
+	}
+	// Without reuse_datastore, ModifyPlan fails the plan when the name or
+	// bucket is not known yet.
+	if (plan.Name.IsUnknown() || plan.Backend.IsUnknown() || backendKey(plan.Backend, "bucket").IsUnknown()) &&
+		plan.ReuseDatastore.ValueBool() {
+		diags.AddAttributeWarning(path.Root("backend"), "The new datastore may start without the backups",
+			fmt.Sprintf("This plan replaces datastore %q on S3 with a datastore whose name or bucket Terraform "+
+				"knows only during apply. Its backups stay in its bucket under %s/, and a datastore finds the "+
+				"backups under its own name, in its own bucket: the new datastore has them only if it keeps both.",
+				name, name))
 	}
 }
 
@@ -816,12 +909,22 @@ func (r *datastoreResource) warnS3Replacement(plan, state datastoreModel, diags 
 func namespacesAfterReplacement(plan, state datastoreModel) string {
 	if isS3(state.Backend) || isS3(plan.Backend) {
 		return "On S3, the new datastore has the namespaces its bucket holds under its name: the old ones with the " +
-			"same name and bucket and reuse_datastore, none otherwise — which Terraform creates again on the next " +
+			"same name and bucket and reuse_datastore — from PBS 4.1.5 all of them, before only those with backups " +
+			"in or below them —, none otherwise; Terraform creates the missing ones it manages again on the next " +
 			"apply."
 	}
 	return "Namespaces stay with the old chunk store: a datastore renamed with reuse_datastore keeps them, but " +
 		"destroying its pbs_namespace resources that hold backups fails — take those out of state first —, and one " +
 		"in a new place starts without them, which Terraform creates again on the next apply."
+}
+
+// sameDirectory reports whether two paths name the same directory: PBS keeps
+// a path as written, so /mnt/datastore/x/ is /mnt/datastore/x.
+func sameDirectory(a, b types.String) bool {
+	if a.IsNull() || a.IsUnknown() || b.IsNull() || b.IsUnknown() {
+		return a.Equal(b)
+	}
+	return stdpath.Clean(a.ValueString()) == stdpath.Clean(b.ValueString())
 }
 
 // sameBucket reports whether two backends name the same bucket, the place

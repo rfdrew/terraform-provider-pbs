@@ -3,19 +3,22 @@
 page_title: "pbs_s3_buckets Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Lists the buckets of an object store that the access key of a Proxmox Backup Server S3 endpoint may see. PBS connects to the object store for it, so the list also checks that the endpoint works: its address, keys, region and fingerprint. A wrong host name or a refused port fails within seconds, but an address that drops connection attempts makes PBS try for over half a minute, and one that accepts connections and never answers longer still, which may outlast the provider's request_timeout. Needs Sys.Audit on /.
+  Lists the buckets of an object store that the access key of a Proxmox Backup Server S3 endpoint may see. PBS connects to the object store for it, so the list also checks that the endpoint works: its address, keys and fingerprint, and its region where the object store checks the region requests are signed for — not with {{region}} in endpoint, as at AWS, where PBS asks the region set, which lists the buckets of every region; creating a datastore checks its bucket's region. PBS 4.0.8 added the list. A wrong host name or a refused port fails within seconds, but an address that drops connection attempts makes PBS try for over half a minute, and one that accepts connections and never answers longer still, which may outlast the provider's request_timeout. Needs Sys.Audit on /.
 ---
 
 # pbs_s3_buckets (Data Source)
 
-Lists the buckets of an object store that the access key of a Proxmox Backup Server S3 endpoint may see. PBS connects to the object store for it, so the list also checks that the endpoint works: its address, keys, region and fingerprint. A wrong host name or a refused port fails within seconds, but an address that drops connection attempts makes PBS try for over half a minute, and one that accepts connections and never answers longer still, which may outlast the provider's `request_timeout`. Needs `Sys.Audit on /`.
+Lists the buckets of an object store that the access key of a Proxmox Backup Server S3 endpoint may see. PBS connects to the object store for it, so the list also checks that the endpoint works: its address, keys and fingerprint, and its region where the object store checks the region requests are signed for — not with `{{region}}` in `endpoint`, as at AWS, where PBS asks the region set, which lists the buckets of every region; creating a datastore checks its bucket's region. PBS 4.0.8 added the list. A wrong host name or a refused port fails within seconds, but an address that drops connection attempts makes PBS try for over half a minute, and one that accepts connections and never answers longer still, which may outlast the provider's `request_timeout`. Needs `Sys.Audit on /`.
 
 ## Example Usage
 
 ```terraform
 # PBS connects to the object store to list its buckets, so reading this
-# checks the endpoint: it fails when the address, the keys, the region or the
-# fingerprint are wrong. The access key must be allowed to list the buckets
+# checks the endpoint: it fails when the address, the keys or the fingerprint
+# are wrong, and when the region is wrong only where the object store checks
+# it — not with {{region}} in the endpoint, as at AWS, where PBS asks the
+# region set, which lists the buckets of every region. Listing needs PBS
+# 4.0.8 or newer. The access key must be allowed to list the buckets
 # of its account, which a key limited to one bucket may not be; the
 # datastores do not need that. In a check block, a failure is a warning, not
 # an error. Referring to the id of pbs_s3_endpoint.aws, of the

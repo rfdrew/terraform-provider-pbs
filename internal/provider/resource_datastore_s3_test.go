@@ -334,6 +334,147 @@ func TestDatastoreResourceS3ReplacePlanChecks(t *testing.T) {
 	}
 }
 
+// The guards that keep the backups take a value known only during apply for
+// the worst it may turn out to be — the same bucket, the same name, no
+// reuse_datastore, another backend in the same directory —, as nothing
+// checks them again during apply.
+func TestDatastoreResourceS3UnknownValuesPlanChecks(t *testing.T) {
+	h, _, _ := newS3DatastoreHarness(t)
+	onS3 := h.create(t, "pbs_datastore", h.resourceValue(t, "pbs_datastore", s3StoreAttributes(nil)))
+	inDirectory := h.create(t, "pbs_datastore", h.resourceValue(t, "pbs_datastore", map[string]any{
+		"name": "store1", "path": "/mnt/datastore/store1",
+	}))
+	const needsKnown, startsEmpty = "Replacing the datastore on S3 needs known values", "The new datastore starts without the backups"
+	const mayStartEmpty, adviseReuse = "The new datastore may start without the backups", "set reuse_datastore = true"
+	unknownBucket := map[string]any{"type": "s3", "client": s3StoreEndpoint, "bucket": tfUnknown, "max_cache_size": nil}
+	moved := func(extra map[string]any) tftypes.Value {
+		attrs := s3StoreAttributes(map[string]any{"path": "/mnt/datastore/s3-cache2"})
+		maps.Copy(attrs, extra)
+		return h.resourceValue(t, "pbs_datastore", attrs)
+	}
+
+	// Moved to another directory without reuse_datastore, a datastore on S3
+	// whose bucket, backend, name or reuse_datastore is not known yet may
+	// start without its backups and have its garbage collection delete them.
+	for name, tc := range map[string]struct {
+		extra   map[string]any
+		unknown string
+		reuse   bool // whether the plan may advise reuse_datastore
+	}{
+		"bucket":          {map[string]any{"backend": unknownBucket}, "whose backend.bucket Terraform", true},
+		"backend":         {map[string]any{"backend": tfUnknown}, "whose backend Terraform", false},
+		"name":            {map[string]any{"name": tfUnknown}, "whose name Terraform", true},
+		"reuse_datastore": {map[string]any{"reuse_datastore": tfUnknown}, "whose reuse_datastore Terraform", false},
+		"name and bucket": {map[string]any{"name": tfUnknown, "backend": unknownBucket}, "whose name, backend.bucket Terraform", true},
+	} {
+		planned := h.plan(t, "pbs_datastore", onS3, moved(tc.extra))
+		requireProtocolErrorContaining(t, planned.Diagnostics, needsKnown)
+		requireProtocolErrorContaining(t, planned.Diagnostics, tc.unknown)
+		requireProtocolErrorContaining(t, planned.Diagnostics, "its first garbage collection deletes their chunks")
+		if advises := datastoreDiagnosticsMention(planned.Diagnostics, adviseReuse); advises != tc.reuse {
+			t.Errorf("%s: the plan advises reuse_datastore: %v, want %v: %v", name, advises, tc.reuse, planned.Diagnostics)
+		}
+		if datastoreDiagnosticsMention(planned.Diagnostics, startsEmpty) || datastoreDiagnosticsMention(planned.Diagnostics, mayStartEmpty) {
+			t.Errorf("%s: the plan fails and warns: %v", name, planned.Diagnostics)
+		}
+	}
+
+	// Advising reuse_datastore, the plan says what it keeps the backups with.
+	planned := h.plan(t, "pbs_datastore", onS3, moved(map[string]any{"name": tfUnknown}))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "keeps the backups if the name and bucket are the same")
+	planned = h.plan(t, "pbs_datastore", onS3, moved(map[string]any{"backend": unknownBucket}))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "keeps the backups if the bucket is the same")
+	// A path not known yet changes nothing for the backups, which stay in
+	// the bucket wherever the cache is: the plan fails as with a known path.
+	planned = h.plan(t, "pbs_datastore", onS3, h.resourceValue(t, "pbs_datastore", s3StoreAttributes(map[string]any{"path": tfUnknown})))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Replacing the datastore on S3 needs reuse_datastore")
+	requireProtocolErrorContaining(t, planned.Diagnostics, "same name and bucket, in a directory known only during apply.")
+
+	// With reuse_datastore, it plans, warning that the backups are kept only
+	// with the same name and bucket.
+	for name, extra := range map[string]map[string]any{
+		"bucket":  {"backend": unknownBucket},
+		"backend": {"backend": tfUnknown},
+		"name":    {"name": tfUnknown},
+	} {
+		extra["reuse_datastore"] = true
+		planned = h.plan(t, "pbs_datastore", onS3, moved(extra))
+		requireNoProtocolErrors(t, planned.Diagnostics)
+		requireProtocolWarningContaining(t, planned.Diagnostics, mayStartEmpty)
+		if datastoreDiagnosticsMention(planned.Diagnostics, startsEmpty) {
+			t.Errorf("%s: the plan says the datastore starts without the backups: %v", name, planned.Diagnostics)
+		}
+	}
+	// A new name never finds them, whatever the bucket.
+	planned = h.plan(t, "pbs_datastore", onS3, moved(map[string]any{"name": "s3store2", "backend": unknownBucket}))
+	requireNoProtocolErrors(t, planned.Diagnostics)
+	requireProtocolWarningContaining(t, planned.Diagnostics, startsEmpty)
+
+	// In the same directory, the bucket not known yet, the plan fails as for
+	// any replacement in place, and says the backups are read again only from
+	// the same bucket.
+	planned = h.plan(t, "pbs_datastore", onS3, h.resourceValue(t, "pbs_datastore", s3StoreAttributes(map[string]any{
+		"backend": unknownBucket,
+	})))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Replacing the datastore in place needs reuse_datastore")
+	requireProtocolErrorContaining(t, planned.Diagnostics, "if the bucket, known only during apply, is the same")
+
+	// A backend not known yet may be the other kind, whose datastore cannot
+	// take over the chunk store in the same directory: the plan fails, and
+	// does not advise reuse_datastore, which on S3 empties it.
+	for name, tc := range map[string]struct {
+		prior *resourceInstance
+		attrs map[string]any
+	}{
+		"in a directory": {inDirectory, map[string]any{"name": "store1", "path": "/mnt/datastore/store1"}},
+		"on S3":          {onS3, s3StoreAttributes(nil)},
+	} {
+		for _, reuse := range []bool{false, true} {
+			attrs := maps.Clone(tc.attrs)
+			attrs["backend"], attrs["reuse_datastore"] = tfUnknown, reuse
+			planned := h.plan(t, "pbs_datastore", tc.prior, h.resourceValue(t, "pbs_datastore", attrs))
+			requireProtocolErrorContaining(t, planned.Diagnostics, "The datastore's new backend is not known yet")
+			if datastoreDiagnosticsMention(planned.Diagnostics, "keeping the backups") ||
+				datastoreDiagnosticsMention(planned.Diagnostics, adviseReuse) {
+				t.Errorf("%s, reuse %v: the plan advises reuse_datastore: %v", name, reuse, planned.Diagnostics)
+			}
+		}
+	}
+	// So does a change of backend in a directory not known yet, which may
+	// be the same.
+	planned = h.plan(t, "pbs_datastore", inDirectory, h.resourceValue(t, "pbs_datastore", map[string]any{
+		"name": "store1", "path": tfUnknown, "reuse_datastore": true, "backend": s3StoreBackend(s3StoreEndpoint, s3StoreBucket, nil),
+	}))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Moving the datastore to or from S3 needs another path")
+	requireProtocolErrorContaining(t, planned.Diagnostics, "which may be the same directory, /mnt/datastore/store1")
+
+	// A name not known yet in the same directory needs reuse_datastore as any
+	// other: PBS refuses the chunk store the old datastore leaves there.
+	planned = h.plan(t, "pbs_datastore", inDirectory, h.resourceValue(t, "pbs_datastore", map[string]any{
+		"name": tfUnknown, "path": "/mnt/datastore/store1",
+	}))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Replacing the datastore in place needs reuse_datastore")
+	requireProtocolErrorContaining(t, planned.Diagnostics, "creates a datastore whose name is known only during apply in the same directory")
+	planned = h.plan(t, "pbs_datastore", onS3, h.resourceValue(t, "pbs_datastore", s3StoreAttributes(map[string]any{"name": tfUnknown})))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Replacing the datastore in place needs reuse_datastore")
+	requireProtocolErrorContaining(t, planned.Diagnostics, `those of "s3store" only if the name and bucket stay the same`)
+
+	// A path spelled another way is the same directory to PBS.
+	planned = h.plan(t, "pbs_datastore", inDirectory, h.resourceValue(t, "pbs_datastore", map[string]any{
+		"name": "store1", "path": "/mnt/datastore//store1/", "reuse_datastore": true,
+		"backend": s3StoreBackend(s3StoreEndpoint, s3StoreBucket, nil),
+	}))
+	requireProtocolErrorContaining(t, planned.Diagnostics, "Moving the datastore to or from S3 needs another path")
+
+	// A datastore in a directory, put elsewhere with a backend not known
+	// yet, leaves its chunk store alone: the plan only warns about the jobs.
+	planned = h.plan(t, "pbs_datastore", inDirectory, h.resourceValue(t, "pbs_datastore", map[string]any{
+		"name": "store1", "path": "/mnt/datastore/store1-new", "backend": tfUnknown,
+	}))
+	requireNoProtocolErrors(t, planned.Diagnostics)
+	requireProtocolWarningContaining(t, planned.Diagnostics, "deletes its jobs and ACL entries")
+}
+
 // A datastore on S3 imports with its backend however PBS stores it — keys
 // in any order, the type bare or not — and with the flags that exist only in
 // Terraform at their defaults; a datastore whose backend is PBS's default
