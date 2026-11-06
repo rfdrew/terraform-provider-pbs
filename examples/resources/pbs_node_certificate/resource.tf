@@ -23,3 +23,14 @@ check "pbs_certificate_is_renewed" {
     error_message = "The PBS certificate expires on ${pbs_node_certificate.this.not_after}; check the renewal task in PBS."
   }
 }
+
+# Or, instead of ACME — without pbs_node_acme on the node, whose domains
+# would have PBS renew it with ACME —, a certificate of your own CA, here
+# from the tls provider, which PBS serves as it is. The Proxmox VE storage
+# can pin its fingerprint in the same apply.
+resource "pbs_node_certificate" "custom" {
+  source         = "custom"
+  certificates   = "${tls_locally_signed_cert.pbs.cert_pem}${tls_self_signed_cert.ca.cert_pem}"
+  key_wo         = tls_private_key.pbs.private_key_pem
+  key_wo_version = 1 # increment to upload the key again
+}

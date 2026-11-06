@@ -19,10 +19,14 @@ rules (`pbs_traffic_control_rule`) and
 notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 `pbs_notification_matcher`) and a Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
-`pbs_node_certificate`) can be managed, with data sources to read the
+`pbs_node_certificate`), or one of your own, and the node's settings, DNS,
+time zone and subscription (`pbs_node_config`, `pbs_dns`, `pbs_timezone`,
+`pbs_subscription`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
 the realms, the datastores, their namespaces, usage and garbage
-collection, the notification targets and matcher fields, besides `pbs_version`,
+collection, the notification targets and matcher fields, the node's
+status, certificate, network interfaces, disks, pending updates, services,
+subscription and time, besides `pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
 `pbs_sync_job`) copy backups between servers, encrypted with keys PBS keeps
 (`pbs_sync_encryption_key`) if need be, with data sources for them and

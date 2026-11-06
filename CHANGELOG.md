@@ -4,6 +4,66 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pbs_node_config` resource: the settings of a node in `node.cfg` — the
+  HTTP proxy, the address its mail comes from, how long it keeps task logs,
+  the default language, the TLS ciphers of its proxy, the consent banner of
+  the login page, the node's notes, and its location (PBS 4.2.1). The resource manages only the settings its configuration sets:
+  the others keep whatever the node has, a setting removed from the
+  configuration is deleted, and so are those it managed when it is
+  destroyed. It never touches the node's ACME settings, which share the
+  file with them and belong to `pbs_node_acme`; both write with the file's
+  digest. The HTTP proxy is sensitive, as it may hold a password. Imported
+  by node, which manages every setting the node has.
+- `pbs_dns` resource: the node's search domain and up to three
+  nameservers, in `/etc/resolv.conf`. Creating it removes nameservers the
+  configuration does not list, with a warning; PBS cannot remove the search
+  domain, which a configuration without it leaves as it is. Destroying it
+  leaves the settings as they are, as a node without nameservers could not
+  resolve names. PBS fails to write the file where it is a mount point, as
+  in a Docker container, and the error says what to do instead.
+- `pbs_timezone` resource: the node's time zone; destroying it leaves the
+  zone as it is.
+- `pbs_subscription` resource: the node's subscription key, which PBS checks
+  with Proxmox's shop — through the node's HTTP proxy — before it stores it,
+  with the shop's verdict: a key the shop calls invalid or expired is stored
+  with a warning, and `status`, `message` and the dates report it. PBS
+  returns the key, so it is sensitive and in state, and a key changed
+  outside Terraform shows. Destroying the resource removes the subscription
+  from the node only: the key stays bound to the server in the shop.
+- `pbs_node_certificate`: `source = "custom"`, a certificate chain of your
+  own (`certificates`) and its write-only private key (`key_wo` and
+  `key_wo_version`), uploaded in place of the node's certificate, with the
+  fingerprint known when planning once the chain is. PBS writes a key that
+  is not the certificate's, or keys too weak for its OpenSSL, and its proxy
+  then keeps the old certificate and fails to start the next time: the
+  provider checks both before uploading, and after it that the proxy serves
+  the new certificate. It also refuses, before PBS would, an encrypted key
+  and blocks other than certificates in the chain. A certificate laid out
+  otherwise is no change; one the node no longer serves — PBS renews any
+  certificate with ACME on a node with ACME domains, which the apply warns
+  about — is uploaded again. A node serving PBS's own self-signed
+  certificate has none of the resource, whatever its source.
+- Data sources for a node: `pbs_node_status` (memory, swap, root file
+  system, load, CPU, uptime, kernel, boot mode and the certificate's
+  fingerprint), `pbs_node_certificates` (the certificate the proxy serves,
+  with its chain), `pbs_network_interfaces` (the interfaces, with changes
+  written but not applied yet), `pbs_disks` (the disks and, optionally,
+  their partitions and SMART health), `pbs_apt_updates` (the packages APT
+  can upgrade, as of the node's last package index update), `pbs_services`
+  (the state of PBS's services), `pbs_subscription` (the subscription as
+  PBS last checked it) and `pbs_time` (the node's time, time zone and
+  offset).
+
+### Changed
+
+- `pbs_node_certificate`: changing `source` installs a certificate from the
+  new source in place — an ACME order, or an upload — instead of replacing
+  the resource, which went through a new self-signed certificate.
+
 ## [0.3.0] - 2026-10-30
 
 Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
@@ -374,6 +434,7 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0

@@ -102,8 +102,8 @@ var (
 	fakePluginBools      = []string{"disable"}
 	fakePluginDeletable  = []string{"disable", "validation-delay"}
 	fakeNodeDeletable    = []string{"acme", "acmedomain0", "acmedomain1", "acmedomain2", "acmedomain3", "acmedomain4", "http-proxy", "email-from", "ciphers-tls-1.3", "ciphers-tls-1.2", "default-lang", "description", "task-log-max-days", "consent-text", "location"}
-	fakeNodeDescription  = "PBS for cluster1"
-	fakeSelfSignedIssuer = "CN=pbs-test, O=Proxmox Backup Server"
+	fakeNodeDescription  = "PBS for cluster1\n"
+	fakeSelfSignedIssuer = "O = Proxmox Backup Server, OU = 9C5A9B5E2A1D4C0FB4E3A1F25E9C0D77, CN = pbs-test"
 )
 
 // newFakeACME serves the ACME, node configuration and certificate API from
@@ -560,7 +560,7 @@ func (a *fakeACME) nodeDigestLocked() string { return fakeDigest("node.cfg", a.n
 func (a *fakeACME) getNode(w http.ResponseWriter, _ *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	writeData(w, a.node, a.nodeDigestLocked())
+	writeData(w, fakeNodeConfigJSON(a.node), a.nodeDigestLocked())
 }
 
 func (a *fakeACME) updateNode(w http.ResponseWriter, req *http.Request) {
@@ -607,6 +607,10 @@ func (a *fakeACME) updateNode(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		seen[strings.ToLower(domain.Domain)] = true
+	}
+	if message := fakeNodeSettingsCheck(updated); message != "" {
+		writeError(w, "%s", message)
+		return
 	}
 	a.node = updated
 	a.nodeGen++

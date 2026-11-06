@@ -49,7 +49,8 @@
 # user's password, the admin account, the datastore, the container, the
 # variant, the PBS version, the ACME directory, the files of PBS's own
 # certificate and key, which the certificate tests put back when they end,
-# the UUID of the file system for removable datastores, the address at
+# the UUID of the file system for removable datastores, whether PBS can
+# write /etc/resolv.conf, the address at
 # which the container reaches this host, where the notification tests
 # receive what PBS sends, the S3 server's address, port, region, keys,
 # certificate fingerprint, buckets and container, and the LDAP server: the
@@ -77,8 +78,11 @@
 #   * systemd as PID 1 needs a privileged container with the host's cgroup
 #     namespace; the root password is set with chpasswd after the boot.
 #   * Docker bind-mounts /etc/resolv.conf, and PBS writes it by renaming a
-#     new file over it, which fails on a mount point. The packages stand
-#     unmounts it, keeping its content, so that DNS settings can be tested.
+#     new file over it, which fails on a mount point. Both stands unmount it,
+#     keeping its content, so that DNS settings can be tested; the image
+#     stand's container gets CAP_SYS_ADMIN for that, which Docker's seccomp
+#     and AppArmor profiles then let umount use. Should the image stand fail
+#     to, the DNS tests skip.
 #   * PBS talks to an ACME directory over HTTPS and verifies it against the
 #     system's CAs. Pebble's image ships a certificate for its directory that
 #     expires in October 2027, so the script gives Pebble a certificate of its
@@ -206,6 +210,8 @@ S3_MC_ALIAS="tfacc"
 # The endpoint the script creates in PBS to try the server, and removes.
 S3_PROBE_ID="tfacc-s3-probe"
 S3_FINGERPRINT=""
+# Set to 1 once /etc/resolv.conf is a plain file in the container.
+RESOLV_CONF_WRITABLE=0
 
 # The LDAP server: its container, the address PBS connects to, the
 # directory, and where the files go — slapd's, in the LDAP container, and the
@@ -382,6 +388,7 @@ start_image() {
   docker run -d \
     --name "$CONTAINER" \
     --hostname pbs-acc \
+    --cap-add SYS_ADMIN \
     --tmpfs /run \
     -p "127.0.0.1:${PORT}:8007" \
     --add-host host.docker.internal:host-gateway \
@@ -407,6 +414,16 @@ start_packages() {
     --add-host host.docker.internal:host-gateway \
     -v "${CONTAINER}-datastore:${DATASTORE_DIR}" \
     "$PACKAGES_IMAGE" >/dev/null
+}
+
+# unmount_resolv_conf keeps the resolver Docker wrote, but as a plain file
+# PBS can replace, and notes whether that worked.
+unmount_resolv_conf() {
+  if docker exec "$CONTAINER" sh -c 'cp /etc/resolv.conf /tmp/resolv.conf && umount /etc/resolv.conf && cp /tmp/resolv.conf /etc/resolv.conf'; then
+    RESOLV_CONF_WRITABLE=1
+  else
+    log "could not unmount /etc/resolv.conf in $CONTAINER"
+  fi
 }
 
 check_deadline() {
@@ -1156,6 +1173,11 @@ print_exports() {
   else
     printf 'unset PBS_ACC_REMOVABLE_UUID\n'
   fi
+  if [[ "$RESOLV_CONF_WRITABLE" == "1" ]]; then
+    printf 'export PBS_ACC_DNS_WRITABLE=1\n'
+  else
+    printf 'unset PBS_ACC_DNS_WRITABLE\n'
+  fi
   print_ldap_exports
 }
 
@@ -1174,6 +1196,10 @@ if [[ "$VARIANT" == "image" ]]; then
   timing "pull" "$t"
   START="$(date +%s)"
   start_image
+  unmount_resolv_conf
+  if [[ "$RESOLV_CONF_WRITABLE" != "1" ]]; then
+    log "PBS cannot write /etc/resolv.conf on this stand; the DNS tests will skip"
+  fi
 else
   build_packages_image
   timing "build" "$t"
@@ -1181,8 +1207,11 @@ else
   start_packages
   # chpasswd needs the container, not systemd; PAM reads /etc/shadow at login.
   printf 'root:%s\n' "$ADMIN_PASS" | docker exec -i "$CONTAINER" chpasswd
-  # Keep the resolver Docker wrote, but as a plain file PBS can replace.
-  docker exec "$CONTAINER" sh -c 'cp /etc/resolv.conf /tmp/resolv.conf && umount /etc/resolv.conf && cp /tmp/resolv.conf /etc/resolv.conf'
+  unmount_resolv_conf
+  if [[ "$RESOLV_CONF_WRITABLE" != "1" ]]; then
+    log "the packages stand needs /etc/resolv.conf writable for PBS, as the DNS tests expect"
+    exit 1
+  fi
 fi
 save_state
 

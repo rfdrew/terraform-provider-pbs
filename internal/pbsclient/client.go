@@ -295,6 +295,9 @@ func (c *Client) UseAPITokenSecret(secret string) {
 type Envelope struct {
 	Data   json.RawMessage `json:"data"`
 	Digest string          `json:"digest,omitempty"`
+	// Changes is the diff of a configuration written but not applied yet,
+	// which PBS sends next to data for the node's network configuration.
+	Changes string `json:"changes,omitempty"`
 }
 
 // Get, Post, Put and Delete are Call with the method filled in.
