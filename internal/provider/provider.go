@@ -521,6 +521,8 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewS3EndpointResource,
 		NewTrafficControlRuleResource,
 		NewSyncEncryptionKeyResource,
+		NewInfluxDBHTTPResource,
+		NewInfluxDBUDPResource,
 	}
 }
 
@@ -560,6 +562,10 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewTrafficControlRuleDataSource,
 		NewTrafficControlRulesDataSource,
 		NewSyncEncryptionKeysDataSource,
+		NewMetricServersDataSource,
+		NewACMEDirectoriesDataSource,
+		NewACMEChallengeSchemaDataSource,
+		NewACMEAccountsDataSource,
 	}
 }
 

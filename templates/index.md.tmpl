@@ -65,8 +65,10 @@ never returns.
   a DNS challenge plugin such as Cloudflare's (`pbs_acme_plugin`), the
   node's domains (`pbs_node_acme`) and the certificate itself
   (`pbs_node_certificate`), which PBS renews on its own; `pbs_acme_tos`
-  reads a CA's terms of service. CAs that require External Account Binding
-  are not supported yet.
+  reads a CA's terms of service, `pbs_acme_directories` the directories PBS
+  knows, `pbs_acme_challenge_schema` the DNS APIs plugins can use and their
+  settings, and `pbs_acme_accounts` the accounts. CAs that require External
+  Account Binding are not supported yet.
 * **Replication** — other PBS servers as remotes (`pbs_remote`), and sync
   jobs that pull backups from them, push backups to them or copy them
   between two datastores of one server (`pbs_sync_job`), with the keys
@@ -76,6 +78,9 @@ never returns.
   `pbs_remote_datastores` and `pbs_remote_namespaces`, which sign in to a
   remote and list what it holds. `pbs_verify_job`, `pbs_verify_jobs`,
   `pbs_prune_job` and `pbs_prune_jobs` read the other jobs.
+* **Metrics** — InfluxDB servers PBS sends its metrics to, over HTTP or
+  HTTPS (`pbs_metric_server_influxdb_http`) or UDP
+  (`pbs_metric_server_influxdb_udp`); `pbs_metric_servers` lists them.
 * **Traffic control** — bandwidth limits on the connections of clients by
   network, user and time of day (`pbs_traffic_control_rule`); to read them,
   `pbs_traffic_control_rule` and `pbs_traffic_control_rules`.

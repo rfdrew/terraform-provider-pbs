@@ -3,6 +3,7 @@ package pbsclient
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -404,4 +405,161 @@ func (d ACMEDomain) Format() string {
 		p["plugin"] = d.Plugin
 	}
 	return p.Format("domain")
+}
+
+// ACMEDirectory is an ACME directory PBS knows by name.
+type ACMEDirectory struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// ACMEDirectories lists the ACME directories PBS knows by name, in its
+// order: Let's Encrypt's production directory, PBS's default, first, then
+// its staging directory. The list is built into PBS; any user may read it.
+func (c *Client) ACMEDirectories(ctx context.Context) ([]ACMEDirectory, error) {
+	var directories []ACMEDirectory
+	_, err := c.Get(ctx, "/config/acme/directories", nil, &directories)
+	return directories, err
+}
+
+// ListACMEAccounts lists the names of the ACME accounts PBS has, in no
+// particular order. PBS leaves out deactivated accounts, and names starting
+// with "_", which it gives deactivated accounts' files. It needs Sys.Modify
+// on /system/certificates.
+func (c *Client) ListACMEAccounts(ctx context.Context) ([]string, error) {
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if _, err := c.Get(ctx, "/config/acme/account", nil, &entries); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	return names, nil
+}
+
+// The DNS APIs a plugin can use are those of acme.sh that the
+// libproxmox-acme-plugins package ships, and PBS describes them with the
+// package's /usr/share/proxmox-acme/dns-challenge-schema.json, which the web
+// interface builds its plugin form from. Each API has an optional display
+// name and description, and the settings it reads from the environment as
+// fields: each with a type ("string" or "integer"), and optionally a
+// description, a display name, whether it is optional, and a default. Most
+// APIs describe no fields at all; optional is not reliable — Cloudflare's
+// fields are all marked required, though it takes either a token or a key —
+// and the file varies with the package's version.
+
+// ACMEChallengeSchema describes one DNS API a plugin can use.
+type ACMEChallengeSchema struct {
+	// ID is the API's name, which a plugin's api names, such as cf.
+	ID string
+	// Name is the display name; the ID when the schema gives none.
+	Name string
+	// Type is the challenge type, always "dns".
+	Type string
+	// Description is a hint on the settings, empty when there is none.
+	Description string
+	// Fields are the settings the schema describes, by name.
+	Fields map[string]ACMEChallengeField
+}
+
+// ACMEChallengeField describes one setting of a DNS API.
+type ACMEChallengeField struct {
+	// Label is the display name, empty when the schema gives none.
+	Label string
+	// Type is "string" or "integer", or what else the schema says.
+	Type        string
+	Description string
+	Optional    bool
+	// Default is the default value as text, such as "120"; empty when there
+	// is none.
+	Default string
+}
+
+// ACMEChallengeSchemas reads the descriptions of the DNS APIs PBS's DNS
+// plugins can use. Any user may read them.
+func (c *Client) ACMEChallengeSchemas(ctx context.Context) ([]ACMEChallengeSchema, error) {
+	var raw []struct {
+		ID     string          `json:"id"`
+		Name   string          `json:"name"`
+		Type   string          `json:"type"`
+		Schema json.RawMessage `json:"schema"`
+	}
+	if _, err := c.Get(ctx, "/config/acme/challenge-schema", nil, &raw); err != nil {
+		return nil, err
+	}
+	schemas := make([]ACMEChallengeSchema, 0, len(raw))
+	for _, r := range raw {
+		s := ACMEChallengeSchema{ID: r.ID, Name: r.Name, Type: r.Type, Fields: map[string]ACMEChallengeField{}}
+		if s.Name == "" {
+			s.Name = r.ID
+		}
+		var details map[string]json.RawMessage
+		_ = json.Unmarshal(r.Schema, &details)
+		s.Description = jsonText(details["description"])
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(details["fields"], &fields)
+		for name, rawField := range fields {
+			var f map[string]json.RawMessage
+			_ = json.Unmarshal(rawField, &f)
+			s.Fields[name] = ACMEChallengeField{
+				Label:       jsonText(f["name"]),
+				Type:        jsonText(f["type"]),
+				Description: jsonText(f["description"]),
+				Optional:    jsonTruthy(f["optional"]),
+				Default:     jsonScalar(f["default"]),
+			}
+		}
+		schemas = append(schemas, s)
+	}
+	return schemas, nil
+}
+
+// The schema file is written by hand, in JSON that Perl and JavaScript read
+// loosely, so its values are read leniently: a text that is no string is
+// none, optional is 1 or true, and a default is any scalar.
+
+// jsonText is raw as a string, or "" when it is no JSON string.
+func jsonText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// jsonTruthy reports whether raw is true, a non-zero number, or a string
+// other than "" and "0", as Perl takes it.
+func jsonTruthy(raw json.RawMessage) bool {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	switch v := v.(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return v != "" && v != "0"
+	}
+	return false
+}
+
+// jsonScalar is raw as text: a string as it is, a number or boolean as JSON
+// writes it, and anything else — null, an array, an object — as "".
+func jsonScalar(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	switch v := v.(type) {
+	case string:
+		return v
+	case float64, bool:
+		return strings.TrimSpace(string(raw))
+	}
+	return ""
 }
