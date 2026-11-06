@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pbs_metric_server_influxdb_http` resource: an InfluxDB server PBS sends
+  its metrics to over HTTP or HTTPS — the host's CPU, memory, network and
+  disk usage and every datastore's usage, every 10 seconds — with its URL,
+  organization, bucket, `verify_tls`, `max_body_size`, `enable` and
+  comment, and a write-only token (`token_wo`, `token_wo_version`), which
+  PBS never returns; imported by name. PBS checks the server, `GET
+  <url>/health` from its own host, before it saves a create or an update
+  of an enabled server, whatever it changes, and the provider says what to
+  check when that fails: the PBS host's reach and, for an `https://` URL, the
+  certificate and `verify_tls`; the token (401, 403); a URL with `/api/v2`
+  (404). The check writes nothing, so a wrong organization, bucket or —
+  with InfluxDB 2 — token still saves. `enable = false` saves a server
+  without the check.
+- `pbs_metric_server_influxdb_udp` resource: an InfluxDB UDP listener —
+  InfluxDB 1.x, or Telegraf in front of InfluxDB 2 or 3 — with its
+  `host:port`, MTU, `enable` and comment; imported by name. PBS only
+  resolves the host before it saves the server: nothing has to listen.
+  Metric servers of both types share one namespace, and destroying one
+  never deletes a server of the other type that took its name.
+- `pbs_metric_servers` data source: every metric server, of both types,
+  with its settings but without tokens.
+- `pbs_acme_directories` data source: the ACME directories PBS knows by
+  name, Let's Encrypt's production and staging directories.
+- `pbs_acme_challenge_schema` data source: the DNS APIs ACME DNS plugins
+  can use, with the settings PBS documents for each — the keys of
+  `pbs_acme_plugin`'s `data` — to check a plugin's settings in the plan.
+- `pbs_acme_accounts` data source: the ACME accounts PBS has, with their
+  directory, location at the CA, status, contact and terms of service.
+
 ## [0.3.0] - 2026-10-30
 
 Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
@@ -374,6 +407,7 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rfdrew/terraform-provider-pbs/releases/tag/v0.1.0

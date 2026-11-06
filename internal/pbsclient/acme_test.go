@@ -3,11 +3,13 @@ package pbsclient
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,5 +383,256 @@ func TestCertificateCallsOnOtherNodes(t *testing.T) {
 	fake.reply("DELETE /nodes/pbs1/certificates/custom", http.StatusOK, `{"data":null}`)
 	if err := c.DeleteCustomCertificate(ctx, "pbs1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The directories PBS knows by name decode in PBS's order, from a call that
+// sends nothing.
+func TestACMEDirectories(t *testing.T) {
+	const route = "GET /config/acme/directories"
+	fake := newFakePBS()
+	fake.reply(route, http.StatusOK, `{"data":[{"name":"Let's Encrypt V2","url":"https://acme-v02.api.letsencrypt.org/directory"},`+
+		`{"name":"Let's Encrypt V2 Staging","url":"https://acme-staging-v02.api.letsencrypt.org/directory"}]}`)
+	c := fake.client(t)
+	ctx := context.Background()
+
+	directories, err := c.ACMEDirectories(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ACMEDirectory{
+		{Name: "Let's Encrypt V2", URL: DefaultACMEDirectory},
+		{Name: "Let's Encrypt V2 Staging", URL: ACMEStagingDirectory},
+	}
+	if !reflect.DeepEqual(directories, want) {
+		t.Errorf("ACMEDirectories() = %+v, want %+v", directories, want)
+	}
+	if call := fake.lastCall(t, route); len(call.query) != 0 || len(call.form) != 0 {
+		t.Errorf("query = %v, form = %v, want neither", call.query, call.form)
+	}
+
+	fake.reply(route, http.StatusOK, `{"data":[]}`)
+	if directories, err := c.ACMEDirectories(ctx); err != nil || len(directories) != 0 {
+		t.Errorf("ACMEDirectories() of none = %+v, %v", directories, err)
+	}
+	fake.reply(route, http.StatusUnauthorized, "authentication failed - invalid credentials")
+	if _, err := c.ACMEDirectories(ctx); !IsUnauthorized(err) {
+		t.Errorf("ACMEDirectories() error = %v, want PBS's", err)
+	}
+}
+
+// The accounts are listed by name, in the order PBS answers them.
+func TestListACMEAccounts(t *testing.T) {
+	const route = "GET /config/acme/account"
+	fake := newFakePBS()
+	fake.reply(route, http.StatusOK, `{"data":[{"name":"staging"},{"name":"default"},{"name":"prod"}]}`)
+	c := fake.client(t)
+	ctx := context.Background()
+
+	names, err := c.ListACMEAccounts(ctx)
+	if err != nil || !reflect.DeepEqual(names, []string{"staging", "default", "prod"}) {
+		t.Errorf("ListACMEAccounts() = %q, %v", names, err)
+	}
+	if call := fake.lastCall(t, route); len(call.query) != 0 || len(call.form) != 0 {
+		t.Errorf("query = %v, form = %v, want neither", call.query, call.form)
+	}
+
+	for _, body := range []string{`{"data":[]}`, `{"data":null}`} {
+		fake.reply(route, http.StatusOK, body)
+		if names, err := c.ListACMEAccounts(ctx); err != nil || len(names) != 0 {
+			t.Errorf("ListACMEAccounts() of %s = %q, %v, want none", body, names, err)
+		}
+	}
+	fake.reply(route, http.StatusForbidden, "permission check failed")
+	if names, err := c.ListACMEAccounts(ctx); !IsForbidden(err) || names != nil {
+		t.Errorf("ListACMEAccounts() = %q, %v, want a forbidden error", names, err)
+	}
+}
+
+// The challenge schema is read as the web interface reads it: PBS's real
+// entries — Cloudflare, an API without fields, Hetzner's defaults, AWS's
+// labels — decode in PBS's order, and the hand-written parts that are not
+// what they should be are taken leniently instead of failing the read.
+func TestACMEChallengeSchemas(t *testing.T) {
+	const route = "GET /config/acme/challenge-schema"
+	fake := newFakePBS()
+	fake.reply(route, http.StatusOK, `{"data":[
+		{"id":"cf","name":"Cloudflare Managed DNS","type":"dns","schema":{"name":"Cloudflare Managed DNS",
+			"description":"Either provide global account key and email, or CF API token and Account ID.",
+			"fields":{"CF_Token":{"description":"The new Cloudflare API Token","type":"string"},
+				"CF_Account_ID":{"description":"The new Cloudflare API Account ID","type":"string"}}}},
+		{"id":"1984hosting","name":"1984hosting","type":"dns","schema":{}},
+		{"id":"hetznercloud","name":"Hetzner Cloud DNS","type":"dns","schema":{"name":"Hetzner Cloud DNS","fields":{
+			"HETZNER_TTL":{"default":120,"description":"TTL of the TXT record","optional":1,"type":"integer"},
+			"HETZNER_API":{"default":"https://api.hetzner.cloud/v1","optional":1,"type":"string","description":"API endpoint"},
+			"HETZNER_TOKEN":{"description":"API token","type":"string"}}}},
+		{"id":"aws","name":"Amazon Route53 (AWS)","type":"dns","schema":{"fields":{
+			"AWS_ACCESS_KEY_ID":{"description":"The AWS access-key ID","name":"ACCESS_KEY_ID","type":"string"}}}},
+		{"id":"noname","type":"dns","schema":null},
+		{"id":"emptyname","name":"","type":"dns"},
+		{"id":"text","name":"Text","type":"dns","schema":"no object"},
+		{"id":"array","name":"Array","type":"dns","schema":[{"fields":{"X":{"type":"string"}}}]},
+		{"id":"badfields","name":"Bad fields","type":"dns","schema":{"description":42,"fields":["X"]}},
+		{"id":"textfields","name":"Text fields","type":"dns","schema":{"fields":"X"}},
+		{"id":"loose","name":"Loose","type":"dns","schema":{"description":"Loose","fields":{
+			"OPTIONAL_TRUE":{"optional":true,"default":"x"},
+			"OPTIONAL_TEXT_ONE":{"optional":"1","default":1.5},
+			"OPTIONAL_ZERO":{"optional":0,"default":true},
+			"OPTIONAL_TEXT_ZERO":{"optional":"0","default":false},
+			"OPTIONAL_EMPTY":{"optional":"","default":null},
+			"OPTIONAL_ABSENT":{"default":[1,2]},
+			"OPTIONAL_FALSE":{"optional":false,"default":{"value":1}},
+			"OPTIONAL_NULL":{"optional":null,"default":-3},
+			"NO_OBJECT":"text",
+			"NUMBER":7,
+			"NULL":null,
+			"NO_TEXT":{"name":5,"type":["string"],"description":null}}}}
+	]}`)
+	c := fake.client(t)
+
+	schemas, err := c.ACMEChallengeSchemas(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]ACMEChallengeField{}
+	want := []ACMEChallengeSchema{
+		{ID: "cf", Name: "Cloudflare Managed DNS", Type: DNSACMEPluginType,
+			Description: "Either provide global account key and email, or CF API token and Account ID.",
+			Fields: map[string]ACMEChallengeField{
+				"CF_Token":      {Type: "string", Description: "The new Cloudflare API Token"},
+				"CF_Account_ID": {Type: "string", Description: "The new Cloudflare API Account ID"},
+			}},
+		{ID: "1984hosting", Name: "1984hosting", Type: DNSACMEPluginType, Fields: none},
+		{ID: "hetznercloud", Name: "Hetzner Cloud DNS", Type: DNSACMEPluginType, Fields: map[string]ACMEChallengeField{
+			"HETZNER_TTL":   {Type: "integer", Description: "TTL of the TXT record", Optional: true, Default: "120"},
+			"HETZNER_API":   {Type: "string", Description: "API endpoint", Optional: true, Default: "https://api.hetzner.cloud/v1"},
+			"HETZNER_TOKEN": {Type: "string", Description: "API token"},
+		}},
+		{ID: "aws", Name: "Amazon Route53 (AWS)", Type: DNSACMEPluginType, Fields: map[string]ACMEChallengeField{
+			"AWS_ACCESS_KEY_ID": {Label: "ACCESS_KEY_ID", Type: "string", Description: "The AWS access-key ID"},
+		}},
+		// Without a name of its own, an API is called by its ID.
+		{ID: "noname", Name: "noname", Type: DNSACMEPluginType, Fields: none},
+		{ID: "emptyname", Name: "emptyname", Type: DNSACMEPluginType, Fields: none},
+		// A schema, or its fields, that is no object describes nothing.
+		{ID: "text", Name: "Text", Type: DNSACMEPluginType, Fields: none},
+		{ID: "array", Name: "Array", Type: DNSACMEPluginType, Fields: none},
+		{ID: "badfields", Name: "Bad fields", Type: DNSACMEPluginType, Fields: none},
+		{ID: "textfields", Name: "Text fields", Type: DNSACMEPluginType, Fields: none},
+		// A field whose definition is no object is still a setting the API
+		// reads, with nothing known about it.
+		{ID: "loose", Name: "Loose", Type: DNSACMEPluginType, Description: "Loose", Fields: map[string]ACMEChallengeField{
+			"OPTIONAL_TRUE":      {Optional: true, Default: "x"},
+			"OPTIONAL_TEXT_ONE":  {Optional: true, Default: "1.5"},
+			"OPTIONAL_ZERO":      {Default: "true"},
+			"OPTIONAL_TEXT_ZERO": {Default: "false"},
+			"OPTIONAL_EMPTY":     {},
+			"OPTIONAL_ABSENT":    {},
+			"OPTIONAL_FALSE":     {},
+			"OPTIONAL_NULL":      {Default: "-3"},
+			"NO_OBJECT":          {},
+			"NUMBER":             {},
+			"NULL":               {},
+			"NO_TEXT":            {},
+		}},
+	}
+	if !reflect.DeepEqual(schemas, want) {
+		t.Errorf("ACMEChallengeSchemas() =\n%+v\nwant\n%+v", schemas, want)
+	}
+	if call := fake.lastCall(t, route); len(call.query) != 0 || len(call.form) != 0 {
+		t.Errorf("query = %v, form = %v, want neither", call.query, call.form)
+	}
+
+	fake.reply(route, http.StatusOK, `{"data":[]}`)
+	if schemas, err := c.ACMEChallengeSchemas(context.Background()); err != nil || len(schemas) != 0 {
+		t.Errorf("ACMEChallengeSchemas() of none = %+v, %v", schemas, err)
+	}
+	fake.reply(route, http.StatusBadRequest, "No such file or directory (os error 2)")
+	if schemas, err := c.ACMEChallengeSchemas(context.Background()); err == nil || schemas != nil {
+		t.Errorf("ACMEChallengeSchemas() = %+v, %v, want PBS's error", schemas, err)
+	}
+}
+
+// The lenient readers of the challenge schema's values, one by one: text is
+// a JSON string only, truth is Perl's, and a default is any scalar, written
+// as the JSON has it.
+func TestACMEChallengeSchemaValues(t *testing.T) {
+	for raw, want := range map[string]string{
+		`"cf"`:      "cf",
+		` "cf" `:    "cf",
+		`""`:        "",
+		`"a \"b\""`: `a "b"`,
+		`"été"`:     "été",
+		`1`:         "",
+		`true`:      "",
+		`null`:      "",
+		`["cf"]`:    "",
+		`{"a":"b"}`: "",
+		`not JSON`:  "",
+		``:          "",
+	} {
+		if got := jsonText(json.RawMessage(raw)); got != want {
+			t.Errorf("jsonText(%s) = %q, want %q", raw, got, want)
+		}
+	}
+	if got := jsonText(nil); got != "" {
+		t.Errorf("jsonText(nil) = %q", got)
+	}
+
+	for raw, want := range map[string]bool{
+		`true`:    true,
+		`1`:       true,
+		`-1`:      true,
+		`0.5`:     true,
+		`"1"`:     true,
+		`"yes"`:   true,
+		`"false"`: true,
+		`"00"`:    true,
+		`"0.0"`:   true,
+		` 1 `:     true,
+		`false`:   false,
+		`0`:       false,
+		`0.0`:     false,
+		`"0"`:     false,
+		`""`:      false,
+		`null`:    false,
+		`[1]`:     false,
+		`{}`:      false,
+		`yes`:     false,
+		``:        false,
+	} {
+		if got := jsonTruthy(json.RawMessage(raw)); got != want {
+			t.Errorf("jsonTruthy(%s) = %v, want %v", raw, got, want)
+		}
+	}
+	if jsonTruthy(nil) {
+		t.Error("jsonTruthy(nil) = true")
+	}
+
+	for raw, want := range map[string]string{
+		`"https://api.hetzner.cloud/v1"`: "https://api.hetzner.cloud/v1",
+		`"120"`:                          "120",
+		`""`:                             "",
+		`120`:                            "120",
+		" 120\n":                         "120",
+		`-3`:                             "-3",
+		`1.5`:                            "1.5",
+		`1e3`:                            "1e3",
+		// Not rounded through a float64.
+		`12345678901234567890`: "12345678901234567890",
+		`true`:                 "true",
+		`false`:                "false",
+		`null`:                 "",
+		`[1,2]`:                "",
+		`{"value":1}`:          "",
+		`12a`:                  "",
+		``:                     "",
+	} {
+		if got := jsonScalar(json.RawMessage(raw)); got != want {
+			t.Errorf("jsonScalar(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	if got := jsonScalar(nil); got != "" {
+		t.Errorf("jsonScalar(nil) = %q", got)
 	}
 }
