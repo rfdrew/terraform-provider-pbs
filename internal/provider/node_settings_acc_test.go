@@ -67,9 +67,9 @@ func testAccRestoreNodeSettings(t *testing.T, client *pbsclient.Client) {
 			var deletes []string
 			for _, s := range nodeSettings {
 				was, is := s.pbs(before), s.pbs(after)
-				switch {
-				case was == is:
-				case was == "":
+				switch was {
+				case is:
+				case "":
 					deletes = append(deletes, s.property)
 				default:
 					params.Set(s.property, was)
