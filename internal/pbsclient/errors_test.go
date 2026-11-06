@@ -109,3 +109,33 @@ func TestRedact(t *testing.T) {
 		t.Fatalf("Redact() = %q", got)
 	}
 }
+
+// IsOfOtherType takes PBS's 400 for an object of that name with another
+// type, realm or metric server, and nothing else; IsRealmOfOtherType is the
+// same test.
+func TestIsOfOtherType(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{apiError(400, "got unexpected type 'ldap' for openid 'corp'"), true},
+		{apiError(400, "got unexpected type 'influxdb-udp' for influxdb-http 'influx'"), true},
+		{apiError(400, "got unexpected type 'influxdb-http' for influxdb-udp 'influx'"), true},
+		{&Error{StatusCode: http.StatusBadRequest, Message: "got unexpected type 'openid' for ldap 'sso'"}, true},
+		{apiError(404, "got unexpected type 'ldap' for openid 'corp'"), false},
+		{apiError(500, "got unexpected type 'ldap' for openid 'corp'"), false},
+		{apiError(400, "no such influxdb-http 'influx'"), false},
+		{apiError(400, "name 'influx' does not exist."), false},
+		{apiError(400, "metric server 'influx' already exists."), false},
+		{apiError(400, "parameter verification failed - 'type': got unexpected type 'ldap' for openid 'corp'"), false},
+		{errors.New("got unexpected type 'ldap' for openid 'corp'"), false},
+		{nil, false},
+	} {
+		if got := IsOfOtherType(tc.err); got != tc.want {
+			t.Errorf("IsOfOtherType(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+		if got := IsRealmOfOtherType(tc.err); got != tc.want {
+			t.Errorf("IsRealmOfOtherType(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}

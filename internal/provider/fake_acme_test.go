@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"slices"
@@ -43,7 +44,14 @@ import (
 //   - ordering answers a UPID; the task orders nothing for a node without
 //     domains, fails for a missing account or plugin, and otherwise installs
 //     a certificate a fake CA issued for the domains, lower-cased. Deleting
-//     the custom certificate installs a new self-signed one at once.
+//     the custom certificate installs a new self-signed one at once;
+//   - the account list answers the names only, in reverse name order: PBS
+//     answers in the order of the directory it keeps the accounts in, and
+//     the data source must sort. Deactivated accounts are not listed, as
+//     PBS leaves them out;
+//   - the directories are the two PBS has built in, production first, and
+//     the challenge schema is challengeSchema, by default a subset of what
+//     PBS 4.2 serves from libproxmox-acme-plugins' schema file.
 //
 // Tests set up state with addAccount, addPlugin and setNodeProperty, renew
 // the certificate as PBS does on its own with renew, and look at state with
@@ -71,6 +79,9 @@ type fakeACME struct {
 
 	plugins   map[string]fakeProperties
 	pluginGen int
+	// challengeSchema is the data GET /config/acme/challenge-schema answers,
+	// as JSON; tests may replace it.
+	challengeSchema string
 
 	node       map[string]string
 	nodeGen    int
@@ -117,12 +128,17 @@ func newFakeACME(t *testing.T, fake *fakePBS) *fakeACME {
 		plugins:  map[string]fakeProperties{},
 		node:     map[string]string{"description": fakeNodeDescription},
 		tasks:    map[string]func() string{},
+
+		challengeSchema: fakeChallengeSchema,
 	}
 	a.caKey, a.ca = fakeCertificate(t, "Fake ACME CA", nil, nil)
 	a.cert = a.selfSignedLocked()
 
+	fake.handle("GET /config/acme/account", a.listAccounts)
 	fake.handle("POST /config/acme/account", a.registerAccount)
 	fake.handle("GET /config/acme/tos", a.tos)
+	fake.handle("GET /config/acme/directories", a.directories)
+	fake.handle("GET /config/acme/challenge-schema", a.challengeSchemas)
 	fake.handle("POST /config/acme/plugins", a.createPlugin)
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		fake.handlePrefix(method+" /config/acme/account/", a.serveAccount)
@@ -451,6 +467,74 @@ func (a *fakeACME) tos(w http.ResponseWriter, req *http.Request) {
 	}
 	writeData(w, tos, "")
 }
+
+// listAccounts serves GET /config/acme/account: an entry with the name of
+// each account, in reverse name order. Deactivated accounts are gone from
+// accounts, so they are left out as PBS leaves them out.
+func (a *fakeACME) listAccounts(w http.ResponseWriter, _ *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	names := slices.Sorted(maps.Keys(a.accounts))
+	slices.Reverse(names)
+	entries := []map[string]string{}
+	for _, name := range names {
+		entries = append(entries, map[string]string{"name": name})
+	}
+	writeData(w, entries, "")
+}
+
+// directories serves GET /config/acme/directories: the directories built
+// into PBS, in its order.
+func (a *fakeACME) directories(w http.ResponseWriter, _ *http.Request) {
+	writeData(w, []map[string]string{
+		{"name": "Let's Encrypt V2", "url": pbsclient.DefaultACMEDirectory},
+		{"name": "Let's Encrypt V2 Staging", "url": pbsclient.ACMEStagingDirectory},
+	}, "")
+}
+
+// challengeSchemas serves GET /config/acme/challenge-schema from
+// challengeSchema.
+func (a *fakeACME) challengeSchemas(w http.ResponseWriter, _ *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	writeFakeResponse(w, http.StatusOK, `{"data":`+a.challengeSchema+`}`)
+}
+
+// fakeChallengeSchema is a subset of what PBS 4.2 answers for
+// /config/acme/challenge-schema: an entry per API of the schema file, by id,
+// with the name PBS takes from the API's schema, or the id when it has none,
+// and the API's schema as the file has it. Most APIs have an empty schema,
+// as 1984hosting; Cloudflare's has a description and fields without
+// optional; Hetzner Cloud's has optional fields with defaults, one of them
+// an integer; AWS's fields have display names.
+const fakeChallengeSchema = `[
+	{"id": "1984hosting", "name": "1984hosting", "type": "dns", "schema": {}},
+	{"id": "aws", "name": "Amazon Route53 (AWS)", "type": "dns", "schema": {
+		"name": "Amazon Route53 (AWS)",
+		"fields": {
+			"AWS_ACCESS_KEY_ID": {"description": "The AWS access-key ID", "name": "ACCESS_KEY_ID", "type": "string"},
+			"AWS_SECRET_ACCESS_KEY": {"description": "The AWS access-key secret", "name": "SECRET_ACCESS_KEY", "type": "string"}
+		}
+	}},
+	{"id": "cf", "name": "Cloudflare Managed DNS", "type": "dns", "schema": {
+		"name": "Cloudflare Managed DNS",
+		"description": "Either provide global account key and email, or CF API token and Account ID.",
+		"fields": {
+			"CF_Account_ID": {"description": "The Cloudflare Account ID", "type": "string"},
+			"CF_Email": {"description": "The Cloudflare Account EMail-Address", "type": "string"},
+			"CF_Key": {"description": "The Cloudflare Global API Key", "type": "string"},
+			"CF_Token": {"description": "The new Cloudflare API Token", "type": "string"},
+			"CF_Zone_ID": {"description": "The Cloudflare Zone ID", "type": "string"}
+		}
+	}},
+	{"id": "hetznercloud", "name": "Hetzner Cloud", "type": "dns", "schema": {
+		"name": "Hetzner Cloud",
+		"fields": {
+			"HETZNER_API": {"default": "https://api.hetzner.cloud/v1", "description": "The Hetzner Cloud API endpoint", "optional": 1, "type": "string"},
+			"HETZNER_TTL": {"default": 120, "description": "TTL of the TXT records, in seconds", "optional": 1, "type": "integer"}
+		}
+	}}
+]`
 
 func (a *fakeACME) pluginDigestLocked() string { return fakeDigest("acme/plugins.cfg", a.pluginGen) }
 

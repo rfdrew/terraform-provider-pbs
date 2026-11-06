@@ -2,7 +2,6 @@ package pbsclient
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -333,9 +332,7 @@ func DirectoryCheckFailureOf(err error) DirectoryCheckFailure {
 
 // IsRealmOfOtherType reports whether PBS answered that the realm exists, but
 // with another type than the call is for: an LDAP realm read as an OpenID
-// one, say.
+// one, say. It is IsOfOtherType, for realms.
 func IsRealmOfOtherType(err error) bool {
-	var apiErr *Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
-		strings.HasPrefix(apiErr.Message, "got unexpected type ")
+	return IsOfOtherType(err)
 }

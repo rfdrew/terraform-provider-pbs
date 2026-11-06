@@ -15,17 +15,20 @@ datastores — removable ones and those on S3 object storage too, with their
 S3 endpoints (`pbs_s3_endpoint`) —
 with their namespaces and their prune and verify jobs (`pbs_datastore`,
 `pbs_namespace`, `pbs_prune_job`, `pbs_verify_job`), traffic control
-rules (`pbs_traffic_control_rule`) and
+rules (`pbs_traffic_control_rule`),
 notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
-`pbs_notification_matcher`) and a Let's Encrypt certificate for the web
+`pbs_notification_matcher`), InfluxDB metric servers
+(`pbs_metric_server_influxdb_http`, `pbs_metric_server_influxdb_udp`), a
+Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
-`pbs_node_certificate`), or one of your own, and the node's settings, DNS,
+`pbs_node_certificate`) or one of your own, and the node's settings, DNS,
 time zone and subscription (`pbs_node_config`, `pbs_dns`, `pbs_timezone`,
 `pbs_subscription`) can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
 the realms, the datastores, their namespaces, usage and garbage
-collection, the notification targets and matcher fields, the node's
-status, certificate, network interfaces, disks, pending updates, services,
+collection, the notification targets and matcher fields, the metric
+servers, the ACME directories, DNS APIs and accounts, the node's status,
+certificate, network interfaces, disks, pending updates, services,
 subscription and time, besides `pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
 `pbs_sync_job`) copy backups between servers, encrypted with keys PBS keeps

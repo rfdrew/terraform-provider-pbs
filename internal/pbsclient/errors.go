@@ -134,6 +134,18 @@ func IsAlreadyExists(err error) bool {
 		strings.HasSuffix(strings.TrimSuffix(strings.ToLower(apiErr.Message), "."), " already exists")
 }
 
+// IsOfOtherType reports whether PBS answered that an object of that name
+// exists, but with another type than the call is for: 400 "got unexpected
+// type 'ldap' for openid 'x'". PBS keeps objects of several types in one
+// file and namespace — realms in domains.cfg, metric servers in
+// metricserver.cfg — and answers so when a GET or PUT of one type names an
+// object of another.
+func IsOfOtherType(err error) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.HasPrefix(apiErr.Message, "got unexpected type ")
+}
+
 // IsEndpointMissing reports whether the API path does not exist on this
 // server — a route a release does not have, or a method the route does not
 // accept: 404 "Path '/api2/json/...' not found.".

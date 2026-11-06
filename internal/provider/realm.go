@@ -25,7 +25,7 @@ import (
 //   - A realm of another type answers GET and PUT with "got unexpected type",
 //     but DELETE removes a realm of any type: Delete reads the realm first,
 //     and deletes it with the digest of that read, only while it still has
-//     the resource's type.
+//     the resource's type (see typed_section.go).
 
 // Privileges the realm resources need, for error messages.
 const (
@@ -48,6 +48,11 @@ var (
 	ldapRealmKind   = realmKind{typ: pbsclient.RealmTypeLDAP, name: "LDAP"}
 	adRealmKind     = realmKind{typ: pbsclient.RealmTypeAD, name: "Active Directory"}
 )
+
+// section is the kind as one of the types sharing domains.cfg.
+func (k realmKind) section() sectionKind {
+	return sectionKind{object: "realm", typ: k.typ, name: k.name, file: pbsclient.ConfigDomains}
+}
 
 // realmValidators check the name of a realm a resource creates: not one of
 // the built-in realms, which PBS refuses as existing, so that the plan says
@@ -87,18 +92,7 @@ func addRealmExistsError(diags *diag.Diagnostics, kind realmKind, name string, e
 // readRealmFailed handles a failed read of the realm in Read: a realm that is
 // gone, or that has another type now, leaves state.
 func readRealmFailed(ctx context.Context, resp *resource.ReadResponse, client *pbsclient.Client, kind realmKind, name string, err error) {
-	switch {
-	case pbsclient.IsNotFound(err):
-		resp.State.RemoveResource(ctx)
-	case pbsclient.IsRealmOfOtherType(err):
-		resp.Diagnostics.AddWarning("PBS realm is no "+kind.name+" realm",
-			fmt.Sprintf("PBS has a realm %q, but not of type %s: it was replaced outside Terraform. It is "+
-				"removed from state, and Terraform leaves it alone; creating the %s realm again fails while "+
-				"it exists. %s", name, kind.typ, kind.name, err))
-		resp.State.RemoveResource(ctx)
-	default:
-		resp.Diagnostics.AddError("Unable to read PBS "+kind.name+" realm", apiErrorDetail(client, realmReadPrivilege, err))
-	}
+	readSectionFailed(ctx, resp, client, kind.section(), name, realmReadPrivilege, err)
 }
 
 // deleteRealm deletes the realm; one already gone is not an error. PBS's
@@ -106,22 +100,8 @@ func readRealmFailed(ctx context.Context, resp *resource.ReadResponse, client *p
 // deleted only while it still has the resource's type — with the digest of
 // that read, so that nothing replaces it in between.
 func deleteRealm(ctx context.Context, client *pbsclient.Client, kind realmKind, name string, diags *diag.Diagnostics) {
-	err := client.WithConfigLock(pbsclient.ConfigDomains, func() error {
-		return client.RetryOnDigestConflict(ctx, func() error {
-			digest, err := client.RealmDigest(ctx, kind.typ, name)
-			if err != nil {
-				return err
-			}
-			return client.DeleteRealm(ctx, kind.typ, name, digest)
-		})
-	})
-	switch {
-	case err == nil || pbsclient.IsNotFound(err):
-	case pbsclient.IsRealmOfOtherType(err):
-		diags.AddWarning("PBS realm is no "+kind.name+" realm",
-			fmt.Sprintf("PBS has a realm %q, but not of type %s: it was replaced outside Terraform, so it was not "+
-				"deleted. %s", name, kind.typ, err))
-	default:
-		diags.AddError("Unable to delete PBS "+kind.name+" realm", apiErrorDetail(client, realmModifyPrivilege, err))
-	}
+	deleteSection(ctx, client, kind.section(), name, realmModifyPrivilege,
+		func() (string, error) { return client.RealmDigest(ctx, kind.typ, name) },
+		func(digest string) error { return client.DeleteRealm(ctx, kind.typ, name, digest) },
+		diags)
 }
