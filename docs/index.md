@@ -64,11 +64,13 @@ never returns.
   the web interface and API: the account at the CA (`pbs_acme_account`),
   a DNS challenge plugin such as Cloudflare's (`pbs_acme_plugin`), the
   node's domains (`pbs_node_acme`) and the certificate itself
-  (`pbs_node_certificate`), which PBS renews on its own; `pbs_acme_tos`
-  reads a CA's terms of service, `pbs_acme_directories` the directories PBS
-  knows, `pbs_acme_challenge_schema` the DNS APIs plugins can use and their
-  settings, and `pbs_acme_accounts` the accounts. CAs that require External
-  Account Binding are not supported yet.
+  (`pbs_node_certificate`), which PBS renews on its own — or a certificate
+  of your own CA, uploaded by the same resource; `pbs_acme_tos` reads a
+  CA's terms of service, `pbs_acme_directories` the directories PBS knows,
+  `pbs_acme_challenge_schema` the DNS APIs plugins can use and their
+  settings, `pbs_acme_accounts` the accounts, and `pbs_node_certificates`
+  the certificate the node serves. CAs that require External Account
+  Binding are not supported yet.
 * **Replication** — other PBS servers as remotes (`pbs_remote`), and sync
   jobs that pull backups from them, push backups to them or copy them
   between two datastores of one server (`pbs_sync_job`), with the keys
@@ -90,6 +92,14 @@ never returns.
   enabled (`pbs_apt_repository`), such as the enterprise repository PBS
   installs; `pbs_apt_repositories` lists the entries and the standard
   repositories. PBS cannot remove an entry, only disable it.
+* **Node** — the node's settings, such as its HTTP proxy, the sender of its
+  mail, the consent banner of its login page and its notes
+  (`pbs_node_config`), its DNS settings (`pbs_dns`), its time zone
+  (`pbs_timezone`) and its subscription key (`pbs_subscription`); to read
+  them and more, `pbs_node_status`, `pbs_network_interfaces`,
+  `pbs_disks`, `pbs_apt_updates`, the packages it can upgrade,
+  `pbs_services`, `pbs_subscription` and `pbs_time`. Network interfaces
+  themselves are not managed yet.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.

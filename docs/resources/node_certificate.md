@@ -3,24 +3,24 @@
 page_title: "pbs_node_certificate Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Manages the certificate a Proxmox Backup Server node serves its web interface and API with, on port 8007 (proxy.pem). With source = "acme", creating the resource has PBS order a certificate from the CA of the node's ACME account, for the node's ACME domains — both set with pbs_node_acme — and install it.
-  Renewal. PBS renews the certificate on its own, with the node's ACME settings, in its daily update: once two thirds of the certificate's lifetime have passed (from PBS 4.1.9; before that, 30 days before it expires). A refresh reads the renewed certificate into the computed attributes without planning anything. To order a new certificate now — after changing the node's domains, say — change triggers.
-  The fingerprint changes with every new certificate: when it is ordered, renewed, and when the resource is destroyed, which has PBS go back to a new self-signed certificate. Whatever pins the old one fails then: the provider itself with tls_cert_fingerprint, Proxmox VE's PBS storage (fingerprint of proxmox_storage_pbs), other PBS syncing from this one. With a certificate from a public CA, trust it by the CA instead: remove tls_cert_fingerprint from the provider, with endpoint naming one of the certificate's domains, and the fingerprint from the PBS storage.
+  Manages the certificate a Proxmox Backup Server node serves its web interface and API with, on port 8007 (proxy.pem). With source = "acme", creating the resource has PBS order a certificate from the CA of the node's ACME account, for the node's ACME domains — both set with pbs_node_acme — and install it. With source = "custom", it uploads a certificate chain and its key, from your own CA, say, or the tls provider. PBS loads either at once, without restarting its proxy; connections open before keep the old one.
+  Renewal. PBS renews the certificate on its own in its daily update, while the node has ACME domains: once two thirds of the certificate's lifetime have passed (from PBS 4.1.9; before that, 30 days before it expires). A refresh reads the renewed certificate into the computed attributes without planning anything. To order a new certificate now — after changing the node's domains, say — change triggers. PBS cannot tell an uploaded certificate from an ordered one, so it renews a custom certificate the same way, with an ACME one, on a node with ACME domains: keep pbs_node_acme away from a node with a custom certificate. A custom certificate the node no longer serves shows as a change of certificates, and the next apply uploads it again.
+  The fingerprint changes with every new certificate: when it is ordered, uploaded, renewed, and when the resource is destroyed, which has PBS go back to a new self-signed certificate. Whatever pins the old one fails then: the provider itself with tls_cert_fingerprint, Proxmox VE's PBS storage (fingerprint of proxmox_storage_pbs), other PBS syncing from this one. With a certificate from a public CA, trust it by the CA instead: remove tls_cert_fingerprint from the provider, with endpoint naming one of the certificate's domains, and the fingerprint from the PBS storage. A custom certificate's fingerprint is known when planning once certificates is, and the PBS storage can follow it in the same apply in any case.
   While it changes the certificate, the provider keeps a connection open that it trusted before the change, reads the new certificate over it, and trusts the new certificate for the rest of the run, so that the run goes on whatever the provider's TLS settings; it warns when they need changing before the next run. The guide Set up PBS for a Proxmox VE cluster shows the whole switch.
-  Managing the certificate needs Sys.Modify on /system/certificates, and checking the node's ACME settings before an order Sys.Audit on /system.
+  Managing the certificate needs Sys.Modify on /system/certificates, and checking the node's ACME settings Sys.Audit on /system.
 ---
 
 # pbs_node_certificate (Resource)
 
-Manages the certificate a Proxmox Backup Server node serves its web interface and API with, on port 8007 (`proxy.pem`). With `source = "acme"`, creating the resource has PBS order a certificate from the CA of the node's ACME account, for the node's ACME domains — both set with `pbs_node_acme` — and install it.
+Manages the certificate a Proxmox Backup Server node serves its web interface and API with, on port 8007 (`proxy.pem`). With `source = "acme"`, creating the resource has PBS order a certificate from the CA of the node's ACME account, for the node's ACME domains — both set with `pbs_node_acme` — and install it. With `source = "custom"`, it uploads a certificate chain and its key, from your own CA, say, or the `tls` provider. PBS loads either at once, without restarting its proxy; connections open before keep the old one.
 
-**Renewal.** PBS renews the certificate on its own, with the node's ACME settings, in its daily update: once two thirds of the certificate's lifetime have passed (from PBS 4.1.9; before that, 30 days before it expires). A refresh reads the renewed certificate into the computed attributes without planning anything. To order a new certificate now — after changing the node's domains, say — change `triggers`.
+**Renewal.** PBS renews the certificate on its own in its daily update, while the node has ACME domains: once two thirds of the certificate's lifetime have passed (from PBS 4.1.9; before that, 30 days before it expires). A refresh reads the renewed certificate into the computed attributes without planning anything. To order a new certificate now — after changing the node's domains, say — change `triggers`. PBS cannot tell an uploaded certificate from an ordered one, so it renews a custom certificate the same way, with an ACME one, on a node with ACME domains: keep `pbs_node_acme` away from a node with a custom certificate. A custom certificate the node no longer serves shows as a change of `certificates`, and the next apply uploads it again.
 
-**The fingerprint changes** with every new certificate: when it is ordered, renewed, and when the resource is destroyed, which has PBS go back to a new self-signed certificate. Whatever pins the old one fails then: the provider itself with `tls_cert_fingerprint`, Proxmox VE's PBS storage (`fingerprint` of `proxmox_storage_pbs`), other PBS syncing from this one. With a certificate from a public CA, trust it by the CA instead: remove `tls_cert_fingerprint` from the provider, with `endpoint` naming one of the certificate's domains, and the fingerprint from the PBS storage.
+**The fingerprint changes** with every new certificate: when it is ordered, uploaded, renewed, and when the resource is destroyed, which has PBS go back to a new self-signed certificate. Whatever pins the old one fails then: the provider itself with `tls_cert_fingerprint`, Proxmox VE's PBS storage (`fingerprint` of `proxmox_storage_pbs`), other PBS syncing from this one. With a certificate from a public CA, trust it by the CA instead: remove `tls_cert_fingerprint` from the provider, with `endpoint` naming one of the certificate's domains, and the fingerprint from the PBS storage. A custom certificate's `fingerprint` is known when planning once `certificates` is, and the PBS storage can follow it in the same apply in any case.
 
 While it changes the certificate, the provider keeps a connection open that it trusted before the change, reads the new certificate over it, and trusts the new certificate for the rest of the run, so that the run goes on whatever the provider's TLS settings; it warns when they need changing before the next run. The guide *Set up PBS for a Proxmox VE cluster* shows the whole switch.
 
-Managing the certificate needs `Sys.Modify on /system/certificates`, and checking the node's ACME settings before an order `Sys.Audit on /system`.
+Managing the certificate needs `Sys.Modify on /system/certificates`, and checking the node's ACME settings `Sys.Audit on /system`.
 
 ## Example Usage
 
@@ -50,6 +50,17 @@ check "pbs_certificate_is_renewed" {
     error_message = "The PBS certificate expires on ${pbs_node_certificate.this.not_after}; check the renewal task in PBS."
   }
 }
+
+# Or, instead of ACME — without pbs_node_acme on the node, whose domains
+# would have PBS renew it with ACME —, a certificate of your own CA, here
+# from the tls provider, which PBS serves as it is. The Proxmox VE storage
+# can pin its fingerprint in the same apply.
+resource "pbs_node_certificate" "custom" {
+  source         = "custom"
+  certificates   = "${tls_locally_signed_cert.pbs.cert_pem}${tls_self_signed_cert.ca.cert_pem}"
+  key_wo         = tls_private_key.pbs.private_key_pem
+  key_wo_version = 1 # increment to upload the key again
+}
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -57,16 +68,21 @@ check "pbs_certificate_is_renewed" {
 
 ### Required
 
-- `source` (String) Where the certificate comes from: `acme`, ordered from the CA of the node's ACME account. Changing it replaces the resource, except after an import, which leaves it unset.
+- `source` (String) Where the certificate comes from: `acme`, ordered from the CA of the node's ACME account, or `custom`, uploaded from `certificates` and `key_wo`. Changing it installs a certificate from the new source in place of the current one. After an import, which leaves it unset, the first apply records it without ordering, and uploads only a certificate the node does not serve.
 
 ### Optional
 
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `certificates` (String) With `source = "custom"`, which requires it: the certificate chain, PEM-encoded — the node's certificate first, then its intermediate CAs, with nothing else between them. PBS stores it re-encoded; the same certificates in another layout are no change. Changing it uploads the new chain.
+- `key_wo` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Private key of the certificate, PEM-encoded and unencrypted — PKCS #8, or a PKCS #1 RSA or SEC 1 EC key —, with `source = "custom"`, which requires it and `key_wo_version`. The provider checks before uploading that it is the key of the first certificate of `certificates`: PBS does not, and with a key that is not, its proxy keeps the old certificate and fails to start the next time. Write-only: Terraform passes it to PBS without storing it in the plan or state, and PBS never returns it. It is sent with every upload of the chain: when the resource is created, when `certificates` or `source` changes, when the node no longer serves the certificate, and when `key_wo_version` changes. Requires Terraform or OpenTofu 1.11 or later.
+- `key_wo_version` (Number) Version of `key_wo`, which Terraform stores in its place. Changing it uploads the chain again with `key_wo`, even an unchanged one — but on the first apply after an import, which uploads only a chain the node does not serve. Requires `key_wo`.
 - `node` (String) Node whose certificate to manage: `localhost`, which every PBS answers to, or the node's host name. Defaults to the provider's `node`. PBS is a single node, so both name the same settings: manage them with one resource only. Changing it replaces the resource.
-- `triggers` (Map of String) Arbitrary values that, when any of them changes, have PBS order a new certificate in place of the current one, without going back to a self-signed one in between. Refer to the node's ACME settings, such as `{ domains = join(",", sort(pbs_node_acme.this.domains[*].domain)) }`, to order a new certificate whenever they change. Mind the CA's rate limits. After an import, the first apply records them without ordering.
+- `triggers` (Map of String) With `source = "acme"`: arbitrary values that, when any of them changes, have PBS order a new certificate in place of the current one, without going back to a self-signed one in between. Refer to the node's ACME settings, such as `{ domains = join(",", sort(pbs_node_acme.this.domains[*].domain)) }`, to order a new certificate whenever they change. Mind the CA's rate limits. After an import, the first apply records them without ordering.
 
 ### Read-Only
 
-- `fingerprint` (String) SHA-256 fingerprint of the certificate, as PBS shows it: 32 lower-case hexadecimal pairs separated by colons. It changes with every renewal.
+- `fingerprint` (String) SHA-256 fingerprint of the certificate, as PBS shows it: 32 lower-case hexadecimal pairs separated by colons. It changes with every new certificate; for a custom one, it is known when planning once `certificates` is.
 - `id` (String) Same value as `node`, present because Terraform requires an `id`.
 - `issuer` (String) Issuer of the certificate.
 - `not_after` (String) End of the certificate's validity, in RFC 3339 format (UTC).

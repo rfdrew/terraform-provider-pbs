@@ -102,7 +102,7 @@ func TestNodeCertificateResourceLifecycle(t *testing.T) {
 
 	// A self-signed certificate means the ACME one is gone.
 	read := h.read(t, inst)
-	requireProtocolWarningContaining(t, read.Diagnostics, "serves a self-signed certificate")
+	requireProtocolWarningContaining(t, read.Diagnostics, "serves its own self-signed certificate")
 	if !h.decodeResource(t, "pbs_node_certificate", read.NewState).IsNull() {
 		t.Fatal("refresh kept a certificate that is gone")
 	}
@@ -215,7 +215,7 @@ func TestNodeCertificateResourceImport(t *testing.T) {
 	other := h.importResource(t, "pbs_node_certificate", "pbs_1", nil)
 	requireProtocolErrorContaining(t, other.Diagnostics, "by the node's name")
 	requireProtocolErrorContaining(t, h.validateResource(t, "pbs_node_certificate", h.resourceValue(t, "pbs_node_certificate",
-		map[string]any{"source": "custom"})), "acme")
+		map[string]any{"source": "letsencrypt"})), "acme")
 }
 
 func TestNodeCertificateResourceReadErrors(t *testing.T) {

@@ -523,6 +523,10 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewSyncEncryptionKeyResource,
 		NewInfluxDBHTTPResource,
 		NewInfluxDBUDPResource,
+		NewNodeConfigResource,
+		NewDNSResource,
+		NewTimezoneResource,
+		NewSubscriptionResource,
 	}
 }
 
@@ -566,6 +570,14 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewACMEDirectoriesDataSource,
 		NewACMEChallengeSchemaDataSource,
 		NewACMEAccountsDataSource,
+		NewSubscriptionDataSource,
+		NewTimeDataSource,
+		NewNodeStatusDataSource,
+		NewNodeCertificatesDataSource,
+		NewNetworkInterfacesDataSource,
+		NewDisksDataSource,
+		NewAPTUpdatesDataSource,
+		NewServicesDataSource,
 	}
 }
 

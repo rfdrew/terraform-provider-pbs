@@ -13,8 +13,9 @@ import (
 )
 
 // Some PBS properties take one value in several spellings and store another
-// than they were given: a rate limit of "10MiB" reads back as "10 MiB", and a
-// certificate fingerprint may be written in upper case or without colons.
+// than they were given: a rate limit of "10MiB" reads back as "10 MiB", a
+// certificate fingerprint may be written in upper case or without colons,
+// and a certificate chain comes back re-encoded.
 // Attributes for them are strings of a custom type with semantic equality:
 // when what PBS reports stands for the same value as the configuration, the
 // framework keeps the configuration's spelling in state — after a create or
@@ -54,6 +55,33 @@ func (fingerprintSemantics) equal(a, b string) bool {
 }
 func (fingerprintSemantics) typeName() string { return "fingerprintType" }
 
+// certificateChainSemantics compares PEM certificate chains by the
+// certificates they hold, in order, whatever their line breaks and text
+// between them: PBS writes a chain back re-encoded.
+type certificateChainSemantics struct{}
+
+func (certificateChainSemantics) equal(a, b string) bool {
+	if a == b {
+		return true
+	}
+	x, errA := pbsclient.ParseCertificatesPEM(a)
+	y, errB := pbsclient.ParseCertificatesPEM(b)
+	if errA != nil || errB != nil || len(x) != len(y) {
+		return false
+	}
+	for i := range x {
+		if !x[i].Equal(y[i]) {
+			return false
+		}
+	}
+	return true
+}
+func (certificateChainSemantics) typeName() string { return "certificateChainType" }
+
+// sameCertificateChain reports whether two PEM texts hold the same
+// certificates, in the same order.
+func sameCertificateChain(a, b string) bool { return certificateChainSemantics{}.equal(a, b) }
+
 // semanticStringType is a string attribute type whose values compare as S
 // says.
 type semanticStringType[S stringSemantics] struct {
@@ -65,12 +93,14 @@ type semanticStringValue[S stringSemantics] struct {
 	basetypes.StringValue
 }
 
-// The two kinds the provider uses.
+// The kinds the provider uses.
 type (
-	byteSizeType     = semanticStringType[byteSizeSemantics]
-	byteSizeValue    = semanticStringValue[byteSizeSemantics]
-	fingerprintType  = semanticStringType[fingerprintSemantics]
-	fingerprintValue = semanticStringValue[fingerprintSemantics]
+	byteSizeType          = semanticStringType[byteSizeSemantics]
+	byteSizeValue         = semanticStringValue[byteSizeSemantics]
+	fingerprintType       = semanticStringType[fingerprintSemantics]
+	fingerprintValue      = semanticStringValue[fingerprintSemantics]
+	certificateChainType  = semanticStringType[certificateChainSemantics]
+	certificateChainValue = semanticStringValue[certificateChainSemantics]
 )
 
 var (
@@ -78,6 +108,8 @@ var (
 	_ basetypes.StringValuableWithSemanticEquals = byteSizeValue{}
 	_ basetypes.StringTypable                    = fingerprintType{}
 	_ basetypes.StringValuableWithSemanticEquals = fingerprintValue{}
+	_ basetypes.StringTypable                    = certificateChainType{}
+	_ basetypes.StringValuableWithSemanticEquals = certificateChainValue{}
 )
 
 func (t semanticStringType[S]) Equal(o attr.Type) bool {

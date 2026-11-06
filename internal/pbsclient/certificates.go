@@ -2,9 +2,17 @@ package pbsclient
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -25,6 +33,13 @@ import (
 //   - DELETE /nodes/{node}/certificates/custom deletes proxy.pem, generates
 //     a new self-signed certificate — with a new key, so a new fingerprint
 //     — and has the proxy load it, before it answers; there is no task.
+//   - POST /nodes/{node}/certificates/custom writes certificates, the chain
+//     re-encoded, and key — the current key when there is none — and has
+//     the proxy load them, before it answers. It checks only that they
+//     parse: a key that is not the certificate's leaves the proxy on the old
+//     certificate, unable to start again, and text without a certificate is
+//     written as an empty proxy.pem. restart and force are accepted and
+//     ignored.
 //   - The proxy loads a new certificate by a command on its control socket,
 //     without restarting: it keeps listening, and connections already open
 //     keep the certificate they started with. Only new connections get the
@@ -61,6 +76,18 @@ type CertificateInfo struct {
 // SelfSigned reports whether the certificate names itself as its issuer, as
 // the one PBS generates does.
 func (i CertificateInfo) SelfSigned() bool { return i.Issuer == i.Subject }
+
+// generatedSubjectPrefix starts the subject of the certificate PBS
+// generates for itself: "O = Proxmox Backup Server, OU = <UUID>, CN =
+// <host>", as GET certificates/info writes names (src/config/mod.rs).
+const generatedSubjectPrefix = "O = Proxmox Backup Server, OU = "
+
+// Generated reports whether the certificate is one PBS generated for itself,
+// self-signed, at installation or after its custom certificate was deleted —
+// rather than any self-signed certificate someone uploaded.
+func (i CertificateInfo) Generated() bool {
+	return i.SelfSigned() && strings.HasPrefix(i.Subject, generatedSubjectPrefix)
+}
 
 // Certificates reads the certificates of the client's node. It needs
 // Sys.Modify on /system/certificates.
@@ -113,6 +140,195 @@ func (c *Client) OrderACMECertificate(ctx context.Context, node string) error {
 func (c *Client) DeleteCustomCertificate(ctx context.Context, node string) error {
 	_, err := c.Delete(ctx, Path("nodes", node, "certificates", "custom"), nil, nil)
 	return err
+}
+
+// UploadCustomCertificate installs a certificate chain, leaf first, and its
+// private key, both PEM-encoded, as a node's certificate. Run it through
+// ChangeCertificate, after CheckCustomCertificate: PBS checks neither that
+// there is a certificate nor that the key is the certificate's, and writes
+// both files before its proxy fails to load them. The key is kept out of any
+// error.
+func (c *Client) UploadCustomCertificate(ctx context.Context, node, certificates, key string) error {
+	_, err := c.Post(ctx, Path("nodes", node, "certificates", "custom"),
+		url.Values{"certificates": {certificates}, "key": {key}}, nil)
+	return redactAPIError(err, key, strings.TrimSpace(key))
+}
+
+// ErrNoTLSTransport means the client has no TLS transport of its own to look
+// at the server's certificate with, as in tests.
+var ErrNoTLSTransport = errors.New("the client has no TLS transport of its own")
+
+// errLookedAt ends the handshake of PresentedFingerprint.
+var errLookedAt = errors.New("certificate looked at")
+
+// PresentedFingerprint opens a new connection to the endpoint and returns
+// the normalised SHA-256 fingerprint of the certificate the server presents
+// to it — what PBS's proxy serves now, which GET certificates/info, reading
+// the file, may not be. It ends the handshake once it has seen the
+// certificate, so nothing is sent over a connection it has not verified.
+func (c *Client) PresentedFingerprint(ctx context.Context) (string, error) {
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		return "", ErrNoTLSTransport
+	}
+	probe := transport.Clone()
+	probe.DisableKeepAlives = true
+	config := &tls.Config{}
+	if probe.TLSClientConfig != nil {
+		config = probe.TLSClientConfig.Clone()
+	}
+	var presented string
+	config.InsecureSkipVerify = true //nolint:gosec // nothing is sent: the handshake ends below.
+	config.VerifyPeerCertificate = nil
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) > 0 {
+			presented = CertificateFingerprint(state.PeerCertificates[0])
+		}
+		return errLookedAt
+	}
+	probe.TLSClientConfig = config
+	defer probe.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := (&http.Client{Transport: probe, Timeout: c.httpClient.Timeout}).Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if presented == "" {
+		return "", fmt.Errorf("looking at the certificate the server presents: %w", err)
+	}
+	return presented, nil
+}
+
+// ParseCertificatesPEM parses the certificates in PEM text, in order,
+// skipping other blocks; it fails without any.
+func ParseCertificatesPEM(certPEM string) ([]*x509.Certificate, error) {
+	return parseCertificatesPEM(certPEM)
+}
+
+// CheckCustomCertificate checks a certificate chain and private key before
+// they are uploaded. The key must be the first certificate's, and the keys
+// of the chain strong enough for OpenSSL, which PBS does not check: it
+// writes both, and its proxy keeps the old certificate and fails to start
+// the next time. The chain must also hold certificates only, at least one —
+// PBS drops other blocks —, and the key be PEM and unencrypted — PBS fails
+// to read it otherwise —, so that such mistakes fail early. It returns the
+// first certificate's fingerprint, normalised. Its errors never show the
+// key.
+func CheckCustomCertificate(certificates, key string) (string, error) {
+	certs, err := CheckCertificateChain(certificates)
+	if err != nil {
+		return "", err
+	}
+	private, err := parsePrivateKeyPEM(key)
+	if err != nil {
+		return "", err
+	}
+	public, ok := private.Public().(interface{ Equal(crypto.PublicKey) bool })
+	if !ok || !public.Equal(certs[0].PublicKey) {
+		return "", errors.New("the private key is not the key of the first certificate of the chain, which PBS " +
+			"serves: the chain must start with the server's own certificate, followed by its intermediates")
+	}
+	return CertificateFingerprint(certs[0]), nil
+}
+
+// CheckCertificateChain parses a PEM certificate chain as PBS would, refusing
+// blocks other than certificates, which PBS would drop.
+func CheckCertificateChain(certificates string) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+	rest := []byte(certificates)
+	for i := 1; ; i++ {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("PEM block %d is a %s, not a CERTIFICATE: the chain holds certificates only", i, block.Type)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing certificate %d of the chain: %w", i, err)
+		}
+		if err := checkKeyStrength(cert); err != nil {
+			return nil, fmt.Errorf("certificate %d of the chain, %s, %w", i, cert.Subject, err)
+		}
+		certs = append(certs, cert)
+	}
+	if len(certs) == 0 {
+		return nil, errors.New("the chain holds no PEM-encoded certificate (-----BEGIN CERTIFICATE-----)")
+	}
+	return certs, nil
+}
+
+// checkKeyStrength refuses a certificate whose key OpenSSL refuses at its
+// default security level, 2, which PBS's proxy keeps: RSA keys under 2048
+// bits, EC keys under 224. PBS writes such a certificate all the same,
+// and its proxy keeps the old one and does not start again.
+func checkKeyStrength(cert *x509.Certificate) error {
+	var kind string
+	var bits, least int
+	switch key := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		kind, bits, least = "RSA", key.N.BitLen(), 2048
+	case *ecdsa.PublicKey:
+		kind, bits, least = "EC", key.Curve.Params().BitSize, 224
+	default:
+		return nil
+	}
+	if bits < least {
+		return fmt.Errorf("has a %d-bit %s key: PBS's OpenSSL refuses %s keys under %d bits, and its proxy would "+
+			"keep the old certificate and not start again", bits, kind, kind, least)
+	}
+	return nil
+}
+
+// parsePrivateKeyPEM parses a PEM private key in any form PBS's OpenSSL
+// reads without a passphrase: PKCS #8, PKCS #1 RSA or SEC 1 EC.
+func parsePrivateKeyPEM(key string) (crypto.Signer, error) {
+	// Like OpenSSL, look past other blocks, such as the EC PARAMETERS that
+	// `openssl ecparam -genkey` writes before the key.
+	var block *pem.Block
+	var others []string
+	for rest := []byte(key); ; {
+		block, rest = pem.Decode(rest)
+		if block == nil || strings.HasSuffix(block.Type, "PRIVATE KEY") {
+			break
+		}
+		others = append(others, block.Type)
+	}
+	switch {
+	case block == nil && len(others) > 0:
+		return nil, fmt.Errorf("the PEM text holds no private key, only %s", strings.Join(others, ", "))
+	case block == nil:
+		return nil, errors.New("the private key is not PEM-encoded (-----BEGIN PRIVATE KEY-----)")
+	}
+	if block.Type == "ENCRYPTED PRIVATE KEY" || block.Headers["Proc-Type"] != "" {
+		return nil, errors.New("the private key is encrypted: PBS takes it without a passphrase")
+	}
+	var parsed any
+	var err error
+	switch block.Type {
+	case "PRIVATE KEY":
+		parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	case "RSA PRIVATE KEY":
+		parsed, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "EC PRIVATE KEY":
+		parsed, err = x509.ParseECPrivateKey(block.Bytes)
+	default:
+		return nil, fmt.Errorf("the PEM block of the private key is a %s, not a PRIVATE KEY", block.Type)
+	}
+	if err != nil {
+		// The parser's error may quote the key's bytes.
+		return nil, fmt.Errorf("the %s does not parse", block.Type)
+	}
+	signer, ok := parsed.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("the private key is of an unexpected kind, %T", parsed)
+	}
+	return signer, nil
 }
 
 // --- changing the certificate under the client ------------------------------
