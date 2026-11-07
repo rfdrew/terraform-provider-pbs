@@ -86,8 +86,8 @@ func (d *networkInterfacesDataSource) Schema(_ context.Context, _ datasource.Sch
 			"Interfaces panel of its web interface shows them: the interfaces of `/etc/network/interfaces`, with " +
 			"whether each is up, and the physical NICs the file does not name, which PBS lists as type `eth`, " +
 			"method `manual`, without autostart — in a Docker container without the file, typically just the " +
-			"container's `eth0`. PBS leaves out the loopback interface, `lo`. The provider only reads the " +
-			"interfaces; it does not manage them.\n\n" +
+			"container's `eth0`. PBS leaves out the loopback interface, `lo`. To manage an interface, use " +
+			"`pbs_network_interface`, and `pbs_network_apply` to apply the changes.\n\n" +
 			"Needs `" + networkReadPrivilege + "`.\n\n" +
 			"~> **Pending changes.** While `/etc/network/interfaces.new` holds changes made through the API or " +
 			"the web interface and not applied yet, PBS lists that pending configuration, not the one the node " +

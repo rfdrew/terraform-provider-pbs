@@ -527,6 +527,8 @@ func (p *pbsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewDNSResource,
 		NewTimezoneResource,
 		NewSubscriptionResource,
+		NewNetworkInterfaceResource,
+		NewNetworkApplyResource,
 	}
 }
 

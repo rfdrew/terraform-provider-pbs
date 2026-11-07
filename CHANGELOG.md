@@ -57,6 +57,35 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the state of PBS's services), `pbs_subscription` (the subscription as
   PBS last checked it) and `pbs_time` (the node's time, time zone and
   offset).
+- `pbs_network_interface` resource: a Linux bridge, bond or VLAN interface
+  of a node, which it creates, or a physical interface, which it takes over
+  — addresses, gateways and methods for IPv4 and IPv6, autostart, MTU,
+  comments, bridge ports and VLAN awareness, bond mode, slaves, primary and
+  transmit hash policy, a VLAN interface's tag and device; imported by
+  `<node>/<name>`. PBS writes every change to
+  `/etc/network/interfaces.new`, which the resource describes until it is
+  applied. Only root@pam, signed in with a password, may create an
+  interface — PBS refuses everyone else, API tokens included, whatever the
+  ACL —, so the plan of a create or a replacement fails for anyone else,
+  saying how to create the interface on the node and import it. A takeover
+  shows in the plan what it changes and refuses to remove addresses and
+  gateways the configuration does not give up; destroying a physical
+  interface resets it, and the plan warns when destroying an interface
+  removes addresses. PBS's API turns an IPv4
+  method other than static and manual, such as `dhcp`, into manual on any
+  change, and before 4.1.7 the IPv6 methods `dhcp` and `auto` too: a change
+  of an interface whose configuration sets `method = "dhcp"` replaces it,
+  and the plan refuses other changes that would drop such a method.
+- `pbs_network_apply` resource: applies a node's pending network changes,
+  as Apply Configuration in the web interface does (`ifreload -a`), when it
+  is created and whenever its `triggers` change — after the interfaces they
+  refer to are written. Changes pending when it is planned, made in the web
+  interface or left by an earlier run, are shown in a warning and applied.
+  It waits out a node that stops answering for a while during the reload,
+  and PBS does not roll back: the error says what happened when `ifreload`
+  fails or the node stays silent. Destroying it changes nothing. A new
+  guide, _Managing the network of a PBS node_, describes how to use the two
+  without cutting the node off.
 - `pbs_metric_server_influxdb_http` resource: an InfluxDB server PBS sends
   its metrics to over HTTP or HTTPS — the host's CPU, memory, network and
   disk usage and every datastore's usage, every 10 seconds — with its URL,

@@ -44,13 +44,26 @@
 # defaultNamingContext, as a domain controller does. Anonymous clients read
 # the root DSE and the schema, and nothing else.
 #
+# For the network interface tests, it gives the PBS container two veth pairs,
+# entfacc0/tfaccpeer0 and entfacc1/tfaccpeer1. PBS takes any NIC named en*
+# for a physical interface, so it lists entfacc0 and entfacc1 as type eth,
+# which the tests take over and bond; the peers stay outside PBS's view. It
+# then has PBS apply a change to entfacc0 and undo it, to learn whether PBS
+# can apply network changes on the stand at all. The packages stand can: it
+# is privileged, and installs ifupdown2, which PBS only recommends. The
+# image stand gets CAP_NET_ADMIN for the veth pairs, but its ifupdown2 is
+# Debian's 3.0.0, which sets an MTU by writing /sys, and Docker mounts /sys
+# read-only in a container that is not privileged: the probe fails there,
+# its change is undone, and the tests that apply changes skip.
+#
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
 # variant, the PBS version, the ACME directory, the files of PBS's own
 # certificate and key, which the certificate tests put back when they end,
 # the UUID of the file system for removable datastores, whether PBS can
-# write /etc/resolv.conf, the address at
+# write /etc/resolv.conf, the NICs for the network tests and whether PBS can
+# apply network changes, the address at
 # which the container reaches this host, where the notification tests
 # receive what PBS sends, the S3 server's address, port, region, keys,
 # certificate fingerprint, buckets and container, and the LDAP server: the
@@ -83,6 +96,17 @@
 #     stand's container gets CAP_SYS_ADMIN for that, which Docker's seccomp
 #     and AppArmor profiles then let umount use. Should the image stand fail
 #     to, the DNS tests skip.
+#   * PBS applies network changes with `ifreload -a` (ifupdown2), in the
+#     network namespace Pebble, the S3 server and slapd share. ifreload
+#     configures only interfaces with an `auto` line, and never takes lo
+#     down, so the container's eth0 — which /etc/network/interfaces names
+#     without one once PBS has written the file — and lo stay as Docker made
+#     them. The tests touch only the veth pairs and interfaces of their own.
+#     Once changes are pending, PBS compares interfaces.new with
+#     /etc/network/interfaces when listing the interfaces, which fails where
+#     the latter is missing; ifupdown2's package creates it, and the script
+#     makes sure the packages stand has it, also from an image built
+#     without ifupdown2.
 #   * PBS talks to an ACME directory over HTTPS and verifies it against the
 #     system's CAs. Pebble's image ships a certificate for its directory that
 #     expires in October 2027, so the script gives Pebble a certificate of its
@@ -160,6 +184,8 @@
 #                            Directory realm tests then skip
 #   PBS_TEST_LDAP_BASE_IMAGE base image of the LDAP server's image
 #                            (default debian:trixie-slim)
+#   PBS_TEST_NETWORK         set to 0 to make no NICs for the network interface tests and
+#                            not to try applying network changes; those tests then skip
 #
 # The script logs "timing: <phase> <seconds>s" lines on stderr, so that CI can
 # report how long the stand takes to come up.
@@ -212,6 +238,11 @@ S3_PROBE_ID="tfacc-s3-probe"
 S3_FINGERPRINT=""
 # Set to 1 once /etc/resolv.conf is a plain file in the container.
 RESOLV_CONF_WRITABLE=0
+# The network interface tests' NICs, and whether PBS applied a network
+# change on the stand.
+NETWORK="${PBS_TEST_NETWORK:-1}"
+NETWORK_NICS=""
+NETWORK_RELOAD=0
 
 # The LDAP server: its container, the address PBS connects to, the
 # directory, and where the files go — slapd's, in the LDAP container, and the
@@ -355,8 +386,9 @@ build_packages_image() {
   ctx="$(mktemp -d)"
   # The version is picked from `apt-cache madison`, which the build log shows,
   # so that the log also tells which releases the repository still serves.
-  # proxmox-backup-client comes along to write test backups, and e2fsprogs
-  # to make the file system for removable datastores.
+  # proxmox-backup-client comes along to write test backups, e2fsprogs to
+  # make the file system for removable datastores, and ifupdown2, which PBS
+  # only recommends, to apply network changes.
   cat >"$ctx/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
@@ -372,7 +404,7 @@ RUN apt-get update \\
  && v="\$(apt-cache madison proxmox-backup-server | awk -v p='${PBS_VERSION}' 'index(\$3, p) == 1 { print \$3; exit }')" \\
  && test -n "\$v" \\
  && echo "installing proxmox-backup-server=\$v" \\
- && apt-get install -y --no-install-recommends "proxmox-backup-server=\$v" proxmox-backup-client e2fsprogs \\
+ && apt-get install -y --no-install-recommends "proxmox-backup-server=\$v" proxmox-backup-client e2fsprogs ifupdown2 \\
  && apt-get clean \\
  && rm -rf /var/lib/apt/lists/*
 STOPSIGNAL SIGRTMIN+3
@@ -389,6 +421,7 @@ start_image() {
     --name "$CONTAINER" \
     --hostname pbs-acc \
     --cap-add SYS_ADMIN \
+    --cap-add NET_ADMIN \
     --tmpfs /run \
     -p "127.0.0.1:${PORT}:8007" \
     --add-host host.docker.internal:host-gateway \
@@ -545,6 +578,75 @@ setup() {
   api PUT /access/acl --data-urlencode "path=/" --data-urlencode "role=Admin" \
     --data-urlencode "auth-id=${TOKEN_ID}" >/dev/null
   timing "setup" "$t"
+}
+
+# network_reload has PBS apply the pending network changes, as the admin,
+# and waits for the task.
+network_reload() {
+  local body upid
+  body="$(api PUT /nodes/localhost/network --data '')" || return 1
+  upid="$(jq -r 'if (.data|type) == "string" then .data else empty end' <<<"$body")"
+  [[ -n "$upid" ]] && wait_task "$upid"
+}
+
+# network_probe has PBS bring entfacc0 up with an MTU of 1400, checks that
+# the container sees it, and has PBS undo that in the file. ifreload leaves
+# an interface that loses its auto line as it is, up and with its MTU, so
+# the MTU is put back by hand. On failure, setup_network puts the file back
+# as it was: PBS moves interfaces.new over it before ifreload runs.
+network_probe() {
+  api PUT /nodes/localhost/network/entfacc0 \
+    --data-urlencode autostart=1 --data-urlencode mtu=1400 >/dev/null || return 1
+  network_reload || return 1
+  if ! docker exec "$CONTAINER" ip link show entfacc0 | grep -q 'mtu 1400'; then
+    log "PBS applied the change, but entfacc0 does not have the new MTU"
+    return 1
+  fi
+  api PUT /nodes/localhost/network/entfacc0 \
+    --data-urlencode delete=autostart --data-urlencode delete=mtu >/dev/null || return 1
+  network_reload || return 1
+  docker exec "$CONTAINER" ip link set entfacc0 mtu 1500 >&2 || true
+}
+
+# setup_network makes the veth pairs of the network interface tests and
+# finds out whether PBS can apply network changes here, setting
+# NETWORK_NICS and NETWORK_RELOAD. A stand that cannot is fine: the tests
+# that need it skip.
+setup_network() {
+  local i t
+  t="$(date +%s)"
+  for i in 0 1; do
+    if ! docker exec "$CONTAINER" ip link add "entfacc$i" type veth peer name "tfaccpeer$i" >&2 ||
+      ! docker exec "$CONTAINER" ip link set "tfaccpeer$i" up >&2; then
+      log "could not make veth pairs in $CONTAINER; the network interface tests that need NICs will skip"
+      return 0
+    fi
+  done
+  NETWORK_NICS="entfacc0,entfacc1"
+  # PBS takes its network lock in /var/lock, which is /run/lock, and
+  # ifupdown2 its own in /run/network, which it creates only after taking
+  # the lock — it reports the directory missing as "Another instance of this
+  # program is already running". On a node, systemd makes /run/lock and
+  # networking.service /run/network at boot; the image stand has no systemd,
+  # and the packages stand's networking.service needs ifupdown2-pre.service,
+  # which runs udevadm, and the image has no udev.
+  docker exec "$CONTAINER" mkdir -p -m 1777 /run/lock >&2 || true
+  docker exec "$CONTAINER" mkdir -p /run/network >&2 || true
+  if ! docker exec "$CONTAINER" test -d /usr/share/ifupdown2; then
+    log "$CONTAINER has no ifupdown2; the tests that apply network changes will skip"
+    return 0
+  fi
+  docker exec "$CONTAINER" cp -p /etc/network/interfaces /root/interfaces.before-probe || true
+  if network_probe; then
+    NETWORK_RELOAD=1
+  else
+    log "PBS could not apply a network change on this stand; the tests that apply network changes will skip"
+    api DELETE /nodes/localhost/network >/dev/null || true
+    docker exec "$CONTAINER" sh -c 'cp -p /root/interfaces.before-probe /etc/network/interfaces && ip link set entfacc0 down mtu 1500' >&2 || true
+  fi
+  # Applying must not have cut anything off.
+  api GET /version >/dev/null
+  timing "network" "$t"
 }
 
 # setup_removable_device makes the file system for removable datastores in
@@ -1178,6 +1280,16 @@ print_exports() {
   else
     printf 'unset PBS_ACC_DNS_WRITABLE\n'
   fi
+  if [[ -n "$NETWORK_NICS" ]]; then
+    printf 'export PBS_ACC_NETWORK_NICS=%q\n' "$NETWORK_NICS"
+  else
+    printf 'unset PBS_ACC_NETWORK_NICS\n'
+  fi
+  if [[ "$NETWORK_RELOAD" == "1" ]]; then
+    printf 'export PBS_ACC_NETWORK_RELOAD=1\n'
+  else
+    printf 'unset PBS_ACC_NETWORK_RELOAD\n'
+  fi
   print_ldap_exports
 }
 
@@ -1207,6 +1319,11 @@ else
   start_packages
   # chpasswd needs the container, not systemd; PAM reads /etc/shadow at login.
   printf 'root:%s\n' "$ADMIN_PASS" | docker exec -i "$CONTAINER" chpasswd
+  # What ifupdown2's package writes, for an image built without it.
+  if ! docker exec "$CONTAINER" test -e /etc/network/interfaces; then
+    log "$PACKAGES_IMAGE has no /etc/network/interfaces, as an image built before ifupdown2 was added; writing one (remove the image to rebuild it)"
+    docker exec "$CONTAINER" sh -c 'mkdir -p /etc/network && printf "auto lo\niface lo inet loopback\n" >/etc/network/interfaces'
+  fi
   unmount_resolv_conf
   if [[ "$RESOLV_CONF_WRITABLE" != "1" ]]; then
     log "the packages stand needs /etc/resolv.conf writable for PBS, as the DNS tests expect"
@@ -1232,6 +1349,9 @@ if [[ "$S3" != "0" ]]; then
 fi
 if [[ "$LDAP" != "0" ]]; then
   start_ldap
+fi
+if [[ "$NETWORK" != "0" ]]; then
+  setup_network
 fi
 if [[ "$VARIANT" == "packages" && "$REMOVABLE" != "0" ]]; then
   t="$(date +%s)"

@@ -21,9 +21,11 @@ notifications by mail, Gotify and webhooks (`pbs_notification_endpoint_*`,
 (`pbs_metric_server_influxdb_http`, `pbs_metric_server_influxdb_udp`), a
 Let's Encrypt certificate for the web
 interface (`pbs_acme_account`, `pbs_acme_plugin`, `pbs_node_acme`,
-`pbs_node_certificate`) or one of your own, and the node's settings, DNS,
+`pbs_node_certificate`) or one of your own, the node's settings, DNS,
 time zone and subscription (`pbs_node_config`, `pbs_dns`, `pbs_timezone`,
-`pbs_subscription`) can be managed, with data sources to read the
+`pbs_subscription`), and its network interfaces, with the step that
+applies changes to them (`pbs_network_interface`, `pbs_network_apply`),
+can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
 the realms, the datastores, their namespaces, usage and garbage
 collection, the notification targets and matcher fields, the metric
@@ -38,8 +40,9 @@ for the other jobs. APT repositories (`pbs_apt_standard_repository`,
 from the enterprise repository to the no-subscription one. The guide
 [Set up PBS for a Proxmox VE cluster](docs/guides/pve-backup-server.md)
 puts them together, [Copy backups to an offsite PBS](docs/guides/offsite-sync.md)
-adds a second server, and [Back up to S3 object storage](docs/guides/s3-datastore.md)
-puts a datastore on S3.
+adds a second server, [Back up to S3 object storage](docs/guides/s3-datastore.md)
+puts a datastore on S3, and [Managing the network of a PBS node](docs/guides/network.md)
+changes network interfaces without cutting the node off.
 
 ## Requirements
 

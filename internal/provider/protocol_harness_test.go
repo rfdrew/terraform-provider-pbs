@@ -194,6 +194,7 @@ type harnessOptions struct {
 	certFingerprint string
 	caCertFile      string
 	transport       http.RoundTripper
+	taskTimeout     string
 }
 
 type harnessOption func(*harnessOptions)
@@ -209,6 +210,12 @@ func withPasswordSignIn() harnessOption {
 // the setting shows.
 func withCACertFile(file string) harnessOption {
 	return func(o *harnessOptions) { o.caCertFile = file }
+}
+
+// withTaskTimeout sets the provider's task_timeout, such as "1s", for tests
+// of waits that would otherwise take the default half hour.
+func withTaskTimeout(timeout string) harnessOption {
+	return func(o *harnessOptions) { o.taskTimeout = timeout }
 }
 
 // withTransport has the provider send its requests through transport, which
@@ -263,6 +270,9 @@ func newProtocolHarness(t *testing.T, fake *fakePBS, opts ...harnessOption) *pro
 	}
 	if options.caCertFile != "" {
 		providerConfig["ca_cert_file"] = options.caCertFile
+	}
+	if options.taskTimeout != "" {
+		providerConfig["task_timeout"] = options.taskTimeout
 	}
 	config := dynamicValue(t, tfValue(t, schemas.Provider.ValueType(), providerConfig))
 	resp, err := server.ConfigureProvider(ctx, &tfprotov6.ConfigureProviderRequest{TerraformVersion: "1.14.0", Config: config})

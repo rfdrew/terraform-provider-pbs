@@ -98,8 +98,12 @@ never returns.
   (`pbs_timezone`) and its subscription key (`pbs_subscription`); to read
   them and more, `pbs_node_status`, `pbs_network_interfaces`,
   `pbs_disks`, `pbs_apt_updates`, the packages it can upgrade,
-  `pbs_services`, `pbs_subscription` and `pbs_time`. Network interfaces
-  themselves are not managed yet.
+  `pbs_services`, `pbs_subscription` and `pbs_time`.
+* **Network** — the node's bridges, bonds and VLAN interfaces, and its
+  physical interfaces (`pbs_network_interface`), whose changes are pending
+  until `pbs_network_apply` applies them. Creating an interface needs
+  `root@pam`; read the guide **Managing the network of a PBS node** before
+  changing an interface the node is reached through.
 * **Read-only information** — `pbs_version`, the server's release, and
   `pbs_fingerprint`, the SHA-256 fingerprint of its certificate, which
   Proxmox VE and other PBS servers pin it by.
@@ -140,8 +144,9 @@ configuration: a datastore with prune and verify
 jobs, notifications by mail, this access, outputs with what the storage
 in Proxmox VE needs, and a certificate from Let's Encrypt. The guide
 **Copy backups to an offsite PBS** adds a second server, with a remote and
-a sync job, and the guide **Back up to S3 object storage** puts a datastore
-on an S3-compatible object store.
+a sync job, the guide **Back up to S3 object storage** puts a datastore
+on an S3-compatible object store, and the guide **Managing the network of a
+PBS node** changes network interfaces without cutting the node off.
 
 ## Authentication
 
@@ -152,8 +157,8 @@ with a **username and password**.
   entries, it needs entries for the token ID (`user@realm!name`) itself —
   for instance `Admin` on `/` for a token that manages the whole server.
 * **A few calls are closed to API tokens** — changing a user's password, and
-  creating network interfaces, which only `root@pam` may do. The resources
-  that make them say so.
+  creating network interfaces, which only `root@pam` signed in with a
+  password may do, whatever the ACL. The resources that make them say so.
 * **A user with two-factor authentication cannot sign in with a password**:
   the provider cannot complete the second factor. Use an API token instead.
 
