@@ -120,13 +120,7 @@ func (c *Client) WaitTask(ctx context.Context, upid UPID) (TaskStatus, error) {
 			return status, err
 		}
 		if status.Status == "stopped" {
-			if !status.Succeeded() {
-				return status, &TaskError{UPID: upid, ExitStatus: status.ExitStatus}
-			}
-			if status.ExitStatus != "OK" {
-				tflog.Warn(ctx, "PBS task ended with warnings", map[string]any{"upid": upid.Raw, "exitstatus": status.ExitStatus})
-			}
-			return status, nil
+			return status, c.taskEnded(ctx, upid, status)
 		}
 
 		if err := c.sleep(ctx, delay); err != nil {
@@ -134,6 +128,18 @@ func (c *Client) WaitTask(ctx context.Context, upid UPID) (TaskStatus, error) {
 		}
 		delay = min(delay*2, maxTaskPoll)
 	}
+}
+
+// taskEnded is the outcome of a stopped task: a *TaskError when it failed,
+// nil otherwise, with warnings logged.
+func (c *Client) taskEnded(ctx context.Context, upid UPID, status TaskStatus) error {
+	if !status.Succeeded() {
+		return &TaskError{UPID: upid, ExitStatus: status.ExitStatus}
+	}
+	if status.ExitStatus != "OK" {
+		tflog.Warn(ctx, "PBS task ended with warnings", map[string]any{"upid": upid.Raw, "exitstatus": status.ExitStatus})
+	}
+	return nil
 }
 
 // WaitTaskIn waits for the task in data, when data holds a UPID, and does

@@ -3,7 +3,7 @@
 page_title: "pbs_network_interfaces Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Lists the network interfaces of a Proxmox Backup Server node, as the Network Interfaces panel of its web interface shows them: the interfaces of /etc/network/interfaces, with whether each is up, and the physical NICs the file does not name, which PBS lists as type eth, method manual, without autostart — in a Docker container without the file, typically just the container's eth0. PBS leaves out the loopback interface, lo. The provider only reads the interfaces; it does not manage them.
+  Lists the network interfaces of a Proxmox Backup Server node, as the Network Interfaces panel of its web interface shows them: the interfaces of /etc/network/interfaces, with whether each is up, and the physical NICs the file does not name, which PBS lists as type eth, method manual, without autostart — in a Docker container without the file, typically just the container's eth0. PBS leaves out the loopback interface, lo. To manage an interface, use pbs_network_interface, and pbs_network_apply to apply the changes.
   Needs Sys.Audit on /system/network/interfaces.
   ~> Pending changes. While /etc/network/interfaces.new holds changes made through the API or the web interface and not applied yet, PBS lists that pending configuration, not the one the node runs; pending_changes then shows the difference.
   ~> PBS releases before 4.2.7 cannot parse the method auto: a stanza such as iface eth0 inet6 auto makes reading fail with unknown iface option auto.
@@ -11,7 +11,7 @@ description: |-
 
 # pbs_network_interfaces (Data Source)
 
-Lists the network interfaces of a Proxmox Backup Server node, as the Network Interfaces panel of its web interface shows them: the interfaces of `/etc/network/interfaces`, with whether each is up, and the physical NICs the file does not name, which PBS lists as type `eth`, method `manual`, without autostart — in a Docker container without the file, typically just the container's `eth0`. PBS leaves out the loopback interface, `lo`. The provider only reads the interfaces; it does not manage them.
+Lists the network interfaces of a Proxmox Backup Server node, as the Network Interfaces panel of its web interface shows them: the interfaces of `/etc/network/interfaces`, with whether each is up, and the physical NICs the file does not name, which PBS lists as type `eth`, method `manual`, without autostart — in a Docker container without the file, typically just the container's `eth0`. PBS leaves out the loopback interface, `lo`. To manage an interface, use `pbs_network_interface`, and `pbs_network_apply` to apply the changes.
 
 Needs `Sys.Audit on /system/network/interfaces`.
 
