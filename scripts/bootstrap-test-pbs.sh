@@ -590,10 +590,10 @@ network_reload() {
 }
 
 # network_probe has PBS bring entfacc0 up with an MTU of 1400, checks that
-# the container sees it, and has PBS undo that. The MTU, which ifupdown2
-# leaves when it takes an interface down, is put back by hand. On failure,
-# setup_network puts the file back as it was: PBS moves interfaces.new over
-# it before ifreload runs.
+# the container sees it, and has PBS undo that in the file. ifreload leaves
+# an interface that loses its auto line as it is, up and with its MTU, so
+# the MTU is put back by hand. On failure, setup_network puts the file back
+# as it was: PBS moves interfaces.new over it before ifreload runs.
 network_probe() {
   api PUT /nodes/localhost/network/entfacc0 \
     --data-urlencode autostart=1 --data-urlencode mtu=1400 >/dev/null || return 1
@@ -623,6 +623,15 @@ setup_network() {
     fi
   done
   NETWORK_NICS="entfacc0,entfacc1"
+  # PBS takes its network lock in /var/lock, which is /run/lock, and
+  # ifupdown2 its own in /run/network, which it creates only after taking
+  # the lock — it reports the directory missing as "Another instance of this
+  # program is already running". On a node, systemd makes /run/lock and
+  # networking.service /run/network at boot; the image stand has no systemd,
+  # and the packages stand's networking.service needs ifupdown2-pre.service,
+  # which runs udevadm, and the image has no udev.
+  docker exec "$CONTAINER" mkdir -p -m 1777 /run/lock >&2 || true
+  docker exec "$CONTAINER" mkdir -p /run/network >&2 || true
   if ! docker exec "$CONTAINER" test -d /usr/share/ifupdown2; then
     log "$CONTAINER has no ifupdown2; the tests that apply network changes will skip"
     return 0

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	acc "github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 
@@ -184,7 +186,16 @@ func testAccCheckLink(name string, mtu int, addresses ...string) acc.TestCheckFu
 		}
 		out, err := exec.Command("docker", "exec", container, "ip", "-j", "addr", "show", "dev", name).Output()
 		if mtu == 0 {
-			if err == nil && strings.TrimSpace(string(out)) != "[]" {
+			// ip says `Device "<name>" does not exist.`; any other failure
+			// proves nothing.
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && strings.Contains(string(exit.Stderr), "does not exist") {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("ip addr show dev %s: %v", name, err)
+			}
+			if strings.TrimSpace(string(out)) != "[]" {
 				return fmt.Errorf("%s still exists: %s", name, out)
 			}
 			return nil
@@ -508,7 +519,7 @@ func TestAccNetworkInterfaceMethods(t *testing.T) {
 	root := testAccRootProvider(t)
 	client := testAccNetworkAdmin(t)
 	testAccRestoreNetwork(t, client, []string{"tfaccbr6", "tfaccbr7"}, nil)
-	config := func(ipv6, dhcpComments string) string {
+	config := func(ipv6, dhcp string) string {
 		return root + fmt.Sprintf(`
 resource "pbs_network_interface" "v6" {
   name = "tfaccbr6"
@@ -517,19 +528,20 @@ resource "pbs_network_interface" "v6" {
 }
 
 resource "pbs_network_interface" "dhcp" {
-  name     = "tfaccbr7"
-  type     = "bridge"
-  method   = "dhcp"
+  name = "tfaccbr7"
+  type = "bridge"
   %s
 }
-`, ipv6, dhcpComments)
+`, ipv6, dhcp)
 	}
-	static := config(`cidr6    = "2001:db8:5106::2/64"
+	staticV6 := `cidr6    = "2001:db8:5106::2/64"
   gateway6  = "2001:db8:5106::1"
-  comments6 = "IPv6 side\nof tfaccbr6"`, "")
+  comments6 = "IPv6 side\nof tfaccbr6"`
+	dhcp := `method   = "dhcp"
+  comments = "changed"`
 	steps := []acc.TestStep{
 		{
-			Config: static,
+			Config: config(staticV6, `method = "dhcp"`),
 			Check: acc.ComposeAggregateTestCheckFunc(
 				acc.TestCheckResourceAttr("pbs_network_interface.v6", "method", "manual"),
 				acc.TestCheckResourceAttr("pbs_network_interface.v6", "method6", "static"),
@@ -539,12 +551,24 @@ resource "pbs_network_interface" "dhcp" {
 			),
 		},
 		{
-			// PBS would turn DHCP into manual.
-			Config:      config(`cidr6 = "2001:db8:5106::2/64"`, `comments = "changed"`),
+			// PBS would turn DHCP into manual, so a change of an interface
+			// whose configuration sets the method replaces it.
+			Config: config(staticV6, dhcp),
+			ConfigPlanChecks: acc.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+				plancheck.ExpectResourceAction("pbs_network_interface.dhcp", plancheck.ResourceActionDestroyBeforeCreate),
+			}},
+			Check: acc.ComposeAggregateTestCheckFunc(
+				acc.TestCheckResourceAttr("pbs_network_interface.dhcp", "method", "dhcp"),
+				acc.TestCheckResourceAttr("pbs_network_interface.dhcp", "comments", "changed"),
+			),
+		},
+		{
+			// With the method left out, the plan refuses the change.
+			Config:      config(staticV6, `comments = "changed again"`),
 			ExpectError: regexp.MustCompile(`PBS cannot change an interface with this IPv4 method`),
 		},
 	}
-	imported := static
+	imported := config(staticV6, dhcp)
 	method6 := ""
 	switch {
 	case testAccPBSAtLeast(4, 2, 7):
@@ -554,7 +578,7 @@ resource "pbs_network_interface" "dhcp" {
 	}
 	if method6 != "" {
 		steps = append(steps, acc.TestStep{
-			Config: config(fmt.Sprintf("method6 = %q", method6), ""),
+			Config: config(fmt.Sprintf("method6 = %q", method6), dhcp),
 			Check: acc.ComposeAggregateTestCheckFunc(
 				acc.TestCheckResourceAttr("pbs_network_interface.v6", "method6", method6),
 				acc.TestCheckNoResourceAttr("pbs_network_interface.v6", "cidr6"),
@@ -562,10 +586,10 @@ resource "pbs_network_interface" "dhcp" {
 			),
 		}, acc.TestStep{
 			// Keeping the method through a change needs PBS 4.1.7.
-			Config: config(fmt.Sprintf("method6 = %q\n  mtu = 1400", method6), ""),
+			Config: config(fmt.Sprintf("method6 = %q\n  mtu = 1400", method6), dhcp),
 			Check:  acc.TestCheckResourceAttr("pbs_network_interface.v6", "method6", method6),
 		})
-		imported = config(fmt.Sprintf("method6 = %q\n  mtu = 1400", method6), "")
+		imported = config(fmt.Sprintf("method6 = %q\n  mtu = 1400", method6), dhcp)
 	}
 	steps = append(steps, acc.TestStep{
 		Config:            imported,
