@@ -78,6 +78,7 @@ func TestRunJobErrors(t *testing.T) {
 		{status: 400, body: `Unable to acquire lock "/var/lib/proxmox-backup/jobstates/syncjob-pull-offsite.lck" - Interrupted system call (os error 4)`, alreadyRunning: true},
 		{status: 400, body: "datastore 'store1' is not mounted", datastoreClosed: true},
 		{status: 400, body: "datastore 'store1' is unavailable: offline maintenance mode: disk swap", datastoreClosed: true},
+		{status: 400, body: "datastore 'store1' is unavailable: read-only maintenance mode: ", datastoreClosed: true},
 		// The router's own check is a 403, which IsForbidden reports.
 		{status: 403, body: "permission check failed"},
 		{status: 400, body: "can't sync to same datastore"},

@@ -166,10 +166,14 @@ func fakeCertificate(t *testing.T, cn string, dnsNames []string, parent *x509.Ce
 		t.Fatal(err)
 	}
 	template := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: cn},
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		// Fixed dates, which tests assert, valid long enough that tests
+		// checking a chain against the clock, as CertificateProblems does,
+		// keep passing: 90 days, as Let's Encrypt's, would have run out on
+		// 2026-12-20.
 		NotBefore:             time.Unix(1790000000, 0),
-		NotAfter:              time.Unix(1790000000+90*24*3600, 0),
+		NotAfter:              time.Unix(1790000000+10*365*24*3600, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

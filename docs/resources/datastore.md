@@ -72,7 +72,7 @@ resource "pbs_datastore" "offsite" {
   path           = "pbs/offsite"
   backing_device = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
-  # Free the space of pruned backups before the disk leaves (PBS 4.2+).
+  # Free the space of pruned backups before the disk leaves (PBS 4.1.8+).
   gc_on_unmount = true
 }
 
@@ -118,7 +118,7 @@ resource "pbs_datastore" "s3store1" {
 - `comment` (String) Free-form comment, up to 128 characters on one line.
 - `counter_reset_schedule` (String) For a datastore on S3, when PBS resets the request and traffic counters of `notification_thresholds`, as a PBS calendar event such as `monthly`; never when left out. Needs PBS 4.2 or newer.
 - `destroy_data` (Boolean) Whether destroying the datastore also deletes its directory and every backup in it — for a datastore on S3, every object under its name in the bucket, and the local cache. Defaults to `false`, which leaves them, ready for `reuse_datastore`; PBS then removes only the bucket's mark that the datastore is in use. Destroying a datastore on S3 needs its bucket reachable. Destroying uses the value in state: set it in an apply before the one that destroys or replaces the datastore.
-- `gc_on_unmount` (Boolean) Whether PBS runs garbage collection on a removable datastore before it unmounts it, so that the space pruned backups held is freed while the disk is connected. Defaults to `false`. Needs `backing_device` and PBS 4.2 or newer.
+- `gc_on_unmount` (Boolean) Whether PBS runs garbage collection on a removable datastore before it unmounts it, so that the space pruned backups held is freed while the disk is connected. Defaults to `false`. Needs `backing_device` and PBS 4.1.8 or newer.
 - `gc_schedule` (String) When garbage collection runs, as a PBS calendar event such as `daily` or `sat 05:00`. Garbage collection frees the chunks no backup uses any more, after a prune: without a schedule, it runs only when started by hand, and pruned backups keep their space.
 - `keep_job_configs` (Boolean) Whether destroying the datastore keeps its prune, verify, sync and tape backup jobs and its ACL entries, which PBS deletes otherwise. Defaults to `false`. Like `destroy_data`, it is read from state.
 - `maintenance_mode` (Attributes) Puts the datastore into maintenance. PBS also sets maintenance modes of its own while it unmounts, refreshes or deletes a datastore; the provider does not report those as a change. (see [below for nested schema](#nestedatt--maintenance_mode))
@@ -127,7 +127,7 @@ resource "pbs_datastore" "s3store1" {
 - `notify` (Attributes) With `notification_mode = "legacy-sendmail"`, which mails to send. The notification system ignores it: matchers decide there. (see [below for nested schema](#nestedatt--notify))
 - `notify_user` (String) With `notification_mode = "legacy-sendmail"`, the user whose email address gets the mails, such as `admin@pbs`; `root@pam` when left out.
 - `overwrite_in_use` (Boolean) For a datastore on S3, whether to take it over although its bucket marks it in use by a PBS, as after the loss of the PBS that had it: two PBS must never use one datastore. Requires `reuse_datastore`. Only used when the datastore is created; defaults to `false`.
-- `reuse_datastore` (Boolean) Whether to create the datastore on a directory that already holds a chunk store, as one left behind by a datastore destroyed without `destroy_data`, keeping its backups. For a datastore on S3, whether to take over the backups its bucket holds under its name: PBS then empties the local cache — deleting whatever chunk store `path` holds, also one a datastore in a directory left there, with its backups — and reads the backups' indexes from the bucket, which takes a while, in maintenance mode `s3-refresh`, and holds up the other datastores of the server meanwhile. Only used when the datastore is created; defaults to `false`.
+- `reuse_datastore` (Boolean) Whether to create the datastore on a directory that already holds a chunk store, as one left behind by a datastore destroyed without `destroy_data`, keeping its backups. For a datastore on S3, whether to take over the backups its bucket holds under its name: PBS then empties the local cache — deleting whatever chunk store `path` holds, also one a datastore in a directory left there, with its backups — and reads the backups' indexes from the bucket, which takes a while, in maintenance mode `s3-refresh`, and holds up the other datastores of the server meanwhile: from PBS 4.0.20, operations that open any datastore and changes to the settings of any wait for it and fail after 10 seconds, and the provider tries its own such calls again for about five minutes. Only used when the datastore is created; defaults to `false`.
 - `tuning` (Attributes) Tuning options, for special cases; each one left out has PBS's default. The provider writes them as a whole: options set outside Terraform that are not described here are dropped when `tuning` changes. (see [below for nested schema](#nestedatt--tuning))
 - `verify_new` (Boolean) Whether PBS verifies every new backup right after it is written. Defaults to `false`.
 

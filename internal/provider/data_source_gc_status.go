@@ -63,8 +63,9 @@ func (d *gcStatusDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			"shows them under Datastore → Prune & GC. Garbage collection frees the chunks no backup uses any more; " +
 			"`gc_schedule` of `pbs_datastore` sets when it runs.\n\n" +
 			"Needs `Datastore.Audit` or `Datastore.Backup` on the datastore. PBS reads the status from the " +
-			"datastore itself, so a removable datastore must be mounted and one in maintenance mode `offline` " +
-			"cannot be read: that is an error, which a `check` block turns into a warning.",
+			"datastore itself, so a removable datastore must be mounted, and the maintenance mode `offline` forbids " +
+			"reading it, as does PBS while it unmounts the datastore, refreshes it from S3 or deletes it: that is an " +
+			"error, which a `check` block turns into a warning.",
 		Attributes: map[string]schema.Attribute{
 			"store": schema.StringAttribute{
 				Required:            true,
@@ -141,7 +142,8 @@ func (d *gcStatusDataSource) Read(ctx context.Context, req datasource.ReadReques
 	case pbsclient.IsDatastoreUnavailable(err):
 		resp.Diagnostics.AddError("Unable to read PBS garbage collection status",
 			fmt.Sprintf("PBS reads the garbage collection status from datastore %q itself, and cannot open it: a "+
-				"removable datastore must be mounted, and one in maintenance mode \"offline\" cannot be read. %s", store, err))
+				"removable datastore must be mounted, and the maintenance mode \"offline\" forbids reading it, as "+
+				"does PBS while it unmounts the datastore, refreshes it from S3 or deletes it. %s", store, err))
 		return
 	case err != nil:
 		resp.Diagnostics.AddError("Unable to read PBS garbage collection status", apiErrorDetail(client, privilege, err))

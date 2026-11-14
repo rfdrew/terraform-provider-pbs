@@ -43,8 +43,8 @@ func (d *namespacesDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists the namespaces of a Proxmox Backup Server datastore, or those below one of " +
 			"them. PBS lists only the namespaces the provider has `Datastore.Audit`, `Datastore.Modify` or " +
-			"`Datastore.Backup` on. A removable datastore must be mounted, and a datastore in maintenance mode " +
-			"`offline` cannot be read.",
+			"`Datastore.Backup` on. A removable datastore must be mounted, and the maintenance mode `offline` " +
+			"forbids reading a datastore, as does PBS while it unmounts it, refreshes it from S3 or deletes it.",
 		Attributes: map[string]schema.Attribute{
 			"store": schema.StringAttribute{
 				Required:            true,
@@ -133,8 +133,9 @@ func addNamespacesError(diags *diag.Diagnostics, client *pbsclient.Client, store
 		diags.AddAttributeError(path.Root("store"), "PBS datastore not found", fmt.Sprintf("PBS has no datastore %q. %s", store, err))
 	case pbsclient.IsDatastoreUnavailable(err):
 		diags.AddError("Unable to list PBS namespaces",
-			fmt.Sprintf("PBS cannot open datastore %q: a removable datastore must be mounted, and one in "+
-				"maintenance mode \"offline\" cannot be read. %s", store, err))
+			fmt.Sprintf("PBS cannot open datastore %q: a removable datastore must be mounted, and the maintenance "+
+				"mode \"offline\" forbids reading it, as does PBS while it unmounts the datastore, refreshes it from "+
+				"S3 or deletes it. %s", store, err))
 	default:
 		diags.AddError("Unable to list PBS namespaces", apiErrorDetail(client, privilege, err))
 	}

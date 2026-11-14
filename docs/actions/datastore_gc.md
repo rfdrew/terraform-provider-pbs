@@ -4,7 +4,7 @@ page_title: "pbs_datastore_gc Action - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Runs garbage collection on a Proxmox Backup Server datastore now, as Start Garbage Collection under Datastore → Prune & GC does, instead of waiting for its gc_schedule. Garbage collection frees the chunks that no backup uses any more, such as after a prune.
-  Needs Datastore.Modify on the datastore. A removable datastore must be mounted, and the maintenance modes read-only and offline forbid it. PBS runs one garbage collection per datastore at a time: while one runs, the action fails. The run counts as the datastore's last garbage collection, as a scheduled one does, and sends the same notification.
+  Needs Datastore.Modify on the datastore. A removable datastore must be mounted, and the maintenance modes read-only and offline forbid it, as does PBS while it unmounts the datastore, refreshes it from S3 or deletes it. PBS runs one garbage collection per datastore at a time: while one runs, the action fails. The run counts as the datastore's last garbage collection, as a scheduled one does, and sends the same notification.
   ~> PBS only removes chunks that no backup has used for longer than the datastore's tuning.gc_atime_cutoff (24 hours and 5 minutes by default), so a garbage collection right after a prune mostly reports the space as pending removal; a later one frees it.
   When it waits, the action reports what PBS removed and what is pending removal, from the figures pbs_gc_status also reads.
   -> Actions need Terraform 1.14.1 or later. OpenTofu and older Terraform releases do not support them, and Terraform 1.13 ignores action blocks without a word; set required_version = ">= 1.14.1" in configurations that use them. An action runs when a resource's lifecycle action_trigger fires, or with terraform apply -invoke=action.<type>.<name>, which also refreshes the state of the resources the action's configuration refers to, and of those they depend on, but of no other resource.
@@ -14,7 +14,7 @@ description: |-
 
 Runs garbage collection on a Proxmox Backup Server datastore now, as **Start Garbage Collection** under Datastore → Prune & GC does, instead of waiting for its `gc_schedule`. Garbage collection frees the chunks that no backup uses any more, such as after a prune.
 
-Needs `Datastore.Modify` on the datastore. A removable datastore must be mounted, and the maintenance modes `read-only` and `offline` forbid it. PBS runs one garbage collection per datastore at a time: while one runs, the action fails. The run counts as the datastore's last garbage collection, as a scheduled one does, and sends the same notification.
+Needs `Datastore.Modify` on the datastore. A removable datastore must be mounted, and the maintenance modes `read-only` and `offline` forbid it, as does PBS while it unmounts the datastore, refreshes it from S3 or deletes it. PBS runs one garbage collection per datastore at a time: while one runs, the action fails. The run counts as the datastore's last garbage collection, as a scheduled one does, and sends the same notification.
 
 ~> PBS only removes chunks that no backup has used for longer than the datastore's `tuning.gc_atime_cutoff` (24 hours and 5 minutes by default), so a garbage collection right after a prune mostly reports the space as pending removal; a later one frees it.
 

@@ -291,7 +291,7 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				Default:  booldefault.StaticBool(false),
 				MarkdownDescription: "Whether PBS runs garbage collection on a removable datastore before it " +
 					"unmounts it, so that the space pruned backups held is freed while the disk is connected. " +
-					"Defaults to `false`. Needs `backing_device` and PBS 4.2 or newer.",
+					"Defaults to `false`. Needs `backing_device` and PBS 4.1.8 or newer.",
 			},
 			"backend": schema.SingleNestedAttribute{
 				Optional: true,
@@ -504,7 +504,9 @@ func (r *datastoreResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"name: PBS then empties the local cache — deleting whatever chunk store `path` holds, also one a " +
 					"datastore in a directory left there, with its backups — and reads the backups' indexes from the " +
 					"bucket, which takes a while, in maintenance mode `s3-refresh`, and holds up the other datastores " +
-					"of the server meanwhile. Only used when the datastore is created; defaults to `false`.",
+					"of the server meanwhile: from PBS 4.0.20, operations that open any datastore and changes to the " +
+					"settings of any wait for it and fail after 10 seconds, and the provider tries its own such calls " +
+					"again for about five minutes. Only used when the datastore is created; defaults to `false`.",
 			},
 			"overwrite_in_use": schema.BoolAttribute{
 				Optional: true,
@@ -681,9 +683,9 @@ func (r *datastoreResource) ValidateConfig(ctx context.Context, req resource.Val
 }
 
 // ModifyPlan refuses tuning options a server older than PBS 4.1 does not
-// know, and the S3 counters a server older than PBS 4.2 does not, and warns
-// that replacing the datastore deletes its jobs — and, on S3, what becomes of
-// its backups.
+// know, gc_on_unmount a server older than PBS 4.1.8 does not, and the S3
+// counters a server older than PBS 4.2 does not, and warns that replacing
+// the datastore deletes its jobs — and, on S3, what becomes of its backups.
 func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -701,7 +703,7 @@ func (r *datastoreResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	}
 	// gc_on_unmount = false, its default, is never sent.
 	if plan.GCOnUnmount.IsUnknown() || plan.GCOnUnmount.ValueBool() {
-		r.data.requireRelease(&resp.Diagnostics, path.Root("gc_on_unmount"), plan.GCOnUnmount, pbs42)
+		r.data.requireRelease(&resp.Diagnostics, path.Root("gc_on_unmount"), plan.GCOnUnmount, pbs418)
 	}
 	r.data.requireRelease(&resp.Diagnostics, path.Root("notification_thresholds"), plan.NotificationThresholds, pbs42)
 	r.data.requireRelease(&resp.Diagnostics, path.Root("counter_reset_schedule"), plan.CounterResetSchedule, pbs42)
@@ -1105,13 +1107,26 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 	}
 
 	var maintenanceErr error
-	err := client.WithConfigLock(pbsclient.ConfigDatastores, func() error {
-		if err := client.CreateDatastore(ctx, params); err != nil || maintenance == nil {
-			return err
-		}
-		maintenanceErr = client.UpdateDatastore(ctx, name, maintenance)
-		return nil
-	})
+	create := func() error {
+		return client.WithConfigLock(pbsclient.ConfigDatastores, func() error {
+			if err := client.CreateDatastore(ctx, params); err != nil || maintenance == nil {
+				return err
+			}
+			maintenanceErr = client.UpdateDatastore(ctx, name, maintenance)
+			return nil
+		})
+	}
+	var err error
+	if isS3(plan.Backend) && plan.ReuseDatastore.ValueBool() {
+		// Taking a datastore on S3 over, the create task refreshes it from
+		// the bucket, which from PBS 4.0.20 fails on PBS's lock of
+		// datastore.cfg while another refresh reads its bucket: it waits
+		// for this provider's own refreshes, as they wait for each other
+		// (pbs_datastore_s3_refresh). LockS3Refresh comes first.
+		err = client.WithConfigLock(pbsclient.LockS3Refresh, create)
+	} else {
+		err = create()
+	}
 	var taskErr *pbsclient.TaskError
 	if errors.As(err, &taskErr) || errors.Is(err, pbsclient.ErrTaskTimeout) {
 		// A task can fail after PBS saved the datastore, as when it took over
@@ -1124,7 +1139,8 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 		// the planned value — although PBS did not get it; once a refresh
 		// succeeds, PBS clears the mode, and the next apply sets it. A task
 		// that outlasts task_timeout, such as a long refresh, is the same.
-		if ds, readErr := client.GetDatastore(ctx, name); readErr == nil {
+		ds, readErr := client.GetDatastore(ctx, name)
+		if readErr == nil {
 			plan.fromDatastore(name, ds, r.mountStatus(ctx, ds, &resp.Diagnostics), &resp.Diagnostics)
 			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 			setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
@@ -1132,10 +1148,47 @@ func (r *datastoreResource) Create(ctx context.Context, req resource.CreateReque
 			if errors.Is(err, pbsclient.ErrTaskTimeout) {
 				summary, outcome = "PBS datastore created, but its task is still running", "has not finished yet"
 			}
+			lockAdvice := ""
+			if errors.As(err, &taskErr) {
+				lockAdvice = taskLockAdvice(taskErr.ExitStatus)
+			}
 			resp.Diagnostics.AddWarning(summary,
 				fmt.Sprintf("PBS's task to create datastore %q %s, but the datastore is configured, so it was "+
-					"recorded in state. %s Once the datastore works, the next apply sets the rest of its "+
-					"configuration. %s", name, outcome, datastoreTaskLeftover(ds, errors.Is(err, pbsclient.ErrTaskTimeout)), err))
+					"recorded in state.%s %s Once the datastore works, the next apply sets the rest of its "+
+					"configuration. %s", name, outcome, lockAdvice,
+					datastoreTaskLeftover(ds, errors.Is(err, pbsclient.ErrTaskTimeout)), err))
+			return
+		}
+		// A task that failed on PBS's lock of datastore.cfg failed after PBS
+		// saved the datastore: create_datastore hands the lock it took to
+		// the task, which keeps it until do_create_datastore has saved the
+		// datastore, and the task takes it again only to refresh a datastore
+		// on S3 taken over with reuse-datastore, which it saved in
+		// maintenance mode s3-refresh (src/api2/config/datastore.rs and
+		// do_s3_refresh, src/api2/admin/datastore.rs; proxmox-backup
+		// 7c86c5ad5, after 4.2.11; in 4.0.11 too, the refresh runs once
+		// do_create_datastore has returned). Such a datastore exists also
+		// when reading it back failed: it is recorded as planned, as below
+		// when WaitForDatastore fails, so that the next apply does not fail
+		// on a datastore that already exists.
+		if errors.As(err, &taskErr) && taskLockAdvice(taskErr.ExitStatus) != "" {
+			plan.ID = types.StringValue(name)
+			plan.unknownMountStatusToNull()
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			setIdentity(ctx, resp.Identity, "name", name, &resp.Diagnostics)
+			leftover := "The task log in PBS has the details."
+			if isS3(plan.Backend) && plan.ReuseDatastore.ValueBool() {
+				leftover = fmt.Sprintf("Taken over on S3, it is most likely in maintenance mode s3-refresh, which no "+
+					"backup or restore passes, until reading its backups from the bucket succeeds: once the task that "+
+					"held the lock has ended, refresh it — %s.", s3RefreshWays(name))
+			}
+			resp.Diagnostics.AddWarning("PBS datastore created, but its task failed",
+				fmt.Sprintf("PBS's task to create datastore %q failed on the lock of PBS's datastore configuration, "+
+					"which the task takes again only after PBS has saved the datastore, so it was recorded in state as "+
+					"planned; reading it back failed, and the next plan reads it again.%s %s Once the datastore "+
+					"works, the next apply sets the rest of its configuration. %s\n\nReading it back: %s", name,
+					taskLockAdvice(taskErr.ExitStatus), leftover, err,
+					apiErrorDetail(client, datastorePrivilege("Datastore.Audit", name), readErr)))
 			return
 		}
 	}
@@ -1184,8 +1237,15 @@ func datastoreTaskLeftover(ds pbsclient.Datastore, running bool) string {
 			"backups from the bucket; PBS clears it when the task ends. The task log in PBS shows the progress."
 	}
 	return fmt.Sprintf("It is in maintenance mode s3-refresh, which no backup or restore passes, until reading "+
-		"its backups from the bucket succeeds: fix the cause, then run `proxmox-backup-manager datastore "+
-		"s3-refresh %s`, or S3 Refresh in the web interface.", ds.Name)
+		"its backups from the bucket succeeds: fix the cause, then refresh it again — %s.", s3RefreshWays(ds.Name))
+}
+
+// s3RefreshWays lists the ways to refresh datastore name from its bucket,
+// for advice that ends with them.
+func s3RefreshWays(name string) string {
+	return fmt.Sprintf("with the `pbs_datastore_s3_refresh` action, with Refresh contents from S3 bucket under the "+
+		"datastore's Content → More in the web interface, or with `proxmox-backup-manager datastore s3-refresh %s` "+
+		"on the host, which PBS 4.0.20 to 4.1.1 end with a panic before refreshing anything", name)
 }
 
 // mountStatus returns the mount status of a datastore, or "" — null in state —
@@ -1209,7 +1269,9 @@ func (m *datastoreModel) unknownMountStatusToNull() {
 }
 
 // datastoreCreateErrorDetail explains why creating a datastore failed, with
-// advice for the failures of the create-datastore task.
+// advice for the failures of the create-datastore task. A task that failed
+// on PBS's lock of datastore.cfg never gets here: PBS had saved the
+// datastore, which Create records.
 func datastoreCreateErrorDetail(client *pbsclient.Client, plan datastoreModel, err error) string {
 	name, dir := plan.Name.ValueString(), plan.Path.ValueString()
 	var taskErr *pbsclient.TaskError
@@ -1433,15 +1495,7 @@ func (r *datastoreResource) Delete(ctx context.Context, req resource.DeleteReque
 					name, apiErrorDetail(client, datastorePrivilege("Datastore.Audit", name), err)))
 		}
 	case errors.As(err, &taskErr):
-		onS3 := ""
-		if isS3(state.Backend) {
-			onS3 = " A datastore on S3 is deleted only while its bucket is reachable: PBS deletes its objects, or, " +
-				"without destroy_data, its mark that the datastore is in use."
-		}
-		resp.Diagnostics.AddError("Unable to delete PBS datastore",
-			fmt.Sprintf("PBS's task to delete datastore %q failed, and PBS keeps the datastore in its \"delete\" "+
-				"maintenance mode until a deletion succeeds; destroying it again retries. A datastore in use — by "+
-				"a running backup, say — cannot be deleted.%s %s", name, onS3, err))
+		resp.Diagnostics.AddError("Unable to delete PBS datastore", datastoreDeleteTaskErrorDetail(ctx, client, state, taskErr, err))
 	case strings.Contains(err.Error(), "unless the datastore is mounted"):
 		resp.Diagnostics.AddError("Unable to delete PBS datastore",
 			fmt.Sprintf("Removable datastore %q is not mounted, and PBS deletes its data, as destroy_data = true in "+
@@ -1451,6 +1505,55 @@ func (r *datastoreResource) Delete(ctx context.Context, req resource.DeleteReque
 	default:
 		resp.Diagnostics.AddError("Unable to delete PBS datastore", apiErrorDetail(client, state.allocatePrivilege(), err))
 	}
+}
+
+// datastoreDeleteTaskErrorDetail explains a delete-datastore task that
+// failed. PBS's handler deletes the datastore's jobs and ACL entries, unless
+// keep-job-configs is set, before it starts the task, and keeps its lock of
+// datastore.cfg until it has started it (delete_datastore,
+// src/api2/config/datastore.rs; proxmox-backup 7c86c5ad5, after 4.2.11). The
+// task, DataStore::destroy (pbs-datastore datastore.rs; the same in 4.0.11),
+// takes that lock twice: first to set maintenance mode delete, before it
+// removes anything, and again at its end, to remove the datastore from
+// datastore.cfg once it has removed what destroy-data asks for. Another task
+// that holds the lock for long — an S3 refresh, a datastore's creation — can
+// make either fail, after the 10 s PBS waits for it, with the same exit
+// status (taskLockAdvice): only the datastore's maintenance mode tells which.
+// Every other failure comes after the mode was set, which PBS then keeps
+// until a deletion succeeds.
+func datastoreDeleteTaskErrorDetail(ctx context.Context, client *pbsclient.Client, state datastoreModel,
+	taskErr *pbsclient.TaskError, err error) string {
+	name := state.Name.ValueString()
+	inDelete := fmt.Sprintf("PBS's task to delete datastore %q failed, and PBS keeps the datastore in its \"delete\" "+
+		"maintenance mode until a deletion succeeds; destroying it again retries.", name)
+	lockAdvice := taskLockAdvice(taskErr.ExitStatus)
+	if lockAdvice == "" {
+		onS3 := ""
+		if isS3(state.Backend) {
+			onS3 = " A datastore on S3 is deleted only while its bucket is reachable: PBS deletes its objects, or, " +
+				"without destroy_data, its mark that the datastore is in use."
+		}
+		return fmt.Sprintf("%s A datastore in use — by a running backup, say — cannot be deleted.%s %s", inDelete, onS3, err)
+	}
+	jobs := ""
+	if !state.KeepJobConfigs.ValueBool() {
+		jobs = ", though PBS had already deleted its prune, verify, sync and tape backup jobs and its ACL entries, " +
+			"as keep_job_configs = false in state asks"
+	}
+	ds, readErr := client.GetDatastore(ctx, name)
+	switch {
+	case readErr == nil && maintenanceType(ds.MaintenanceMode) == pbsclient.MaintenanceDelete:
+		return fmt.Sprintf("%s%s %s", inDelete, lockAdvice, err)
+	case readErr == nil:
+		return fmt.Sprintf("PBS's task to delete datastore %q could not start deleting: the datastore, its data and "+
+			"its maintenance mode are as they were%s. Destroying it again retries.%s %s", name, jobs, lockAdvice, err)
+	}
+	return fmt.Sprintf("PBS's task to delete datastore %q failed, and reading the datastore afterwards failed too, so "+
+		"the provider cannot tell how far the task got: either it could not start deleting, and the datastore, its "+
+		"data and its maintenance mode are as they were%s, or it stopped at its end, as it removed the datastore from "+
+		"PBS's configuration, and PBS keeps the datastore in its \"delete\" maintenance mode until a deletion "+
+		"succeeds. Either way, destroying it again retries.%s %s\n\nReading the datastore: %s", name, jobs, lockAdvice, err,
+		apiErrorDetail(client, datastorePrivilege("Datastore.Audit", name), readErr))
 }
 
 // ImportState imports a datastore by name, given either as the import id or,

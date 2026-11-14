@@ -97,10 +97,10 @@ func NewACLListResource() list.ListResource {
 				"`terraform query`, to import them as `pbs_acl` resources: one result for each role of a user or " +
 				"API token on a path, as `pbs_acl` manages them. `path` and `auth_id` select the entries on one " +
 				"path or of one user or token.\n\n" +
-				"Needs `" + aclReadPrivilege + "`; without it, PBS shows a user only the entries of its own API " +
-				"tokens, and an API token none at all. Entries of groups, which PBS's API cannot create but " +
-				"`/etc/proxmox-backup/acl.cfg` may hold, are left out: `pbs_acl` manages those of users and tokens " +
-				"only.\n\n" + listRequirementNote,
+				"Needs `" + aclReadPrivilege + "`; without it, PBS shows a user signed in with its password only the " +
+				"entries of its own API tokens, and an API token none at all. Entries of groups, which PBS's API " +
+				"cannot create but `/etc/proxmox-backup/acl.cfg` may hold, are left out: `pbs_acl` manages those " +
+				"of users and tokens only.\n\n" + listRequirementNote,
 			Attributes: map[string]listschema.Attribute{
 				"path": listschema.StringAttribute{
 					Optional: true,
@@ -128,8 +128,9 @@ type aclListModel struct {
 // listACLEntries lists the entries with GET /access/acl: every entry, or
 // with a path those on exactly that path. PBS lists one item for each role
 // of a user, token or group on a path, with ugid_type "user" for users and
-// tokens alike and "group" for groups (src/api2/access/acl.rs,
-// extract_acl_node_data).
+// tokens alike and "group" for groups, and leaves out, without an error,
+// those a caller without Sys.Audit on /access/acl may not see
+// (src/api2/access/acl.rs, read_acl and extract_acl_node_data).
 func listACLEntries(ctx context.Context, data *providerData, config tfsdk.Config, diags *diag.Diagnostics) []listedObject {
 	var filter aclListModel
 	diags.Append(config.Get(ctx, &filter)...)
@@ -138,7 +139,9 @@ func listACLEntries(ctx context.Context, data *providerData, config tfsdk.Config
 	}
 	entries, _, err := data.client.ListACL(ctx, filter.Path.ValueString(), !filter.Path.IsNull())
 	if err != nil {
-		diags.AddError("Unable to list PBS ACL entries", apiErrorDetail(data.client, aclReadPrivilege, err))
+		// PBS lets everyone read the ACL and leaves out what a caller may not
+		// see, so a failure is not about privileges.
+		diags.AddError("Unable to list PBS ACL entries", err.Error())
 		return nil
 	}
 	var objects []listedObject

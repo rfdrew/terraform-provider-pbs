@@ -377,7 +377,7 @@ func TestCertificateCallsOnOtherNodes(t *testing.T) {
 		t.Fatalf("ProxyCertificate() = %+v, %v", cert, err)
 	}
 	fake.reply("POST /nodes/pbs1/certificates/acme/certificate", http.StatusForbidden, "permission check failed")
-	if err := c.OrderACMECertificate(ctx, "pbs1"); !IsForbidden(err) {
+	if _, err := c.OrderACMECertificate(ctx, "pbs1"); !IsForbidden(err) {
 		t.Fatalf("OrderACMECertificate() error = %v", err)
 	}
 	fake.reply("DELETE /nodes/pbs1/certificates/custom", http.StatusOK, `{"data":null}`)

@@ -4,14 +4,14 @@ page_title: "pbs_gc_status Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Reads the garbage collection status of a Proxmox Backup Server datastore: its schedule, when it runs next, how its last run ended, and that run's figures, as the web interface shows them under Datastore → Prune & GC. Garbage collection frees the chunks no backup uses any more; gc_schedule of pbs_datastore sets when it runs.
-  Needs Datastore.Audit or Datastore.Backup on the datastore. PBS reads the status from the datastore itself, so a removable datastore must be mounted and one in maintenance mode offline cannot be read: that is an error, which a check block turns into a warning.
+  Needs Datastore.Audit or Datastore.Backup on the datastore. PBS reads the status from the datastore itself, so a removable datastore must be mounted, and the maintenance mode offline forbids reading it, as does PBS while it unmounts the datastore, refreshes it from S3 or deletes it: that is an error, which a check block turns into a warning.
 ---
 
 # pbs_gc_status (Data Source)
 
 Reads the garbage collection status of a Proxmox Backup Server datastore: its schedule, when it runs next, how its last run ended, and that run's figures, as the web interface shows them under Datastore → Prune & GC. Garbage collection frees the chunks no backup uses any more; `gc_schedule` of `pbs_datastore` sets when it runs.
 
-Needs `Datastore.Audit` or `Datastore.Backup` on the datastore. PBS reads the status from the datastore itself, so a removable datastore must be mounted and one in maintenance mode `offline` cannot be read: that is an error, which a `check` block turns into a warning.
+Needs `Datastore.Audit` or `Datastore.Backup` on the datastore. PBS reads the status from the datastore itself, so a removable datastore must be mounted, and the maintenance mode `offline` forbids reading it, as does PBS while it unmounts the datastore, refreshes it from S3 or deletes it: that is an error, which a `check` block turns into a warning.
 
 ## Example Usage
 

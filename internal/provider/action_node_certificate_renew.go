@@ -35,7 +35,9 @@ func NewNodeCertificateRenewAction() action.Action {
 // The renewal changes the certificate the provider connects to, so it runs
 // through ChangeCertificate, as pbs_node_certificate orders one, and reuses
 // that resource's checks and messages, which need nothing but the
-// provider's configuration.
+// provider's configuration: of the node's ACME settings before, of the
+// cause of a failed task, and of the certificate PBS's proxy serves after
+// (checkProxyLoad).
 type nodeCertificateRenewAction struct {
 	actionBase
 }
@@ -79,7 +81,11 @@ func (a *nodeCertificateRenewAction) Schema(_ context.Context, _ action.SchemaRe
 			"Before PBS is asked, the action checks that the node has ACME domains and that its ACME account exists: " +
 			"PBS would renew nothing without domains, and fail without the account. A renewal that fails sends " +
 			"PBS's ACME error notification, as a failed renewal of the daily update does. While it waits, the " +
-			"action reports the lines the task logs; a failure ends it with the end of the task's log.\n\n" +
+			"action reports the lines the task logs; a failure names the cause the task reports, and ends with " +
+			"the end of the task's log. PBS writes a renewed certificate even when its proxy cannot load it, and " +
+			"ends the task well: the action fails when the proxy still serves the certificate it served before " +
+			"the renewal, and warns when that was not the one PBS reported then, as `pbs_node_certificate` " +
+			"explains.\n\n" +
 			"**The fingerprint changes** with the new certificate. While it renews, the provider keeps a " +
 			"connection open that it trusted before, reads the new certificate over it, and trusts it for the rest " +
 			"of the run, whatever the provider's TLS settings; it warns when they need changing before the next " +
@@ -138,7 +144,7 @@ func (a *nodeCertificateRenewAction) Invoke(ctx context.Context, req action.Invo
 	progress := newActionProgress(ctx, resp)
 
 	certificate := &nodeCertificateResource{data: a.data}
-	certificate.checkACMESettings(ctx, node, "and invoke the action once Terraform has set them: from an "+
+	account := certificate.checkACMESettings(ctx, node, "and invoke the action once Terraform has set them: from an "+
 		"action_trigger of pbs_node_acme, say, or after an apply.", &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -176,7 +182,7 @@ func (a *nodeCertificateRenewAction) Invoke(ctx context.Context, req action.Invo
 			"expiry. force = true renews it anyway.", node, validUntil, days)
 		return
 	case err != nil && !change.Changed():
-		renewalFailed(ctx, client, task, waitErr, err, &resp.Diagnostics)
+		renewalFailed(ctx, client, task, account.Directory, waitErr, err, &resp.Diagnostics)
 		return
 	case !change.Changed():
 		resp.Diagnostics.AddError("PBS installed no new certificate",
@@ -185,26 +191,26 @@ func (a *nodeCertificateRenewAction) Invoke(ctx context.Context, req action.Invo
 		return
 	}
 
-	if err == nil && change.Unconfirmed == nil {
-		leaf, normErr := pbsclient.NormaliseFingerprint(change.After.Fingerprint)
-		if normErr == nil && certificate.proxyKeptPrevious(ctx, change, leaf) {
-			resp.Diagnostics.AddError("The PBS proxy did not load the renewed certificate",
-				"PBS wrote a new certificate for node "+node+", with SHA-256 fingerprint "+change.After.Fingerprint+
-					", but its proxy still serves the previous one: it could not load the new one — its journal says "+
-					"\"error reloading certificate\". The proxy will not start again, at its next restart, reload or "+
-					"package upgrade, until it has a certificate it can load. Look for the reason in the journal "+
-					"(`journalctl -u proxmox-backup-proxy`) — a raised security level in ciphers_tls_1_2 of "+
-					"pbs_node_config (@SECLEVEL) is a common one —, then run `systemctl reload proxmox-backup-proxy` "+
-					"on the host.")
-			return
-		}
+	// The proxy checks and warns as for pbs_node_certificate's order: a
+	// proxy that kept the certificate it served before fails the action; one
+	// that serves what it served before, which PBS did not report then,
+	// gets a warning in place of the advice about the provider's TLS
+	// settings.
+	wrote := "PBS wrote a new certificate for node " + node + ", with SHA-256 fingerprint " + change.After.Fingerprint
+	proxy := certificate.checkProxyLoad(ctx, wrote, change, err, "", &resp.Diagnostics)
+	if proxy == proxyLoadFailed {
+		resp.Diagnostics.AddError("The PBS proxy did not load the renewed certificate", proxyKeptPreviousDetail(wrote))
+		return
 	}
-	// recordChange warns as pbs_node_certificate does after an order: about
-	// a certificate the provider could not confirm, a task that failed
-	// after it wrote the certificate, and the provider's TLS settings. The
-	// state it fills is the resource's, which an action has none of.
-	var discarded nodeCertificateModel
-	certificate.recordChange(node, change, err, "task", &discarded, &resp.Diagnostics)
+	if proxy != proxyLoadUnclear {
+		// recordChange warns as pbs_node_certificate does after an order:
+		// about a certificate the provider could not confirm, a task that
+		// failed after it wrote the certificate, and the provider's TLS
+		// settings. The state it fills is the resource's, which an action has
+		// none of.
+		var discarded nodeCertificateModel
+		certificate.recordChange(node, change, err, "task", &discarded, &resp.Diagnostics)
+	}
 	if err == nil && task != nil && status.ExitStatus != "OK" {
 		resp.Diagnostics.AddWarning(task.what+" ended with warnings",
 			fmt.Sprintf("PBS task %s ended with %s.%s", task.upid.Raw, status.ExitStatus, task.logTail(ctx)))
@@ -215,23 +221,31 @@ func (a *nodeCertificateRenewAction) Invoke(ctx context.Context, req action.Invo
 			validUntil = "; the new one is valid until " + time.Unix(change.After.NotAfter, 0).UTC().Format(time.DateOnly)
 		}
 		progress.say("PBS renewed the certificate of node %s%s", node, validUntil)
-		progress.say("New SHA-256 fingerprint: %s", change.After.Fingerprint)
+		if proxy != proxyLoadUnclear {
+			// The warning names it, with the advice to pin it nowhere yet.
+			progress.say("New SHA-256 fingerprint: %s", change.After.Fingerprint)
+		}
 	}
 }
 
 // renewalFailed explains why a renewal changed nothing: PBS refused it, its
 // task failed, the action stopped waiting for the task, or the certificate
 // could not be read after it. task is nil when PBS started none, and
-// waitErr is how waiting for it ended; err is the whole error.
-func renewalFailed(ctx context.Context, client *pbsclient.Client, task *actionTask, waitErr, err error, diags *diag.Diagnostics) {
+// waitErr is how waiting for it ended; err is the whole error, and
+// directory the CA's, or "". pbs_node_certificate's orderFailed does the
+// same for an order.
+func renewalFailed(ctx context.Context, client *pbsclient.Client, task *actionTask, directory string, waitErr, err error, diags *diag.Diagnostics) {
 	var taskErr *pbsclient.TaskError
 	switch {
 	case task == nil:
-		diags.AddError("Unable to renew the certificate of the PBS node", orderErrorDetail(client, err))
+		diags.AddError("Unable to renew the certificate of the PBS node", orderErrorDetail(client, directory, err))
 	case errors.As(waitErr, &taskErr):
-		// The certificate is unchanged: the CA issued none, or PBS failed
-		// before it wrote it.
-		diags.AddError(task.what+" failed", orderErrorDetail(client, err)+task.logTail(ctx))
+		// The certificate PBS reports is unchanged: the task failed before
+		// PBS wrote a new one — the CA issued none, or PBS could not write
+		// it; after "error writing certificate file", PBS had replaced the
+		// key only —, or the certificate could not be read after it.
+		// orderErrorDetail names the cause from the task's exit status.
+		diags.AddError(task.what+" failed", orderErrorDetail(client, directory, err)+task.logTail(ctx))
 	case pbsclient.IsTaskTimeout(waitErr):
 		// actionTask.reportError would offer `wait = false`, which this
 		// action does not have.

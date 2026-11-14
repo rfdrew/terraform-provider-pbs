@@ -3,6 +3,8 @@ package provider
 import (
 	"net/http"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rfdrew/terraform-provider-pbs/internal/pbsclient"
@@ -305,4 +307,75 @@ func TestNamespaceListResourceNamespaceGone(t *testing.T) {
 func TestNamespaceListResourceValidation(t *testing.T) {
 	h, _, _ := newNamespaceListHarness(t)
 	requireProtocolErrorContaining(t, listConfigDiagnostics(t, h, "pbs_namespace", map[string]any{"store": "-bad"}), "must start with")
+}
+
+// datastoreConfigLockedText is PBS's answer when a task held the lock of
+// its datastore configuration for the 10 s PBS waits for it.
+const datastoreConfigLockedText = `Unable to acquire lock "/etc/proxmox-backup/.datastore.lck" - Interrupted system call (os error 4)`
+
+// A listing PBS refuses for the lock of its datastore configuration is
+// tried again, and lists the namespaces once PBS lets it through.
+func TestNamespaceListResourceWaitsForDatastoreConfigLock(t *testing.T) {
+	h, fake, namespaces := newNamespaceListHarness(t)
+	namespaces.addNamespace("store1", "dept1")
+	namespaces.addNamespace("store2", "a")
+	var requests atomic.Int32
+	fake.handle(fakeNamespaceRoute("GET", "store2"), func(w http.ResponseWriter, req *http.Request) {
+		if requests.Add(1) == 1 {
+			writeError(w, "%s", datastoreConfigLockedText)
+			return
+		}
+		namespaces.serve(w, req)
+	})
+	var listed []string
+	for _, result := range h.listResources(t, "pbs_namespace", listRequest{}) {
+		for _, d := range result.diagnostics {
+			t.Errorf("unexpected diagnostic %q: %s", d.Summary, d.Detail)
+		}
+		listed = append(listed, result.displayName)
+	}
+	if want := []string{"store1:dept1", "store2:a"}; !slices.Equal(listed, want) || requests.Load() != 2 {
+		t.Fatalf("listed %q after %d requests for store2, want %q after 2", listed, requests.Load(), want)
+	}
+}
+
+// When the provider gave up waiting for the lock of PBS's datastore
+// configuration, its errors and the warning of a namespace list say which
+// tasks hold it and what to do.
+func TestDatastoreConfigLockAdvice(t *testing.T) {
+	client, err := pbsclient.New(pbsclient.Options{Endpoint: "https://pbs.test:8007", APIToken: fakeAPIToken, Transport: newFakePBS()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := &pbsclient.Error{Method: http.MethodPost, Path: "/admin/datastore/store1/namespace", StatusCode: http.StatusBadRequest,
+		Message: datastoreConfigLockedText}
+	for name, detail := range map[string]string{
+		"apiErrorDetail":            apiErrorDetail(client, "Datastore.Modify", locked),
+		"namespaceListFailedDetail": namespaceListFailedDetail("store1", locked),
+	} {
+		for _, want := range []string{
+			pbsclient.DatastoreConfigLockFile, "tried the call again for about five minutes", "4.0.20, an S3 refresh holds it",
+			"task s3-refresh", "`reuse_datastore`", "create-datastore task holds it while it creates the chunk store",
+			"Administration → Tasks", datastoreConfigLockedText,
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("%s: %q lacks %q", name, detail, want)
+			}
+		}
+	}
+	if detail := namespaceListFailedDetail("store1", locked); !strings.HasPrefix(detail, `PBS failed to list the namespaces of datastore "store1"`) {
+		t.Errorf("namespaceListFailedDetail: %q", detail)
+	}
+
+	// A job's lock is no lock of the datastore configuration.
+	jobLocked := &pbsclient.Error{StatusCode: http.StatusBadRequest,
+		Message: `Unable to acquire lock "/var/lib/proxmox-backup/jobstates/syncjob-pull-offsite.lck" - Interrupted system call (os error 4)`}
+	if detail := apiErrorDetail(client, "", jobLocked); detail != jobLocked.Error() {
+		t.Errorf("apiErrorDetail of a job's lock: %q", detail)
+	}
+	other := &pbsclient.Error{StatusCode: http.StatusBadRequest, Message: "unable to open chunk store"}
+	if detail := namespaceListFailedDetail("store1", other); !strings.Contains(detail, "Check that PBS can open the datastore") ||
+		strings.Contains(detail, "S3 refresh") {
+		t.Errorf("namespaceListFailedDetail of another error: %q", detail)
+	}
 }

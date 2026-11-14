@@ -3,7 +3,7 @@ page_title: "pbs_acl List Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Lists the entries of a Proxmox Backup Server's access control list, for terraform query, to import them as pbs_acl resources: one result for each role of a user or API token on a path, as pbs_acl manages them. path and auth_id select the entries on one path or of one user or token.
-  Needs Sys.Audit on /access/acl; without it, PBS shows a user only the entries of its own API tokens, and an API token none at all. Entries of groups, which PBS's API cannot create but /etc/proxmox-backup/acl.cfg may hold, are left out: pbs_acl manages those of users and tokens only.
+  Needs Sys.Audit on /access/acl; without it, PBS shows a user signed in with its password only the entries of its own API tokens, and an API token none at all. Entries of groups, which PBS's API cannot create but /etc/proxmox-backup/acl.cfg may hold, are left out: pbs_acl manages those of users and tokens only.
   -> List resources need Terraform 1.14 or later; OpenTofu and older Terraform releases do not support them. Declare list blocks in a .tfquery.hcl file and run terraform query; terraform query -generate-config-out=generated.tf writes an import block and a resource block for each object, which terraform plan then imports. Sensitive attributes are null in the results and in the generated configuration, and write-only ones are never read, so they are null there too; the text above says which of them, if any, the generated configuration needs filled in.
 ---
 
@@ -11,7 +11,7 @@ description: |-
 
 Lists the entries of a Proxmox Backup Server's access control list, for `terraform query`, to import them as `pbs_acl` resources: one result for each role of a user or API token on a path, as `pbs_acl` manages them. `path` and `auth_id` select the entries on one path or of one user or token.
 
-Needs `Sys.Audit on /access/acl`; without it, PBS shows a user only the entries of its own API tokens, and an API token none at all. Entries of groups, which PBS's API cannot create but `/etc/proxmox-backup/acl.cfg` may hold, are left out: `pbs_acl` manages those of users and tokens only.
+Needs `Sys.Audit on /access/acl`; without it, PBS shows a user signed in with its password only the entries of its own API tokens, and an API token none at all. Entries of groups, which PBS's API cannot create but `/etc/proxmox-backup/acl.cfg` may hold, are left out: `pbs_acl` manages those of users and tokens only.
 
 -> List resources need Terraform 1.14 or later; OpenTofu and older Terraform releases do not support them. Declare `list` blocks in a `.tfquery.hcl` file and run `terraform query`; `terraform query -generate-config-out=generated.tf` writes an `import` block and a `resource` block for each object, which `terraform plan` then imports. Sensitive attributes are null in the results and in the generated configuration, and write-only ones are never read, so they are null there too; the text above says which of them, if any, the generated configuration needs filled in.
 

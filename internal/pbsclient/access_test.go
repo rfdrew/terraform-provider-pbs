@@ -442,9 +442,15 @@ func TestListACLFiltersByPath(t *testing.T) {
 		exact     bool
 		wantQuery url.Values
 	}{
-		// exact means nothing without a path, so it is not sent.
+		// Without a path, PBS would take exact for the root's entries only;
+		// the client asks for that with path "/", so it never sends exact
+		// alone.
 		{"", false, url.Values{}},
 		{"", true, url.Values{}},
+		// "/" without exact is every entry, which PBS answers with "//" in
+		// the paths below the root when the path is sent.
+		{"/", false, url.Values{}},
+		{"/", true, url.Values{"path": {"/"}, "exact": {"1"}}},
 		{"/datastore/ds1", false, url.Values{"path": {"/datastore/ds1"}}},
 		{"/datastore/ds1", true, url.Values{"path": {"/datastore/ds1"}, "exact": {"1"}}},
 	}
@@ -461,10 +467,47 @@ func TestListACLFiltersByPath(t *testing.T) {
 		}
 	}
 
-	fake.reply("GET /access/acl", http.StatusForbidden, "permission check failed")
+	// PBS lets every caller read the ACL, hiding what it may not see rather
+	// than refusing, so a failure is not about privileges.
+	fake.reply("GET /access/acl", http.StatusBadRequest,
+		`unable to read acl config "/etc/proxmox-backup/acl.cfg" - Permission denied (os error 13)`)
 	entries, digest, err := c.ListACL(ctx, "", false)
-	if !IsForbidden(err) || entries != nil || digest != "" {
+	if err == nil || IsForbidden(err) || entries != nil || digest != "" {
 		t.Fatalf("ListACL() = %+v, %q, %v, want only the error", entries, digest, err)
+	}
+}
+
+// PBS refuses an ACL change by a caller without Permissions.Modify on
+// /access/acl with a 400 whose text starts with "Unprivileged "
+// (src/api2/access/acl.rs, update_acl); nothing else is that.
+func TestIsUnprivilegedACLChange(t *testing.T) {
+	for _, message := range []string{
+		"Unprivileged API tokens can't set ACL items.",
+		"Unprivileged users can only set ACL items for API tokens.",
+		"Unprivileged users can only set ACL items for their own API tokens.",
+		"Unprivileged user needs to provide auth_id to update ACL item.",
+		"Unprivileged users are not allowed to create group ACL item.",
+	} {
+		if !IsUnprivilegedACLChange(apiError(http.StatusBadRequest, message)) {
+			t.Errorf("IsUnprivilegedACLChange(400 %q) = false, want true", message)
+		}
+	}
+	for _, tc := range []struct {
+		status  int
+		message string
+	}{
+		{http.StatusForbidden, "Unprivileged API tokens can't set ACL items."},
+		{http.StatusForbidden, "permission check failed"},
+		{http.StatusBadRequest, "no such user."},
+		{http.StatusBadRequest, "detected modified configuration - file changed by other user? Try again."},
+		{http.StatusBadRequest, "not allowed to list permissions of alice@pbs"},
+	} {
+		if IsUnprivilegedACLChange(apiError(tc.status, tc.message)) {
+			t.Errorf("IsUnprivilegedACLChange(%d %q) = true, want false", tc.status, tc.message)
+		}
+	}
+	if IsUnprivilegedACLChange(errors.New("Unprivileged API tokens can't set ACL items.")) || IsUnprivilegedACLChange(nil) {
+		t.Error("IsUnprivilegedACLChange accepted an error that is not an API error")
 	}
 }
 
@@ -546,7 +589,7 @@ func TestListRolesDecodesPrivileges(t *testing.T) {
 }
 
 // Without auth-id PBS answers for the caller, and without path for every path
-// the caller has an entry on, so each is sent only when set.
+// with an entry and a few more, so each is sent only when set.
 func TestPermissionsSendsOnlyWhatIsSet(t *testing.T) {
 	fake := newFakePBS()
 	fake.reply("GET /access/permissions", http.StatusOK,
@@ -577,6 +620,30 @@ func TestPermissionsSendsOnlyWhatIsSet(t *testing.T) {
 		}
 		if !reflect.DeepEqual(permissions, wantPermissions) {
 			t.Fatalf("Permissions(%q, %q) = %v", tc.authID, tc.path, permissions)
+		}
+	}
+}
+
+// PBS refuses to list another user's or token's privileges to a caller
+// without Sys.Audit on /access with a 400 (src/api2/access/mod.rs,
+// list_permissions).
+func TestIsListPermissionsRefused(t *testing.T) {
+	for _, message := range []string{"not allowed to list permissions of alice@pbs", "not allowed to list permissions of alice@pbs!ci"} {
+		if !IsListPermissionsRefused(apiError(http.StatusBadRequest, message)) {
+			t.Errorf("IsListPermissionsRefused(400 %q) = false, want true", message)
+		}
+	}
+	for _, tc := range []struct {
+		status  int
+		message string
+	}{
+		{http.StatusForbidden, "not allowed to list permissions of alice@pbs"},
+		{http.StatusForbidden, "permission check failed"},
+		{http.StatusBadRequest, "Unprivileged API tokens can't set ACL items."},
+		{http.StatusBadRequest, "parameter verification failed - 'auth-id': value does not match the regex pattern"},
+	} {
+		if IsListPermissionsRefused(apiError(tc.status, tc.message)) {
+			t.Errorf("IsListPermissionsRefused(%d %q) = true, want false", tc.status, tc.message)
 		}
 	}
 }

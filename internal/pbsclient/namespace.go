@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -130,7 +131,8 @@ func (c *Client) CreateNamespace(ctx context.Context, store, ns string) error {
 // DeleteNamespace deletes namespace ns of store and the namespaces below it,
 // as deletion says. Deleting a namespace that does not exist succeeds: with
 // delete-groups, PBS fails on it with ENOENT, and the namespace is then looked
-// up to tell that from a directory PBS could not read.
+// up to tell that from a directory PBS could not read — but not for a
+// maintenance mode's refusal, whose free-text message may say ENOENT too.
 func (c *Client) DeleteNamespace(ctx context.Context, store, ns string, deletion NamespaceDeletion) (NamespaceDeleteStats, error) {
 	params := url.Values{"ns": {ns}}
 	if deletion.DeleteGroups {
@@ -141,7 +143,7 @@ func (c *Client) DeleteNamespace(ctx context.Context, store, ns string, deletion
 	}
 	var stats NamespaceDeleteStats
 	_, err := c.Delete(ctx, Path("admin", "datastore", store, "namespace"), params, &stats)
-	if apiErr, ok := asError(err); ok && deletion.DeleteGroups && strings.Contains(apiErr.Message, "ENOENT") {
+	if apiErr, ok := asError(err); ok && deletion.DeleteGroups && !IsDatastoreUnavailable(err) && strings.Contains(apiErr.Message, "ENOENT") {
 		if exists, lookupErr := c.NamespaceExists(ctx, store, ns); lookupErr == nil && !exists {
 			return NamespaceDeleteStats{}, nil
 		}
@@ -151,19 +153,81 @@ func (c *Client) DeleteNamespace(ctx context.Context, store, ns string, deletion
 
 // IsDatastoreUnavailable reports whether PBS refused to open a datastore
 // because it is a removable datastore that is not mounted, or because its
-// maintenance mode forbids the operation: 400 "datastore 'x' is not
-// mounted" (with a capital D from some calls), "datastore 'x' is
-// unavailable: offline maintenance mode: ...", or one of the modes PBS sets
-// while its own task runs, which refuse reading too: "... is unavailable:
-// datastore is being unmounted", "...: datastore is being deleted",
-// "...: S3 refresh maintenance mode: ..." (pbs-api-types' maintenance.rs,
-// MaintenanceMode::check).
+// maintenance mode forbids the operation: IsDatastoreNotMounted or
+// IsDatastoreInMaintenance.
+//
+// Every call that opens a datastore does so through lookup_datastore
+// (pbs-datastore datastore.rs; proxmox-backup 7c86c5ad5, after 4.2.11),
+// which checks the maintenance mode first, answering 400 "datastore 'x' is
+// unavailable: <reason>", and only then whether a removable datastore is
+// mounted, answering 400 "datastore 'x' is not mounted": a datastore that is
+// both reports its maintenance mode. Only an unmount answers "Datastore 'x'
+// is not mounted", with a capital D, from its own check before it opens
+// anything.
+//
+// The reason of a maintenance refusal ends with the free-text message a user
+// gave the mode, which may hold anything: "not found", "already running",
+// "due to existing groups". Callers must test this before any check that
+// looks for words in PBS's message, such as IsTaskAlreadyRunning or a match
+// of "due to existing groups"; IsNotFound leaves these refusals out itself.
 func IsDatastoreUnavailable(err error) bool {
+	return IsDatastoreInMaintenance(err) || IsDatastoreNotMounted(err)
+}
+
+// datastoreInMaintenancePattern is the start of lookup_datastore's refusal
+// for a maintenance mode, up to the reason.
+var datastoreInMaintenancePattern = regexp.MustCompile(`^datastore '` + datastoreNameInError + `' is unavailable: `)
+
+// IsDatastoreInMaintenance reports whether PBS refused to open a datastore
+// because its maintenance mode forbids the operation: 400 "datastore 'x' is
+// unavailable: <reason>", which lookup_datastore (pbs-datastore datastore.rs)
+// answers with the error of MaintenanceMode::check (pbs-api-types
+// maintenance.rs). Its reasons, unchanged since pbs-api-types 1.0.2, which
+// PBS 4.0.11 uses:
+//
+//   - "datastore is being deleted", for any operation, even one that only
+//     looks the datastore up;
+//   - "datastore is being unmounted";
+//   - "offline maintenance mode: <message>";
+//   - "S3 refresh maintenance mode: <message>";
+//   - "read-only maintenance mode: <message>", for an operation that writes.
+//
+// Every mode but read-only thus refuses reading too. <message> is the mode's
+// free text, percent-decoded, up to 64 characters on one line: it may
+// contain anything, quotes included, so only the start of the message is
+// matched. DatastoreMaintenanceType tells the modes apart.
+func IsDatastoreInMaintenance(err error) bool {
 	apiErr, ok := asError(err)
-	if !ok || apiErr.StatusCode != http.StatusBadRequest {
-		return false
+	return ok && apiErr.StatusCode == http.StatusBadRequest && datastoreInMaintenancePattern.MatchString(apiErr.Message)
+}
+
+// datastoreMaintenanceReasons maps the start of each reason of
+// MaintenanceMode::check (pbs-api-types maintenance.rs) to its mode: without
+// the colon and the message that follow a mode's name, since the message
+// may be empty and the provider trims the space after the colon then.
+var datastoreMaintenanceReasons = []struct{ prefix, mode string }{
+	{"datastore is being deleted", MaintenanceDelete},
+	{"datastore is being unmounted", MaintenanceUnmount},
+	{"offline maintenance mode", MaintenanceOffline},
+	{"S3 refresh maintenance mode", MaintenanceS3Refresh},
+	{"read-only maintenance mode", MaintenanceReadOnly},
+}
+
+// DatastoreMaintenanceType returns the maintenance mode with which PBS
+// refused to open a datastore — MaintenanceReadOnly, MaintenanceOffline,
+// MaintenanceUnmount, MaintenanceS3Refresh or MaintenanceDelete —, read from
+// the reason of an error IsDatastoreInMaintenance reports. It returns "" for
+// any other error, and for a reason a later release words differently.
+func DatastoreMaintenanceType(err error) string {
+	if !IsDatastoreInMaintenance(err) {
+		return ""
 	}
-	message := strings.ToLower(apiErr.Message)
-	return strings.HasPrefix(message, "datastore '") &&
-		(strings.Contains(message, "' is not mounted") || strings.Contains(message, "' is unavailable"))
+	apiErr, _ := asError(err)
+	reason := apiErr.Message[len(datastoreInMaintenancePattern.FindString(apiErr.Message)):]
+	for _, r := range datastoreMaintenanceReasons {
+		if strings.HasPrefix(reason, r.prefix) {
+			return r.mode
+		}
+	}
+	return ""
 }

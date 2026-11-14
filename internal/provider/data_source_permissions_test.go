@@ -80,9 +80,10 @@ func TestPermissionsDataSourceSendsOnlyTheFiltersSet(t *testing.T) {
 	}
 }
 
-// Where the user or token has no privilege, PBS answers an empty map for the
-// path or no path at all. Either way the result is a map, not null, so that
-// lookup() works on it, as the schema tells users to test.
+// Where the user or token has no privilege, PBS leaves the path out; an
+// empty map for it, which PBS does not send, would do as well. Either way the
+// result is a map, not null, so that lookup() works on it, as the schema
+// tells users to test.
 func TestPermissionsDataSourceWithoutPrivileges(t *testing.T) {
 	for name, tc := range map[string]struct {
 		body string
@@ -111,15 +112,45 @@ func TestPermissionsDataSourceWithoutPrivileges(t *testing.T) {
 	}
 }
 
-// Asking about another user or token without Sys.Audit on /access is 403,
-// and the error says which privilege is missing.
+// Asking about another user or token without Sys.Audit on /access is a 400
+// "not allowed to list permissions of ...", not a 403, and the error says
+// which privilege is missing.
 func TestPermissionsDataSourceExplainsAMissingPrivilege(t *testing.T) {
 	fake := newFakePBS()
-	fake.reply("GET /access/permissions", http.StatusForbidden, "permission check failed")
+	fake.reply("GET /access/permissions", http.StatusBadRequest, "not allowed to list permissions of alice@pbs")
 	h := newProtocolHarness(t, fake)
 
 	resp := h.readDataSourceResponse(t, "pbs_permissions", h.dataSourceValue(t, "pbs_permissions", map[string]any{"auth_id": "alice@pbs"}))
 	requireProtocolErrorContaining(t, resp.Diagnostics, "Unable to read PBS permissions")
-	requireProtocolErrorContaining(t, resp.Diagnostics, "Sys.Audit on /access")
-	requireProtocolErrorContaining(t, resp.Diagnostics, "An API token has no privileges of its own")
+	requireProtocolErrorContaining(t, resp.Diagnostics, `"`+fakeTokenID+`" lacks Sys.Audit on /access, which reading the privileges of another user or token needs`)
+	requireProtocolErrorContaining(t, resp.Diagnostics, "not allowed to list permissions of alice@pbs")
+}
+
+// Without Sys.Audit on /access, a user signed in with its password may read
+// its own API tokens' privileges and no one else's; an API token not even its
+// user's.
+func TestPermissionsDataSourceWithoutAudit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts    []harnessOption
+		authID  string
+		refused bool
+	}{
+		"own token":            {opts: []harnessOption{withPasswordSignIn()}, authID: fakeUsername + "!other"},
+		"another user":         {opts: []harnessOption{withPasswordSignIn()}, authID: "alice@pbs", refused: true},
+		"another user's token": {opts: []harnessOption{withPasswordSignIn()}, authID: "alice@pbs!ci", refused: true},
+		"token's user":         {authID: fakeUsername, refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _, access := newUserHarness(t, tc.opts...)
+			setHideACL(access)
+
+			resp := h.readDataSourceResponse(t, "pbs_permissions", h.dataSourceValue(t, "pbs_permissions", map[string]any{"auth_id": tc.authID}))
+			if !tc.refused {
+				requireNoProtocolErrors(t, resp.Diagnostics)
+				return
+			}
+			requireProtocolErrorContaining(t, resp.Diagnostics, "lacks Sys.Audit on /access")
+			requireProtocolErrorContaining(t, resp.Diagnostics, "not allowed to list permissions of "+tc.authID)
+		})
+	}
 }

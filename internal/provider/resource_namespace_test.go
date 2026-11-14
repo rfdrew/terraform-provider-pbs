@@ -240,6 +240,25 @@ func TestNamespaceResourceDelete(t *testing.T) {
 	}
 }
 
+// A maintenance mode's refusal ends with the mode's message, which may say
+// what PBS says of a namespace that holds backups: destroying the namespace
+// reports the datastore PBS cannot open, not the backups.
+func TestNamespaceResourceDeleteMaintenanceMessage(t *testing.T) {
+	h, _, namespaces := newNamespaceHarness(t)
+	inst := h.create(t, "pbs_namespace", h.resourceValue(t, "pbs_namespace", map[string]any{"store": "store1", "namespace": "dept1"}))
+	namespaces.setUnavailable("store1", "datastore 'store1' is unavailable: read-only maintenance mode: kept due to existing groups")
+
+	null := tftypes.NewValue(h.resourceType(t, "pbs_namespace"), nil)
+	planned := h.plan(t, "pbs_namespace", inst, null)
+	applied := h.apply(t, "pbs_namespace", inst, null, planned)
+	requireProtocolErrorContaining(t, applied.Diagnostics, `PBS cannot open datastore "store1"`)
+	for _, d := range applied.Diagnostics {
+		if strings.Contains(d.Detail, "set delete_groups = true") {
+			t.Errorf("a maintenance refusal is reported as backups in the namespace: %s", d.Detail)
+		}
+	}
+}
+
 // A namespace already gone — with its parent, destroyed in the same apply,
 // say — is destroyed without an error, also with delete_groups, for which
 // PBS answers ENOENT.

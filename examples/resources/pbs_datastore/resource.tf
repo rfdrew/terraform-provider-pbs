@@ -33,7 +33,7 @@ resource "pbs_datastore" "offsite" {
   path           = "pbs/offsite"
   backing_device = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
-  # Free the space of pruned backups before the disk leaves (PBS 4.2+).
+  # Free the space of pruned backups before the disk leaves (PBS 4.1.8+).
   gc_on_unmount = true
 }
 
