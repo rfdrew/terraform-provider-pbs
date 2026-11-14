@@ -185,6 +185,8 @@ func (r *nodeConfigResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"set `use_node_proxy` — from PBS 4.1.7 to 4.2.3, every S3 endpoint, whatever it sets —, and " +
 					"writes it to APT's configuration, `/etc/apt/apt.conf.d/76pveproxy` — " +
 					"anew whenever the node's settings change, and removing the file when there is no proxy. " +
+					"PBS's ACME client does not use it: ordering and renewing a certificate (`pbs_node_certificate`, " +
+					"`pbs_node_certificate_renew`, PBS's daily update) needs a direct connection to the CA. " +
 					"Sensitive, as it may hold a password, which PBS returns." + managed,
 				Validators: httpProxyValidators(),
 			},

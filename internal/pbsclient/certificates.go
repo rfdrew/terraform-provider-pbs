@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -125,14 +126,12 @@ func (c *Client) NodeProxyCertificate(ctx context.Context, node string) (Certifi
 }
 
 // OrderACMECertificate has a node order a certificate for its ACME domains
-// and waits for the task, whose error, such as a failed validation, is a
-// *TaskError. Run it through ChangeCertificate.
-func (c *Client) OrderACMECertificate(ctx context.Context, node string) error {
-	env, err := c.Post(ctx, Path("nodes", node, "certificates", "acme", "certificate"), nil, nil)
-	if err != nil {
-		return err
-	}
-	return c.WaitTaskIn(ctx, env.Data)
+// and returns the UPID of the acme-new-cert task that orders it. Run it
+// through ChangeCertificate, and wait for the task within the change, as
+// for RenewACMECertificate: the task's error, such as a failed validation,
+// is a *TaskError, whose cause ACMEOrderFailureOf reads.
+func (c *Client) OrderACMECertificate(ctx context.Context, node string) (UPID, error) {
+	return c.StartTask(ctx, http.MethodPost, Path("nodes", node, "certificates", "acme", "certificate"), nil)
 }
 
 // DeleteCustomCertificate has a node replace its certificate with a new
@@ -166,21 +165,55 @@ var errLookedAt = errors.New("certificate looked at")
 // to it — what PBS's proxy serves now, which GET certificates/info, reading
 // the file, may not be. It ends the handshake once it has seen the
 // certificate, so nothing is sent over a connection it has not verified.
+//
+// Through an HTTPS forward proxy — an https:// proxy URL, such as one in
+// HTTPS_PROXY, which the client supports (see trust.verifyConnection) —
+// net/http first has a TLS handshake with the proxy, with the same TLS
+// configuration, then sends CONNECT over that connection, with
+// Proxy-Authorization when the proxy URL holds a user, and only then has
+// the endpoint's handshake, through the tunnel (net/http transport.go,
+// dialConn and addTLS, read in Go 1.27). The proxy's handshake — the first
+// one then, or one that names a host other than the endpoint's, as
+// trust.verifyConnection tells it — is verified exactly as the client's
+// own transport verifies it, and its certificate is not the one looked at:
+// the endpoint's, through the tunnel, is.
 func (c *Client) PresentedFingerprint(ctx context.Context) (string, error) {
 	transport, ok := c.httpClient.Transport.(*http.Transport)
 	if !ok {
 		return "", ErrNoTLSTransport
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
+	if err != nil {
+		return "", err
+	}
 	probe := transport.Clone()
 	probe.DisableKeepAlives = true
+	// The probe makes one request over one new connection, whose first
+	// handshake is the proxy's when net/http reaches the endpoint through
+	// an HTTPS proxy: the proxy URL's scheme is the first hop's.
+	proxyHandshake := false
+	if probe.Proxy != nil {
+		if proxyURL, err := probe.Proxy(req); err == nil && proxyURL != nil && proxyURL.Scheme == "https" {
+			proxyHandshake = true
+		}
+	}
 	config := &tls.Config{}
 	if probe.TLSClientConfig != nil {
 		config = probe.TLSClientConfig.Clone()
 	}
+	// The handshakes run on net/http's dialling goroutine, which may
+	// outlive the request when its context ends.
+	var mu sync.Mutex
 	var presented string
-	config.InsecureSkipVerify = true //nolint:gosec // nothing is sent: the handshake ends below.
+	config.InsecureSkipVerify = true //nolint:gosec // VerifyConnection verifies a proxy's handshake; the endpoint's ends below, with nothing sent.
 	config.VerifyPeerCertificate = nil
 	config.VerifyConnection = func(state tls.ConnectionState) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if proxyHandshake || (state.ServerName != "" && !strings.EqualFold(state.ServerName, c.trust.host)) {
+			proxyHandshake = false
+			return c.trust.verifyConnection(state)
+		}
 		if len(state.PeerCertificates) > 0 {
 			presented = CertificateFingerprint(state.PeerCertificates[0])
 		}
@@ -188,14 +221,12 @@ func (c *Client) PresentedFingerprint(ctx context.Context) (string, error) {
 	}
 	probe.TLSClientConfig = config
 	defer probe.CloseIdleConnections()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
-	if err != nil {
-		return "", err
-	}
 	resp, err := (&http.Client{Transport: probe, Timeout: c.httpClient.Timeout}).Do(req)
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if presented == "" {
 		return "", fmt.Errorf("looking at the certificate the server presents: %w", err)
 	}
@@ -439,10 +470,39 @@ func (e *UnconfirmedCertificateError) Error() string {
 
 func (e *UnconfirmedCertificateError) Unwrap() error { return e.Err }
 
+// CertificateReadError is a failure to read the proxy's certificate, GET
+// /nodes/{node}/certificates/info, around a change: before it, when nothing
+// was changed, or after it, when the change may have installed a new
+// certificate the client does not know of, and so does not trust.
+type CertificateReadError struct {
+	// After is whether the read came after the change.
+	After bool
+	Err   error
+}
+
+func (e *CertificateReadError) Error() string {
+	if e.After {
+		return "reading the certificate after changing it: " + e.Err.Error()
+	}
+	return "reading the certificate before changing it: " + e.Err.Error()
+}
+
+func (e *CertificateReadError) Unwrap() error { return e.Err }
+
 // CertificateChange is the certificate of the proxy before and after a
 // change.
 type CertificateChange struct {
+	// Before is what PBS reported before the change: the certificate in
+	// proxy.pem, which its proxy serves unless it could not load it.
 	Before CertificateInfo
+	// PresentedBefore is the normalised fingerprint of the certificate a new
+	// connection to the endpoint got before the change — the endpoint's,
+	// never an HTTPS proxy's on the way (see PresentedFingerprint): Before's,
+	// unless PBS's proxy could not load the certificate PBS last wrote, or a
+	// TLS front end serves PBS under the endpoint. It is empty when the
+	// client could not look, as with a transport that is not its own
+	// (ErrNoTLSTransport).
+	PresentedBefore string
 	// After is empty when the new certificate could not be confirmed.
 	After CertificateInfo
 	// Unconfirmed is set when the proxy presents another certificate, which
@@ -464,17 +524,24 @@ const (
 )
 
 // ChangeCertificate runs change, which has a node change the certificate of
-// its proxy — OrderACMECertificate or DeleteCustomCertificate, called with
+// its proxy — OrderACMECertificate or RenewACMECertificate and a wait for
+// the task, UploadCustomCertificate or DeleteCustomCertificate, called with
 // the context it is given —, and returns the certificate before and after.
 // The client trusts the new certificate from then on, whatever its
 // settings say (see above). Certificate changes of one client run one at a
 // time.
 //
+// Before the change, it also looks at the certificate a new connection gets
+// (PresentedFingerprint), which is what tells, after the change, a proxy
+// that could not load the new certificate from one that never served PBS's
+// file, such as a TLS front end. Failing to look is no error.
+//
 // The certificate is read after change even when change fails, since a task
 // may fail after it installed the new certificate; the error is then
-// change's. When the proxy presents another certificate that cannot be read
-// over the connection of the change, the result's Unconfirmed says so and
-// the client does not trust it.
+// change's, joined with the read's. A failed read is a
+// *CertificateReadError. When the proxy presents another certificate that
+// cannot be read over the connection of the change, the result's
+// Unconfirmed says so and the client does not trust it.
 func (c *Client) ChangeCertificate(ctx context.Context, node string, change func(ctx context.Context) error) (CertificateChange, error) {
 	c.certificateChange.Lock()
 	defer c.certificateChange.Unlock()
@@ -497,9 +564,14 @@ func (c *Client) ChangeCertificate(ctx context.Context, node string, change func
 	var result CertificateChange
 	before, err := c.NodeProxyCertificate(connCtx, node)
 	if err != nil {
-		return result, fmt.Errorf("reading the certificate before changing it: %w", err)
+		return result, &CertificateReadError{Err: err}
 	}
 	result.Before = before
+	if presented, err := c.PresentedFingerprint(ctx); err == nil {
+		result.PresentedBefore = presented
+	} else if !errors.Is(err, ErrNoTLSTransport) {
+		tflog.Debug(ctx, "could not look at the certificate the PBS endpoint presents before the change", map[string]any{"error": err.Error()})
+	}
 
 	changeErr := change(connCtx)
 
@@ -510,7 +582,7 @@ func (c *Client) ChangeCertificate(ctx context.Context, node string, change func
 		result.Unconfirmed = &UnconfirmedCertificateError{Presented: untrusted.Presented(), Err: readErr}
 		readErr = nil
 	case readErr != nil:
-		readErr = fmt.Errorf("reading the certificate after changing it: %w", readErr)
+		readErr = &CertificateReadError{After: true, Err: readErr}
 	default:
 		// Read over the connection the client trusted before the change:
 		// what PBS says it serves now is what the client may trust.

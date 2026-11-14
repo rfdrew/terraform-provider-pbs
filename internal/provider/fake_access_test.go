@@ -35,10 +35,23 @@ import (
 //   - granting a role to a user or token that does not exist is 400 "no such
 //     user." or "no such API token."; granting and removing are idempotent;
 //     NoAccess and the other roles of one user or token on one path exclude
-//     each other;
-//   - GET /access/permissions answers the caller's privileges on
-//     /access/acl, and without Sys.Audit there (hideACL) GET /access/acl
-//     shows only the entries of the caller's own user's tokens;
+//     each other; root@pam's own entries are granted and removed without an
+//     error but never stored, since PBS never saves them;
+//   - GET /access/acl with path "/" and without exact names the entries below
+//     the root "//datastore", "//datastore/store1" and so on, as PBS does;
+//   - the fake's API token and its user, signed in with its password, have
+//     the Admin role on /access and below unless hideACL takes it away. GET
+//     /access/permissions of the caller answers Sys.Audit and
+//     Permissions.Modify, two of Admin's privileges, on /access/acl, or no
+//     path at all with hideACL, since PBS leaves out a path without
+//     privileges. With hideACL, GET /access/acl shows the token no entry at
+//     all and the user only the entries of its own API tokens; PUT
+//     /access/acl lets only the user change the entries of its own tokens
+//     and refuses everything else with PBS's 400s "Unprivileged ..."; and GET
+//     /access/permissions about another user or token is 400 "not allowed to
+//     list permissions of ...", except the user's about its own tokens. The
+//     fake works out no privileges of other users and tokens and answers none
+//     for them;
 //   - missing objects answer the 400s PBS answers.
 //
 // Tests set up state with addUser, addToken and addACL, and look at it with
@@ -56,8 +69,15 @@ type fakeAccess struct {
 	// digests are derived from them.
 	userGen, aclGen int
 	secretGen       int
-	// hideACL takes Sys.Audit on /access/acl away from the fake's token: PBS
-	// then shows it only the entries of its own user's tokens.
+	// hideACL takes the Admin role on /access and below away from the
+	// fake's token and its user. Without Sys.Audit on /access/acl, PBS shows
+	// the token no ACL entry and the user only those of its own API tokens;
+	// without Permissions.Modify there, which only Admin grants, it lets only
+	// the user change its own tokens' entries; without Sys.Audit on /access,
+	// it lets neither read another's privileges, but the user its tokens'
+	// (src/api2/access/acl.rs, read_acl and update_acl, and
+	// src/api2/access/mod.rs, list_permissions, proxmox-backup 7c86c5ad5,
+	// after 4.2.11). Tests that set it hold mu.
 	hideACL bool
 	// goneRealms are realms deleted while users of them remain.
 	goneRealms map[string]bool
@@ -489,14 +509,25 @@ func (a *fakeAccess) newSecretLocked() string {
 	return fmt.Sprintf("00000000-0000-4000-8000-%012d", a.secretGen)
 }
 
+// caller returns who sent req: the fake's API token when the request
+// carries the Authorization header, its user otherwise, since only that user
+// signs in with a ticket.
+func (a *fakeAccess) caller(req *http.Request) (authID string, byToken bool) {
+	a.fake.mu.Lock()
+	defer a.fake.mu.Unlock()
+	if req.Header.Get("Authorization") != "" {
+		return a.fake.tokenID, true
+	}
+	return a.fake.username, false
+}
+
 func (a *fakeAccess) changePassword(w http.ResponseWriter, req *http.Request) {
 	params := form(req)
-	if req.Header.Get("Authorization") != "" {
+	caller, byToken := a.caller(req)
+	if byToken {
 		writeError(w, "API tokens cannot access this API endpoint")
 		return
 	}
-	// Only the fake's own user signs in with a ticket.
-	caller := a.fake.username
 	if caller != "root@pam" && params.Get("confirmation-password") != a.fake.password {
 		writeFakeResponse(w, http.StatusUnauthorized, "authentication failed - invalid credentials")
 		return
@@ -512,20 +543,30 @@ func (a *fakeAccess) changePassword(w http.ResponseWriter, req *http.Request) {
 	writeData(w, nil, "")
 }
 
+// readACL answers GET /access/acl as PBS's read_acl does: every entry
+// without a path; with one, the entries on it and, unless exact, those below
+// it, at the path asked for joined with the names below it by a slash, which
+// for "/" makes "//datastore"; without a path but with exact, the root's
+// entries only. With hideACL, the caller sees only what PBS shows a caller
+// without Sys.Audit on /access/acl (src/api2/access/acl.rs, read_acl and
+// extract_acl_node_data, proxmox-backup 7c86c5ad5, after 4.2.11).
 func (a *fakeAccess) readACL(w http.ResponseWriter, req *http.Request) {
 	query := req.URL.Query()
 	path, exact := query.Get("path"), fakeBool(query.Get("exact"))
+	caller, byToken := a.caller(req)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entries := []pbsclient.ACLEntry{}
 	for _, e := range a.acl {
-		if owner, _, isToken := pbsclient.SplitTokenID(e.UGID); a.hideACL && (!isToken || owner != fakeUsername) {
+		if a.hideACL && !shownWithoutAudit(e, caller, byToken) {
 			continue
 		}
 		switch {
-		case path == "":
+		case path == "" && (!exact || e.Path == "/"):
 		case e.Path == path:
-		case !exact && (path == "/" || strings.HasPrefix(e.Path, path+"/")):
+		case !exact && path == "/":
+			e.Path = "/" + e.Path
+		case !exact && strings.HasPrefix(e.Path, path+"/"):
 		default:
 			continue
 		}
@@ -536,27 +577,93 @@ func (a *fakeAccess) readACL(w http.ResponseWriter, req *http.Request) {
 	writeData(w, entries, fakeDigest("acl.cfg", a.aclGen))
 }
 
-// permissions answers the caller's own privileges on a path: Admin's on
-// /access/acl unless hideACL, nothing anywhere else.
+// shownWithoutAudit reports whether PBS shows the entry e to a caller
+// without Sys.Audit on /access/acl: to an API token none, not even its own
+// ("tokens can't have tokens"); to a user signed in with its password only
+// those of its own API tokens, neither its own nor a group's
+// (src/api2/access/acl.rs, extract_acl_node_data).
+func shownWithoutAudit(e pbsclient.ACLEntry, caller string, byToken bool) bool {
+	if byToken {
+		return false
+	}
+	owner, _, isToken := pbsclient.SplitTokenID(e.UGID)
+	return isToken && owner == caller
+}
+
+// permissions answers GET /access/permissions as PBS's list_permissions does,
+// as far as the provider asks: about the caller itself on /access/acl, where
+// it answers Sys.Audit and Permissions.Modify unless hideACL, and nothing
+// with hideACL, since PBS leaves out a path without privileges. Any other
+// question about the caller — without a path, PBS answers every path of
+// acl.cfg and /, /access, /datastore, /remote and /system, which the fake
+// does not work out — fails with 501, so that no test relies on an answer
+// PBS would not give. About another user or token, it answers no
+// privileges, which the fake does not work out either, or with hideACL
+// PBS's 400, except to the user about its own tokens (src/api2/access/mod.rs,
+// list_permissions, proxmox-backup 7c86c5ad5, after 4.2.11).
 func (a *fakeAccess) permissions(w http.ResponseWriter, req *http.Request) {
-	path := req.URL.Query().Get("path")
+	query := req.URL.Query()
+	path, authID := query.Get("path"), query.Get("auth-id")
+	caller, byToken := a.caller(req)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	privileges := map[string]bool{"Permissions.Modify": true, "Sys.Audit": true}
-	if a.hideACL {
-		delete(privileges, "Sys.Audit")
+	privileges := map[string]map[string]bool{}
+	if authID != "" && authID != caller {
+		owner, _, isToken := pbsclient.SplitTokenID(authID)
+		if a.hideACL && (byToken || !isToken || owner != caller) {
+			writeError(w, "not allowed to list permissions of %s", authID)
+			return
+		}
+		writeData(w, privileges, "")
+		return
 	}
 	if path != "/access/acl" {
-		privileges = map[string]bool{}
+		writeFakeResponse(w, http.StatusNotImplemented, "fake: GET /access/permissions about the caller is "+
+			"modelled only for path=/access/acl, not "+strconv.Quote(path))
+		return
 	}
-	writeData(w, map[string]map[string]bool{path: privileges}, "")
+	if !a.hideACL {
+		privileges["/access/acl"] = map[string]bool{"Permissions.Modify": true, "Sys.Audit": true}
+	}
+	writeData(w, privileges, "")
+}
+
+// unprivilegedACLChange returns PBS's refusal of an ACL change to a caller
+// without Permissions.Modify on /access/acl, or "" when PBS lets the change
+// through, as it does for a user signed in with its password and the entries
+// of its own API tokens (src/api2/access/acl.rs, update_acl). PBS refuses
+// before it looks at the digest, and removing an entry as well as granting
+// one.
+func unprivilegedACLChange(params url.Values, caller string, byToken bool) string {
+	authID := params.Get("auth-id")
+	owner, _, isToken := pbsclient.SplitTokenID(authID)
+	switch {
+	case params.Has("group"):
+		return "Unprivileged users are not allowed to create group ACL item."
+	case authID == "":
+		return "Unprivileged user needs to provide auth_id to update ACL item."
+	case byToken:
+		return "Unprivileged API tokens can't set ACL items."
+	case !isToken:
+		return "Unprivileged users can only set ACL items for API tokens."
+	case owner != caller:
+		return "Unprivileged users can only set ACL items for their own API tokens."
+	}
+	return ""
 }
 
 func (a *fakeAccess) updateACL(w http.ResponseWriter, req *http.Request) {
 	params := form(req)
 	path, authID, role := params.Get("path"), params.Get("auth-id"), params.Get("role")
+	caller, byToken := a.caller(req)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.hideACL {
+		if refusal := unprivilegedACLChange(params, caller, byToken); refusal != "" {
+			writeError(w, "%s", refusal)
+			return
+		}
+	}
 	if staleDigest(params, fakeDigest("acl.cfg", a.aclGen)) {
 		writeError(w, fakeDigestConflict)
 		return
@@ -581,6 +688,14 @@ func (a *fakeAccess) updateACL(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// user.cfg always has root@pam, but acl.cfg never its entries: PBS
+	// grants the role and leaves it out when it saves the file, since
+	// root@pam always has every privilege (pbs-config/src/acl.rs,
+	// write_node_config). acl.cfg, and so its digest, stays as it was.
+	if authID == "root@pam" {
+		writeData(w, nil, "")
+		return
+	}
 	if strings.Contains(authID, "!") {
 		if _, ok := a.tokens[authID]; !ok {
 			writeError(w, "no such API token.")

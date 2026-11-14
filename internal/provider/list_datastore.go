@@ -161,10 +161,11 @@ func listNamespaces(ctx context.Context, data *providerData, config tfsdk.Config
 			// answers about one datastore does not void the namespaces of
 			// the others; a PBS that does not answer, or refuses the
 			// credentials, fails the list, as it would for every datastore.
+			// Nor does a task that held PBS's lock of its datastore
+			// configuration for longer than the client tried again: that
+			// says which task to wait for.
 			tflog.Warn(ctx, "PBS failed to list the namespaces of a datastore", map[string]any{"store": store, "error": err.Error()})
-			diags.AddWarning("Left out the namespaces of datastore "+store,
-				fmt.Sprintf("PBS failed to list the namespaces of datastore %q, so they are left out; those of the "+
-					"other datastores are listed. Check that PBS can open the datastore, and list again. %s", store, err))
+			diags.AddWarning("Left out the namespaces of datastore "+store, namespaceListFailedDetail(store, err))
 			continue
 		case err != nil:
 			diags.AddError("Unable to list PBS namespaces", apiErrorDetail(client, namespaceAuditPrivilege(store, ""), err))
@@ -181,4 +182,15 @@ func listNamespaces(ctx context.Context, data *providerData, config tfsdk.Config
 		}
 	}
 	return objects
+}
+
+// namespaceListFailedDetail explains why the namespaces of a datastore PBS
+// failed to list are left out of a list of every datastore's.
+func namespaceListFailedDetail(store string, err error) string {
+	what := "Check that PBS can open the datastore, and list again. " + err.Error()
+	if pbsclient.IsDatastoreConfigLocked(err) {
+		what = datastoreConfigLockAdvice + " " + err.Error()
+	}
+	return fmt.Sprintf("PBS failed to list the namespaces of datastore %q, so they are left out; those of the "+
+		"other datastores are listed. %s", store, what)
 }

@@ -228,20 +228,28 @@ resource "pbs_namespace" "test" {
 	})
 }
 
-// testAccDatastoreTask starts a datastore task through the API, such as
-// garbage collection or mounting, and waits for it.
+// testAccDatastoreTask starts a datastore task through the API — "gc",
+// "mount" or "unmount" — and waits for it.
 func testAccDatastoreTask(t *testing.T, store, task string) {
 	t.Helper()
 	client, err := testAccClient()
 	if err != nil {
 		t.Fatal(err)
 	}
+	start := map[string]func(context.Context, string) (pbsclient.UPID, error){
+		"gc":      client.StartGarbageCollection,
+		"mount":   client.MountDatastore,
+		"unmount": client.UnmountDatastore,
+	}[task]
+	if start == nil {
+		t.Fatalf("unknown datastore task %q", task)
+	}
 	ctx := context.Background()
-	env, err := client.Post(ctx, pbsclient.Path("admin", "datastore", store, task), nil, nil)
+	upid, err := start(ctx, store)
 	if err != nil {
 		t.Fatalf("starting %s on %s: %v", task, store, err)
 	}
-	if err := client.WaitTaskIn(ctx, env.Data); err != nil {
+	if _, err := client.WaitTask(ctx, upid); err != nil {
 		t.Fatalf("%s on %s: %v", task, store, err)
 	}
 }

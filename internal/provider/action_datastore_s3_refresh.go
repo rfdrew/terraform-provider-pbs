@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/action/schema"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 
 	"github.com/rfdrew/terraform-provider-pbs/internal/pbsclient"
 )
@@ -54,9 +55,22 @@ func (a *datastoreS3RefreshAction) Schema(_ context.Context, _ action.SchemaRequ
 			"such as `read-only`: no backup, restore, prune or garbage collection passes until it is done. PBS 4.0.20 " +
 			"and later first wait for the operations that use the datastore to end, without limit, and then hold the " +
 			"lock of the datastore configuration while they read, which holds up the other datastores of the server " +
-			"too: operations that open one, and changes to the settings of any, wait for it for 10 seconds, then " +
-			"fail. A refresh that succeeds clears the maintenance mode; it does not restore an earlier one, which the " +
-			"next apply of a `pbs_datastore` that configures `maintenance_mode` sets again.\n\n" +
+			"too: PBS makes operations that open any datastore — backups, restores and jobs of other datastores " +
+			"too — and changes to the settings of any wait 10 seconds for it, then fail; the provider tries its own " +
+			"such calls again for about five minutes. A refresh that succeeds clears the maintenance mode; it does " +
+			"not restore an earlier one, which the next apply of a `pbs_datastore` that configures " +
+			"`maintenance_mode` sets again.\n\n" +
+			"The refreshes of one provider configuration run one at a time: an invocation waits for another one's " +
+			"refresh to end before it starts its own, since from PBS 4.0.20 the task of a refresh started meanwhile " +
+			"can fail on that lock and leave its datastore in maintenance mode `s3-refresh`. That covers a refresh " +
+			"for as long as its invocation waits for it — not one with `wait = false` or past its `timeout` —, and " +
+			"not a refresh started outside Terraform or by another provider configuration. A `pbs_datastore` on S3 " +
+			"created with `reuse_datastore`, whose creation refreshes it, waits for them too, and they for it. " +
+			"Other datastores the provider creates do not wait for them, as a refresh may wait for its datastore's " +
+			"operations for hours. Yet a refresh that still waits for them takes that lock every second to check " +
+			"its maintenance mode, and PBS holds the lock while it creates a datastore's chunk store: should that " +
+			"take longer than 10 seconds, such as on slow storage or behind a slow S3 endpoint, the refresh fails, " +
+			"and can leave its datastore in maintenance mode `s3-refresh`.\n\n" +
 			"A refresh that fails leaves the datastore in maintenance mode `s3-refresh`, and the action then says so: " +
 			"fix the cause and invoke the action again, or clear the mode under Datastore → Options → Maintenance " +
 			"Mode in the web interface, or with `proxmox-backup-manager datastore update <store> --delete " +
@@ -85,6 +99,23 @@ func (a *datastoreS3RefreshAction) Invoke(ctx context.Context, req action.Invoke
 	}
 	store := config.Store.ValueString()
 	progress := newActionProgress(ctx, resp)
+
+	// The provider's refreshes run one at a time, from the call that starts
+	// one to the end of the wait for its task: from PBS 4.0.20 the task of a
+	// refresh started while another one reads its bucket can fail on PBS's
+	// lock of datastore.cfg, and leave its datastore in maintenance mode
+	// s3-refresh (see pbsclient.LockS3Refresh).
+	_ = client.WithConfigLockWaiting(pbsclient.LockS3Refresh, func() {
+		progress.say("Waiting for another S3 refresh of this provider to end before refreshing %q", store)
+	}, func() error {
+		a.refresh(ctx, client, store, config, progress, &resp.Diagnostics)
+		return nil
+	})
+}
+
+// refresh starts the refresh of store and waits for it as config says.
+func (a *datastoreS3RefreshAction) refresh(ctx context.Context, client *pbsclient.Client, store string, config datastoreActionModel,
+	progress *actionProgress, diags *diag.Diagnostics) {
 	summary := "Unable to refresh PBS datastore " + store + " from S3"
 
 	// PBS refreshes any datastore it is asked to, and leaves one that is
@@ -108,27 +139,27 @@ func (a *datastoreS3RefreshAction) Invoke(ctx context.Context, req action.Invoke
 	})
 	switch {
 	case readErr != nil:
-		resp.Diagnostics.AddError(summary, datastoreActionErrorDetail(client, store, "Datastore.Audit", readErr))
+		diags.AddError(summary, datastoreActionErrorDetail(client, store, "Datastore.Audit", readErr))
 		return
 	case backend != pbsclient.BackendS3:
-		resp.Diagnostics.AddError(summary,
+		diags.AddError(summary,
 			fmt.Sprintf("Datastore %q is not on S3: its backend is %s. Only a datastore with an S3 `backend` has a "+
 				"bucket to refresh from. The action did not ask PBS, which would leave the datastore in maintenance "+
 				"mode s3-refresh.", store, backend))
 		return
 	case startErr != nil:
-		resp.Diagnostics.AddError(summary, datastoreActionErrorDetail(client, store, "Datastore.Modify", startErr))
+		diags.AddError(summary, datastoreActionErrorDetail(client, store, "Datastore.Modify", startErr))
 		return
 	}
 
 	// Once PBS reads from the bucket, it no longer heeds a request to stop,
 	// and a refresh left running ends on its own: it is not stopped.
 	task := actionTask{client: client, upid: upid, what: fmt.Sprintf("Refreshing PBS datastore %q from S3", store)}
-	status, finished := task.await(ctx, config.taskWaitModel, progress, &resp.Diagnostics)
+	status, finished := task.await(ctx, config.taskWaitModel, progress, diags)
 	switch {
 	case finished:
 		progress.say("PBS refreshed datastore %q from its bucket", store)
 	case status.Status == "stopped":
-		warnMaintenanceLeft(ctx, client, store, pbsclient.MaintenanceS3Refresh, "refresh", &resp.Diagnostics)
+		warnMaintenanceLeft(ctx, client, store, pbsclient.MaintenanceS3Refresh, "refresh", diags)
 	}
 }

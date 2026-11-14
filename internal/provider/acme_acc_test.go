@@ -472,6 +472,66 @@ resource "pbs_node_certificate" "this" {
 	})
 }
 
+// An order whose DNS plugin fails names the cause, as PBS's task reports
+// it, which this test checks against PBS itself: "'/usr/share/proxmox-acme/
+// proxmox-acme setup' exited with error (<code>)". The Cloudflare plugin has
+// neither a token nor a key, so its script fails — before it asks
+// Cloudflare anything, as acme.sh's dns_cf.sh reads (not among the sources
+// of acme_order.go), or else when Cloudflare refuses or cannot be reached
+// from the stand. PBS fails the order before it asks the CA to validate
+// anything, which Pebble would grant without looking, and with a
+// validation_delay of 0 without waiting. Nothing is written; the
+// certificate is put back all the same, in case it was.
+func TestAccNodeCertificateDNSPluginFails(t *testing.T) {
+	directory := testAccOrdersCertificates(t)
+	t.Setenv(envCertFingerprint, "")
+	t.Setenv(envCAFile, "")
+	t.Setenv(envInsecureSkipVerify, "true")
+
+	account, plugin := testAccACMEName(), testAccACMEName()
+	config := providerConfig + fmt.Sprintf(`
+resource "pbs_acme_account" "test" {
+  name      = %q
+  contact   = "tfacc@pbs.test"
+  directory = %q
+  tos_url   = %q
+}
+
+resource "pbs_acme_plugin" "failing" {
+  id               = %q
+  api              = "cf"
+  validation_delay = 0
+  data = {
+    CF_Zone_ID = "0123456789abcdef0123456789abcdef"
+  }
+}
+
+resource "pbs_node_acme" "this" {
+  account = pbs_acme_account.test.name
+  domains = [{ domain = %q, plugin = pbs_acme_plugin.failing.id }]
+}
+
+resource "pbs_node_certificate" "this" {
+  source = "acme"
+  triggers = {
+    domains = join(",", sort(pbs_node_acme.this.domains[*].domain))
+  }
+}
+`, account, directory, pebbleToS, plugin, testAccACMEDomain("dnsfail"))
+
+	acc.Test(t, acc.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckACMEDestroyed([]string{account}, []string{plugin}),
+		Steps: []acc.TestStep{
+			{
+				Config:      config,
+				ExpectError: regexp.MustCompile(`DNS\s+plugin\s+could\s+not\s+set\s+the\s+TXT\s+record`),
+			},
+		},
+	})
+}
+
 // testAccCheckSelfSigned checks that the node serves a self-signed
 // certificate again.
 func testAccCheckSelfSigned(*terraform.State) error {
@@ -542,13 +602,31 @@ func TestAccCertificateChangeKeepsTheClientWorking(t *testing.T) {
 	})
 
 	ordered, err := client.ChangeCertificate(ctx, node, func(ctx context.Context) error {
-		return client.OrderACMECertificate(ctx, node)
+		upid, err := client.OrderACMECertificate(ctx, node)
+		if err != nil {
+			return err
+		}
+		_, err = client.WaitTask(ctx, upid)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("ordering: %v", err)
 	}
 	if !ordered.Changed() || ordered.Unconfirmed != nil || ordered.After.SelfSigned() || !strings.Contains(ordered.After.Issuer, "Pebble") {
 		t.Fatalf("ordering changed %+v to %+v (unconfirmed: %v)", ordered.Before, ordered.After, ordered.Unconfirmed)
+	}
+	// A real proxy presents what PBS reports, before the change and, once
+	// PBS reports the task done, after it: what the provider's check of
+	// the proxy (checkProxyLoad) relies on.
+	if before, err := pbsclient.NormaliseFingerprint(ordered.Before.Fingerprint); err != nil || ordered.PresentedBefore != before {
+		t.Fatalf("before the order, a new connection got %q, while PBS reported %s", ordered.PresentedBefore, ordered.Before.Fingerprint)
+	}
+	after, err := pbsclient.NormaliseFingerprint(ordered.After.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if presented, err := client.PresentedFingerprint(ctx); err != nil || presented != after {
+		t.Fatalf("after the order, a new connection gets %q (%v), while PBS reports %s", presented, err, ordered.After.Fingerprint)
 	}
 	client.CloseIdleConnections()
 	if _, err := client.ServerVersion(ctx); err != nil {

@@ -7,7 +7,8 @@ description: |-
   An API token acts with the intersection of its user's privileges and its own, so it needs entries for its token ID besides those of its user. Deleting a user or token deletes the entries of its tokens; the user's own entries are removed by pbs_user when it destroys the user.
   ~> NoAccess excludes every other role. On one path, a user or token has either NoAccess or other roles: granting NoAccess removes its other roles there, and granting another role removes NoAccess. The provider warns when that happens. Do not manage both kinds for the same path and user or token, or each apply removes what the previous one granted.
   -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an entry changes, so a new role may take that long to work after the apply, and a removed one to stop working.
-  Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead. Managing ACL entries needs Permissions.Modify on /access/acl, and reading them all Sys.Audit on /access/acl; without it, PBS shows only the entries of the caller's own API tokens, and the others would appear deleted.
+  Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead.
+  Managing ACL entries needs Permissions.Modify on /access/acl, which only the Admin role grants, and reading them all Sys.Audit on /access/acl, which Admin includes. Without them, PBS lets a user signed in with its password see and change only the entries of its own API tokens, and an API token none at all. Refreshing an entry the provider cannot see then fails rather than drop it from state, and so does importing one.
 ---
 
 # pbs_acl (Resource)
@@ -20,7 +21,9 @@ An API token acts with the intersection of its user's privileges and its own, so
 
 -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an entry changes, so a new role may take that long to work after the apply, and a removed one to stop working.
 
-Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead. Managing ACL entries needs Permissions.Modify on /access/acl, and reading them all Sys.Audit on /access/acl; without it, PBS shows only the entries of the caller's own API tokens, and the others would appear deleted.
+Creating an entry that already exists fails, so that Terraform does not take over, and later delete, an entry it did not create: import it instead.
+
+Managing ACL entries needs Permissions.Modify on /access/acl, which only the `Admin` role grants, and reading them all Sys.Audit on /access/acl, which `Admin` includes. Without them, PBS lets a user signed in with its password see and change only the entries of its own API tokens, and an API token none at all. Refreshing an entry the provider cannot see then fails rather than drop it from state, and so does importing one.
 
 ## Example Usage
 
@@ -65,7 +68,7 @@ resource "pbs_acl" "auditor" {
 
 ### Required
 
-- `auth_id` (String) User ID, such as `alice@pbs`, or API token ID, such as `alice@pbs!ci` — the `tokenid` of a `pbs_api_token` — the role is granted to. The user or token must exist. Changing it replaces the entry.
+- `auth_id` (String) User ID, such as `alice@pbs`, or API token ID, such as `alice@pbs!ci` — the `tokenid` of a `pbs_api_token` — the role is granted to. The user or token must exist. Not `root@pam`, which always has every privilege and for which PBS stores no entry; its API tokens are fine. Changing it replaces the entry.
 - `path` (String) ACL path the role applies to, such as `/` for the whole server, `/datastore/store1` for a datastore, `/datastore/store1/ns1` for a namespace in it, `/remote/offsite` for a remote or `/system` for the node. PBS refuses a path it does not know ("invalid acl path"), but not one whose datastore or remote does not exist yet. Changing it replaces the entry.
 - `role` (String) Role to grant. PBS has a fixed set of roles: `Admin`, `Audit`, `NoAccess`, `DatastoreAdmin`, `DatastoreReader`, `DatastoreBackup`, `DatastorePowerUser`, `DatastoreAudit`, `RemoteAudit`, `RemoteAdmin`, `RemoteSyncOperator`, `RemoteSyncPushOperator`, `RemoteDatastorePowerUser`, `RemoteDatastoreAdmin`, `TapeAudit`, `TapeAdmin`, `TapeOperator`, `TapeReader`. The `pbs_roles` data source lists the privileges of each. Changing it replaces the entry.
 

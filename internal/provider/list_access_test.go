@@ -170,21 +170,39 @@ func TestACLListResource(t *testing.T) {
 // Without Sys.Audit on /access/acl, PBS shows a user signed in with its
 // password only the entries of its own tokens, not even its own, and so
 // does the list.
-func TestACLListResourceWithoutAudit(t *testing.T) {
+func TestACLListResourceWithoutAuditSignedInWithAPassword(t *testing.T) {
 	h, _, access := newUserHarness(t, withPasswordSignIn())
 	access.addUser(pbsclient.User{UserID: fakeUsername})
 	access.addToken(pbsclient.APIToken{TokenID: fakeUsername + "!other"}, "secret")
 	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: "pve@pbs!cluster1", UGIDType: "user", RoleID: "Audit"})
-	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: fakeUsername, UGIDType: "user", RoleID: "Audit"})
+	// DatastoreAudit, not Audit on /: that would give the user Sys.Audit on
+	// /access/acl, and PBS would show it everything.
+	access.addACL(pbsclient.ACLEntry{Path: "/datastore/store1", UGID: fakeUsername, UGIDType: "user", RoleID: "DatastoreAudit"})
 	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: fakeUsername + "!other", UGIDType: "user", RoleID: "Audit"})
-	access.mu.Lock()
-	access.hideACL = true
-	access.mu.Unlock()
+	setHideACL(access)
 	results := h.listedObjects(t, "pbs_acl", listRequest{includeResource: true})
 	if got := listedIdentities(t, results, "auth_id"); !slices.Equal(got, []string{fakeUsername + "!other"}) {
 		t.Fatalf("listed %q", got)
 	}
 	h.requireListedLikeImport(t, "pbs_acl", results[0])
+}
+
+// An API token without Sys.Audit on /access/acl sees no entry at all, not
+// even its own or its user's other tokens', and lists nothing, with the one
+// call a listing makes.
+func TestACLListResourceWithoutAuditWithAnAPIToken(t *testing.T) {
+	h, fake, access := newACLHarness(t)
+	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: fakeTokenID, UGIDType: "user", RoleID: "Audit"})
+	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: fakeUsername + "!other", UGIDType: "user", RoleID: "Audit"})
+	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: "pve@pbs", UGIDType: "user", RoleID: "Audit"})
+	setHideACL(access)
+	before := len(fake.routes())
+	if results := h.listedObjects(t, "pbs_acl", listRequest{includeResource: true}); len(results) != 0 {
+		t.Fatalf("listed %d entries, want none", len(results))
+	}
+	if got := fake.routes()[before:]; !slices.Equal(got, []string{"GET /access/acl"}) {
+		t.Fatalf("calls %q", got)
+	}
 }
 
 // An entry that goes between the listing and its read is left out without

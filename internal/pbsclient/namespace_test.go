@@ -163,16 +163,29 @@ func TestDeleteNamespaceGone(t *testing.T) {
 	if _, err := client.DeleteNamespace(ctx, "store1", "dept1/hosts", NamespaceDeletion{}); err == nil || fake.count(list) != lookups {
 		t.Errorf("DeleteNamespace() without delete-groups = %v, lookups %d -> %d", err, lookups, fake.count(list))
 	}
+
+	// Nor for a maintenance mode's refusal, whose message is free text.
+	fake.reply(route, http.StatusBadRequest, "datastore 'store1' is unavailable: read-only maintenance mode: ENOENT")
+	fake.reply(list, http.StatusOK, `{"data":[{"ns":"dept1"}]}`)
+	if _, err := client.DeleteNamespace(ctx, "store1", "dept1/hosts", NamespaceDeletion{DeleteGroups: true}); !IsDatastoreUnavailable(err) || fake.count(list) != lookups {
+		t.Errorf("DeleteNamespace() refused by a maintenance mode = %v, lookups %d -> %d", err, lookups, fake.count(list))
+	}
 }
 
 func TestIsDatastoreUnavailable(t *testing.T) {
 	for message, want := range map[string]bool{
-		"datastore 'store1' is not mounted":                                 true,
-		"Datastore 'store1' is not mounted":                                 true,
-		"datastore 'store1' is unavailable: offline maintenance mode":       true,
-		"datastore 'store1' is unavailable: read-only maintenance mode":     true,
-		"no such datastore 'store1'":                                        false,
-		"only partially deleted due to existing groups but `delete-groups`": false,
+		"datastore 'store1' is not mounted":                                                         true,
+		"Datastore 'store1' is not mounted":                                                         true,
+		"datastore 'store1' is unavailable: offline maintenance mode":                               true,
+		"datastore 'store1' is unavailable: read-only maintenance mode":                             true,
+		"datastore 'store1' is unavailable: datastore is being unmounted":                           true,
+		"datastore 'store1' is unavailable: datastore is being deleted":                             true,
+		"datastore 'store1' is unavailable: S3 refresh maintenance mode:":                           true,
+		"datastore 'store1' is unavailable: read-only maintenance mode: disk 'usb2' is not mounted": true,
+		"no such datastore 'store1'":                                                                false,
+		"only partially deleted due to existing groups but `delete-groups`":                         false,
+		"datastore 'store1' is not removable":                                                       false,
+		"unable to start garbage collection before unmount":                                         false,
 	} {
 		err := error(&Error{StatusCode: http.StatusBadRequest, Message: message})
 		if got := IsDatastoreUnavailable(err); got != want {
@@ -191,5 +204,48 @@ func TestIsDatastoreUnavailable(t *testing.T) {
 	offline := &Error{StatusCode: http.StatusBadRequest, Message: "datastore 'store1' is unavailable: offline maintenance mode: USB disk not found"}
 	if !IsDatastoreUnavailable(offline) || IsNotFound(offline) {
 		t.Errorf("IsDatastoreUnavailable = %t, IsNotFound = %t, want true and false", IsDatastoreUnavailable(offline), IsNotFound(offline))
+	}
+}
+
+// A maintenance mode's refusal is matched by its start alone, as its reason
+// ends with the mode's free text; DatastoreMaintenanceType reads the mode
+// from the reason.
+func TestIsDatastoreInMaintenance(t *testing.T) {
+	for _, tc := range []struct {
+		message, mode string
+	}{
+		{"datastore 'store1' is unavailable: datastore is being deleted", MaintenanceDelete},
+		{"datastore 'store1' is unavailable: datastore is being unmounted", MaintenanceUnmount},
+		{"datastore 'store1' is unavailable: offline maintenance mode: disk swap", MaintenanceOffline},
+		{"datastore 'store1' is unavailable: S3 refresh maintenance mode:", MaintenanceS3Refresh},
+		{"datastore 'store1' is unavailable: read-only maintenance mode:", MaintenanceReadOnly},
+		// The mode's message may say anything.
+		{"datastore 'store1' is unavailable: read-only maintenance mode: disk 'usb2' is not mounted", MaintenanceReadOnly},
+		{"datastore 'store1' is unavailable: offline maintenance mode: datastore is being deleted", MaintenanceOffline},
+		// A reason a later release words differently is still a refusal.
+		{"datastore 'store1' is unavailable: datastore is being renamed", ""},
+	} {
+		err := error(&Error{StatusCode: http.StatusBadRequest, Message: tc.message})
+		if !IsDatastoreInMaintenance(err) || DatastoreMaintenanceType(err) != tc.mode {
+			t.Errorf("%q: IsDatastoreInMaintenance = %t, DatastoreMaintenanceType = %q, want true and %q",
+				tc.message, IsDatastoreInMaintenance(err), DatastoreMaintenanceType(err), tc.mode)
+		}
+	}
+
+	maintenance := "datastore 'store1' is unavailable: read-only maintenance mode: "
+	for _, err := range []error{
+		&Error{StatusCode: http.StatusBadRequest, Message: "datastore 'store1' is not mounted"},
+		&Error{StatusCode: http.StatusBadRequest, Message: "Datastore 'store1' is not mounted"},
+		&Error{StatusCode: http.StatusBadRequest, Message: "no such datastore 'store1'"},
+		&Error{StatusCode: http.StatusBadRequest, Message: "unable to start garbage collection before unmount"},
+		&Error{StatusCode: http.StatusBadRequest, Message: "Datastore 'store1' is unavailable: read-only maintenance mode: "},
+		&Error{StatusCode: http.StatusBadRequest, Message: "unable to start garbage collection job on datastore store1 - " + maintenance},
+		&Error{StatusCode: http.StatusForbidden, Message: maintenance},
+		errors.New(maintenance),
+	} {
+		if IsDatastoreInMaintenance(err) || DatastoreMaintenanceType(err) != "" {
+			t.Errorf("%v: IsDatastoreInMaintenance = %t, DatastoreMaintenanceType = %q, want false and none",
+				err, IsDatastoreInMaintenance(err), DatastoreMaintenanceType(err))
+		}
 	}
 }

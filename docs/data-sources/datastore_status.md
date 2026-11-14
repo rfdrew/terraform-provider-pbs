@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Reads how full a Proxmox Backup Server datastore is: the size, use and free space of the file system it is on, as the dashboard of the web interface shows them, and when PBS expects it to be full. The figures need Datastore.Audit or Datastore.Backup on the datastore; with a privilege on one of its namespaces only, they are null.
   A removable datastore that is not mounted has no figures either, and a datastore PBS cannot open — in maintenance mode offline, say — has error instead; reading such a datastore is not an error.
+  PBS answers with the figures of every datastore of the server at once, and opens each for them, but removable ones that are not mounted. Opening a datastore takes the lock of PBS's datastore configuration, which a task such as an S3 refresh can hold for minutes. PBS then waits 10 seconds for the lock for each datastore, so the read can outlast the provider's request_timeout, and has its refusal for the lock as the error of each datastore, with a warning — or, with privileges on its namespaces only, leaves the datastore out.
 ---
 
 # pbs_datastore_status (Data Source)
@@ -12,6 +13,8 @@ description: |-
 Reads how full a Proxmox Backup Server datastore is: the size, use and free space of the file system it is on, as the dashboard of the web interface shows them, and when PBS expects it to be full. The figures need `Datastore.Audit` or `Datastore.Backup` on the datastore; with a privilege on one of its namespaces only, they are null.
 
 A removable datastore that is not mounted has no figures either, and a datastore PBS cannot open — in maintenance mode `offline`, say — has `error` instead; reading such a datastore is not an error.
+
+PBS answers with the figures of every datastore of the server at once, and opens each for them, but removable ones that are not mounted. Opening a datastore takes the lock of PBS's datastore configuration, which a task such as an S3 refresh can hold for minutes. PBS then waits 10 seconds for the lock for each datastore, so the read can outlast the provider's `request_timeout`, and has its refusal for the lock as the `error` of each datastore, with a warning — or, with privileges on its namespaces only, leaves the datastore out.
 
 ## Example Usage
 
@@ -45,7 +48,7 @@ check "store1_space" {
 
 - `avail` (Number) Bytes free for the datastore on that file system.
 - `backend_type` (String) Where the datastore keeps its chunks: `filesystem` or `s3`.
-- `error` (String) Why PBS could not open the datastore; null when it could.
+- `error` (String) Why PBS could not open the datastore, such as its refusal for the lock of its datastore configuration while a task holds it; null when it could.
 - `estimated_full_date` (Number) When PBS expects the datastore to be full, in seconds since the Unix epoch, from the trend of its use over the last month: `0` when its use does not change, and a time in the past when it shrinks. Null until PBS has seven half-hour samples of its use, a few hours after it starts tracking the datastore; early estimates are rough.
 - `mount_status` (String) Whether a removable datastore is mounted: `mounted` or `notmounted`; `nonremovable` for any other datastore.
 - `total` (Number) Size of the file system the datastore is on, in bytes.

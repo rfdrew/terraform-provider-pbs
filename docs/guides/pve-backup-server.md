@@ -406,6 +406,16 @@ next run:
   must be the certificate's domain too. Drop the `pve_storage_fingerprint`
   output.
 
+Should the apply fail because the PBS proxy did not load the ordered
+certificate, leave these settings as they are while the node still serves
+the old one. Find the reason in the proxy's journal (`journalctl -u
+proxmox-backup-proxy`) — a raised `@SECLEVEL` in `ciphers_tls_1_2` is a
+common one —, fix it, and run `systemctl reload proxmox-backup-proxy` on the
+host. Once the node serves the new certificate, switch the trust as above —
+against the staging directory, set `PBS_TLS_FINGERPRINT` to the new
+fingerprint, which the error names —, then import the certificate PBS wrote
+rather than order another, which counts against Let's Encrypt's limits.
+
 ### Trying it out against Let's Encrypt's staging directory
 
 Let's Encrypt limits how many certificates it issues for the same domains,
