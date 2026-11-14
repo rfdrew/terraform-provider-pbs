@@ -1,0 +1,46 @@
+---
+page_title: "pbs_network_interface List Resource - Proxmox Backup Server"
+subcategory: ""
+description: |-
+  Lists the network interfaces of a Proxmox Backup Server node, for terraform query, to import them as pbs_network_interface resources: the bridges, bonds, VLAN interfaces and physical interfaces (eth) of /etc/network/interfaces, and the physical NICs the file does not name, which PBS lists as eth, method manual, without autostart — in a Docker container, typically the container's eth0. Interfaces of other types, such as aliases, are left out, as is the loopback interface.
+  Listing needs Sys.Audit on /system/network/interfaces, and reading each interface Sys.Audit on /system/network/interfaces/<name>.
+  ~> Pending changes. While /etc/network/interfaces.new holds changes made through the API or the web interface and not applied yet, PBS lists that pending configuration, not the one the node runs, and the list warns. Importing interfaces then records the pending configuration, which takes effect only once the changes are applied; apply them, or revert them, first to import what the node runs.
+  The generated configuration sets the interface's methods as PBS reports them. A physical interface with the IPv4 method dhcp gets method = "dhcp", which the resource refuses for type eth (DHCP on a physical interface): remove that line, and the plan changes nothing. PBS's API cannot keep DHCP through a change, though, so the resource refuses to change the interface until it gets an address or method = "manual". Destroying an imported physical interface resets it — method manual, no addresses — and destroying a bridge, bond or VLAN interface deletes it from the pending configuration; to stop managing an interface, remove it from the state instead.
+  -> List resources need Terraform 1.14 or later; OpenTofu and older Terraform releases do not support them. Declare list blocks in a .tfquery.hcl file and run terraform query; terraform query -generate-config-out=generated.tf writes an import block and a resource block for each object, which terraform plan then imports. Sensitive attributes are null in the results and in the generated configuration, and write-only ones are never read, so they are null there too; the text above says which of them, if any, the generated configuration needs filled in.
+---
+
+# pbs_network_interface (List Resource)
+
+Lists the network interfaces of a Proxmox Backup Server node, for `terraform query`, to import them as `pbs_network_interface` resources: the bridges, bonds, VLAN interfaces and physical interfaces (`eth`) of `/etc/network/interfaces`, and the physical NICs the file does not name, which PBS lists as `eth`, method `manual`, without autostart — in a Docker container, typically the container's `eth0`. Interfaces of other types, such as aliases, are left out, as is the loopback interface.
+
+Listing needs `Sys.Audit on /system/network/interfaces`, and reading each interface `Sys.Audit on /system/network/interfaces/<name>`.
+
+~> **Pending changes.** While `/etc/network/interfaces.new` holds changes made through the API or the web interface and not applied yet, PBS lists that pending configuration, not the one the node runs, and the list warns. Importing interfaces then records the pending configuration, which takes effect only once the changes are applied; apply them, or revert them, first to import what the node runs.
+
+The generated configuration sets the interface's methods as PBS reports them. A physical interface with the IPv4 method `dhcp` gets `method = "dhcp"`, which the resource refuses for type `eth` (`DHCP on a physical interface`): remove that line, and the plan changes nothing. PBS's API cannot keep DHCP through a change, though, so the resource refuses to change the interface until it gets an address or `method = "manual"`. Destroying an imported physical interface resets it — method `manual`, no addresses — and destroying a bridge, bond or VLAN interface deletes it from the pending configuration; to stop managing an interface, remove it from the state instead.
+
+-> List resources need Terraform 1.14 or later; OpenTofu and older Terraform releases do not support them. Declare `list` blocks in a `.tfquery.hcl` file and run `terraform query`; `terraform query -generate-config-out=generated.tf` writes an `import` block and a `resource` block for each object, which `terraform plan` then imports. Sensitive attributes are null in the results and in the generated configuration, and write-only ones are never read, so they are null there too; the text above says which of them, if any, the generated configuration needs filled in.
+
+## Example Usage
+
+```terraform
+# terraform query lists the node's bridges; with
+# -generate-config-out=generated.tf it also writes an import block and a
+# pbs_network_interface resource for each.
+list "pbs_network_interface" "bridges" {
+  provider         = pbs
+  include_resource = true
+
+  config {
+    type = "bridge"
+  }
+}
+```
+
+<!-- schema generated by tfplugindocs -->
+## Schema
+
+### Optional
+
+- `node` (String) Node whose interfaces to list: `localhost`, which every PBS answers to, or the node's host name. Defaults to the provider's `node`; the results' `node` is this name.
+- `type` (String) List only interfaces of this type: `bridge`, `bond`, `vlan` or `eth`.

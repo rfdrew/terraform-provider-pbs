@@ -203,13 +203,25 @@ and PBS verifies it against its system's CAs.
 Every night at 21:00 the job pushes the backups of `store1` that `offsite1`
 lacks, at most 50 MB per second, as root@pam on the primary — the default
 `owner`, which may read every backup there. To create and read such a job,
-the provider's token needs `RemoteDatastore.Backup` and `Remote.Audit` on
+the provider's token needs `Remote.DatastoreBackup` and `Remote.Audit` on
 `/remote/offsite/offsite1`, and `Datastore.Audit` with `Datastore.Read` on
 `/datastore/store1`, which `Admin` on `/` includes.
 
-Terraform does not run the job. Start the first, long run by hand, from the
-datastore's Sync Jobs tab in the primary's web interface, and follow it in
-the task log there.
+Creating the job does not run it. Start the first, long run by hand, from
+the datastore's Sync Jobs tab in the primary's web interface, and follow it
+in the task log there — or, with Terraform 1.14.1 or later, have Terraform
+start it with the `pbs_sync_job_run` action, once the job exists:
+
+```terraform
+action "pbs_sync_job_run" "first" {
+  config {
+    id   = pbs_sync_job.offsite.id
+    wait = false # the first run may take hours; follow it in PBS
+  }
+}
+```
+
+and `terraform apply -invoke=action.pbs_sync_job_run.first`.
 
 ~> **The remote outlives no job that uses it.** PBS refuses to delete a
 remote a sync job uses. Terraform destroys the job first, since it refers to

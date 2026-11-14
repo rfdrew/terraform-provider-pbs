@@ -4,7 +4,8 @@ page_title: "pbs_notification_matcher Resource - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Manages a Proxmox Backup Server notification matcher: a rule that sends the notifications it matches to endpoints, such as a pbs_notification_endpoint_smtp. PBS hands every notification to every matcher; each one that matches sends it to its targets.
-  A notification has a severity — info, notice, warning, error or unknown — and fields, such as type (gc, prune, sync, verify, tape-backup, package-updates, acme…), datastore, job-id or hostname. A matcher matches by severity, by field and by time of day; one without any match_* rule matches every notification.
+  A notification has a severity — info, notice, warning, error or unknown — and fields, such as type (gc, prune, sync, verify, tape-backup, package-updates, acme…), datastore, job-id or hostname. A matcher matches by severity, by field and by time of day, with match_* rules or with an expression; one without either matches every notification.
+  match_* rules or an expression. The match_* rules combine one way, as mode says, and invert_match inverts their result. An expression, from PBS 4.2.10, is a tree of nested rules, as the matcher editor of the web interface builds them. A matcher has one or the other. PBS 4.2.10 and later store the rules of a matcher created or edited in the web interface as an expression, and convert a matcher's match_* rules, mode and invert_match into one when it is edited there: the next plan of a matcher managed with match_* rules then removes the expression and restores the rules. Edit the rules of a matcher Terraform manages only through Terraform.
   The built-in default-matcher routes every notification but those of successful prune jobs to mail-to-root, the built-in sendmail endpoint. It cannot be created or deleted, only changed: manage it by importing it, and destroying the resource resets it to its built-in settings. To send all notifications by SMTP instead, import it and point its target at the SMTP endpoint, keeping its other settings, as in the example.
   Endpoint and matcher names share one namespace. Managing matchers needs Sys.Modify on /system/notifications, reading them Sys.Audit on /system/notifications.
 ---
@@ -13,7 +14,9 @@ description: |-
 
 Manages a Proxmox Backup Server notification matcher: a rule that sends the notifications it matches to endpoints, such as a `pbs_notification_endpoint_smtp`. PBS hands every notification to every matcher; each one that matches sends it to its `target`s.
 
-A notification has a severity — `info`, `notice`, `warning`, `error` or `unknown` — and fields, such as `type` (`gc`, `prune`, `sync`, `verify`, `tape-backup`, `package-updates`, `acme`…), `datastore`, `job-id` or `hostname`. A matcher matches by severity, by field and by time of day; one without any `match_*` rule matches every notification.
+A notification has a severity — `info`, `notice`, `warning`, `error` or `unknown` — and fields, such as `type` (`gc`, `prune`, `sync`, `verify`, `tape-backup`, `package-updates`, `acme`…), `datastore`, `job-id` or `hostname`. A matcher matches by severity, by field and by time of day, with `match_*` rules or with an `expression`; one without either matches every notification.
+
+**`match_*` rules or an `expression`.** The `match_*` rules combine one way, as `mode` says, and `invert_match` inverts their result. An `expression`, from PBS 4.2.10, is a tree of nested rules, as the matcher editor of the web interface builds them. A matcher has one or the other. PBS 4.2.10 and later store the rules of a matcher created or edited in the web interface as an expression, and convert a matcher's `match_*` rules, `mode` and `invert_match` into one when it is edited there: the next plan of a matcher managed with `match_*` rules then removes the expression and restores the rules. Edit the rules of a matcher Terraform manages only through Terraform.
 
 **The built-in `default-matcher`** routes every notification but those of successful prune jobs to `mail-to-root`, the built-in sendmail endpoint. It cannot be created or deleted, only changed: manage it by importing it, and destroying the resource resets it to its built-in settings. To send all notifications by SMTP instead, import it and point its `target` at the SMTP endpoint, keeping its other settings, as in the example.
 
@@ -57,6 +60,24 @@ resource "pbs_notification_matcher" "sync_errors" {
   match_field    = ["exact:type=sync"]
   match_severity = ["error"]
 }
+
+# Rules that nest, from PBS 4.2.10: notifications of garbage collection,
+# during working hours or when they are warnings or errors. This is the
+# example of PBS's documentation, the kind of rule tree the matcher editor of
+# the web interface builds; jsonencode writes it as PBS takes it.
+resource "pbs_notification_matcher" "gc" {
+  name   = "gc-alerts"
+  target = [pbs_notification_endpoint_smtp.mail.name]
+  expression = jsonencode({
+    "all-of" = [
+      { "any-of" = [
+        { match = { type = "calendar", schedule = "mon..fri 09:00-17:00" } },
+        { match = { type = "severity", severities = ["warning", "error"] } },
+      ] },
+      { match = { type = "field", field = "type", values = ["gc"] } },
+    ]
+  })
+}
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -70,11 +91,18 @@ resource "pbs_notification_matcher" "sync_errors" {
 
 - `comment` (String) Free-form comment, up to 128 characters on one line.
 - `disable` (Boolean) Whether the matcher is disabled: it matches nothing. Defaults to `false`.
-- `invert_match` (Boolean) Whether to match the notifications the rules do not match instead. Defaults to `false`; it has no effect on a matcher without rules.
-- `match_calendar` (Set of String) Times to match, each a time range with optional days, such as `8-17`, `mon..fri 8-17` or `sat,sun 10:00-14:30`. PBS checks them.
-- `match_field` (Set of String) Fields to match, each `exact:<field>=<value>[,<value>…]` for one of the values, such as `exact:type=prune` or `exact:datastore=store1,store2`, or `regex:<field>=<regular expression>`, such as `regex:hostname=^pbs-`.
-- `match_severity` (Set of String) Severities to match. Each entry is one severity — `info`, `notice`, `warning`, `error` or `unknown` — or several separated by commas, such as `warning,error`, which match a notification of any of them.
-- `mode` (String) How the `match_*` rules combine: `all`, the default, matches a notification that every rule matches, `any` one that one of them does.
+- `expression` (String) The matcher's rules as a match expression, PBS 4.2.10 and later: a JSON rule tree, best written with `jsonencode()`, as in the example. Each rule is an object with one key: `all-of`, `any-of` or `one-of`, a list of rules, matches when all, at least one or exactly one of them match; `not`, a rule, when that one does not; `constant`, `true` or `false`, always or never; and `match`, a test of the notification:
+
+  - `{ type = "severity", severities = ["warning", "error"] }` — its severity is one of `severities`: `info`, `notice`, `warning`, `error` or `unknown`;
+  - `{ type = "field", field = "type", values = ["gc", "prune"] }` — the field has one of the `values`; with `regex = "^backup-"` instead of `values`, it matches the regular expression. A notification without the field does not match;
+  - `{ type = "calendar", schedule = "mon..fri 9-17" }` — it was sent in the time range, with optional days, as in `match_calendar`.
+
+  The provider checks the rules when planning; PBS checks regular expressions and schedules. PBS stores the expression compacted, with its keys in its own order: the same rules written another way are no change. Conflicts with `match_severity`, `match_field` and `match_calendar`, with `mode = "any"` and with `invert_match = true`.
+- `invert_match` (Boolean) Whether to match the notifications the rules do not match instead. Defaults to `false`; it has no effect on a matcher without rules. `true` conflicts with `expression`, whose `not` does the same.
+- `match_calendar` (Set of String) Times to match, each a time range with optional days, such as `8-17`, `mon..fri 8-17` or `sat,sun 10:00-14:30`. PBS checks them. Conflicts with `expression`.
+- `match_field` (Set of String) Fields to match, each `exact:<field>=<value>[,<value>…]` for one of the values, such as `exact:type=prune` or `exact:datastore=store1,store2`, or `regex:<field>=<regular expression>`, such as `regex:hostname=^pbs-`. Conflicts with `expression`.
+- `match_severity` (Set of String) Severities to match. Each entry is one severity — `info`, `notice`, `warning`, `error` or `unknown` — or several separated by commas, such as `warning,error`, which match a notification of any of them. Conflicts with `expression`.
+- `mode` (String) How the `match_*` rules combine: `all`, the default, matches a notification that every rule matches, `any` one that one of them does. `any` conflicts with `expression`, whose `any-of` does the same.
 - `target` (Set of String) Names of the endpoints to send matching notifications to, such as the `name` of a `pbs_notification_endpoint_smtp`, or `mail-to-root`. They must exist. A matcher without targets sends nothing.
 
 ### Read-Only

@@ -59,7 +59,7 @@ func (d *aptUpdatesDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 			"kernel.\n\n" +
 			"PBS reads APT's package cache on the node and does not refresh it: reading the data source makes no " +
 			"network access, and the list is as current as the node's last `apt update`. PBS's daily update runs " +
-			"one, and so does the **Refresh** button of the Updates panel; the provider cannot refresh it yet. A " +
+			"one, and so does the **Refresh** button of the Updates panel, or the `pbs_apt_update` action. A " +
 			"container whose image removed APT's package lists, as images often do to save space, lists no " +
 			"updates until `apt update` runs in it.\n\n" +
 			"Needs `" + aptReadPrivilege + "`.",

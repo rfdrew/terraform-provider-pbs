@@ -103,33 +103,6 @@ func (c *Client) TaskStatus(ctx context.Context, upid UPID) (TaskStatus, error) 
 	return status, err
 }
 
-// WaitTask waits until a worker task stops, at most for the client's task
-// timeout, and returns its status. It fails with a *TaskError when the task
-// ended with an error, and with ErrTaskTimeout when it is still running.
-func (c *Client) WaitTask(ctx context.Context, upid UPID) (TaskStatus, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.taskTimeout)
-	defer cancel()
-
-	delay := firstTaskPoll
-	for {
-		status, err := c.TaskStatus(ctx, upid)
-		if err != nil {
-			if isContextError(err) && ctx.Err() != nil {
-				return status, fmt.Errorf("%w after %s: %s", ErrTaskTimeout, c.taskTimeout, upid.Raw)
-			}
-			return status, err
-		}
-		if status.Status == "stopped" {
-			return status, c.taskEnded(ctx, upid, status)
-		}
-
-		if err := c.sleep(ctx, delay); err != nil {
-			return status, fmt.Errorf("%w after %s: %s", ErrTaskTimeout, c.taskTimeout, upid.Raw)
-		}
-		delay = min(delay*2, maxTaskPoll)
-	}
-}
-
 // taskEnded is the outcome of a stopped task: a *TaskError when it failed,
 // nil otherwise, with warnings logged.
 func (c *Client) taskEnded(ctx context.Context, upid UPID, status TaskStatus) error {

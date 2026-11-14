@@ -42,6 +42,9 @@ var pbs421 = pbsRelease{4, 2, 1}
 // node's proxy need.
 var pbs424 = pbsRelease{4, 2, 4}
 
+// pbs4210 is what a notification matcher's expression needs.
+var pbs4210 = pbsRelease{4, 2, 10}
+
 func (r pbsRelease) String() string {
 	if r.release == 0 {
 		return fmt.Sprintf("%d.%d", r.major, r.minor)

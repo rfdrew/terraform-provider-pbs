@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -167,6 +168,23 @@ func (c *propertyChanges) changeValues(name string, plan, prior attr.Value, form
 	default:
 		c.diags.AddError("Property cannot be unset",
 			fmt.Sprintf("PBS cannot delete the property %q, so the provider must plan a value for it instead of null. This is a bug in the provider.", name))
+	}
+}
+
+// Delete deletes the named properties whatever the plan and the prior state
+// hold, for a property PBS may store with the value the state shows as
+// absent, unless the change sends or deletes it already. Each must be
+// deletable.
+func (c *propertyChanges) Delete(names ...string) {
+	for _, name := range names {
+		switch {
+		case !c.deletable[name]:
+			c.diags.AddError("Property cannot be unset",
+				fmt.Sprintf("PBS cannot delete the property %q. This is a bug in the provider.", name))
+		case c.params.Has(name) || slices.Contains(c.deletes, name):
+		default:
+			c.deletes = append(c.deletes, name)
+		}
 	}
 }
 

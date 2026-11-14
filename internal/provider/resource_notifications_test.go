@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,9 +16,14 @@ import (
 func newNotificationsHarness(t *testing.T) (*protocolHarness, *fakePBS, *fakeNotifications) {
 	t.Helper()
 	fake := newFakePBS()
+	// The release that introduced matcher expressions, which the fake takes.
+	fake.reply("GET /version", http.StatusOK, fakeVersion4210JSON)
 	notifications := newFakeNotifications(fake)
 	return newProtocolHarness(t, fake), fake, notifications
 }
+
+// fakeVersion4210JSON is GET /version of PBS 4.2.10.
+const fakeVersion4210JSON = `{"data":{"release":"10","repoid":"1df6dff9c","version":"4.2"}}`
 
 // smtpConfig is the configuration of an SMTP endpoint "mail", with attrs on
 // top of what it needs.

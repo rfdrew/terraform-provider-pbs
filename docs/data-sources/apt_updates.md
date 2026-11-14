@@ -4,7 +4,7 @@ page_title: "pbs_apt_updates Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
   Lists the package updates of a Proxmox Backup Server node, as the Updates panel of its interface shows them: every installed package whose candidate version in APT's package cache, the one an upgrade installs, differs from the installed one, and the packages those versions depend on that are not installed, which an upgrade would install anew, such as the package of a new kernel.
-  PBS reads APT's package cache on the node and does not refresh it: reading the data source makes no network access, and the list is as current as the node's last apt update. PBS's daily update runs one, and so does the Refresh button of the Updates panel; the provider cannot refresh it yet. A container whose image removed APT's package lists, as images often do to save space, lists no updates until apt update runs in it.
+  PBS reads APT's package cache on the node and does not refresh it: reading the data source makes no network access, and the list is as current as the node's last apt update. PBS's daily update runs one, and so does the Refresh button of the Updates panel, or the pbs_apt_update action. A container whose image removed APT's package lists, as images often do to save space, lists no updates until apt update runs in it.
   Needs Sys.Audit on /.
 ---
 
@@ -12,7 +12,7 @@ description: |-
 
 Lists the package updates of a Proxmox Backup Server node, as the Updates panel of its interface shows them: every installed package whose candidate version in APT's package cache, the one an upgrade installs, differs from the installed one, and the packages those versions depend on that are not installed, which an upgrade would install anew, such as the package of a new kernel.
 
-PBS reads APT's package cache on the node and does not refresh it: reading the data source makes no network access, and the list is as current as the node's last `apt update`. PBS's daily update runs one, and so does the **Refresh** button of the Updates panel; the provider cannot refresh it yet. A container whose image removed APT's package lists, as images often do to save space, lists no updates until `apt update` runs in it.
+PBS reads APT's package cache on the node and does not refresh it: reading the data source makes no network access, and the list is as current as the node's last `apt update`. PBS's daily update runs one, and so does the **Refresh** button of the Updates panel, or the `pbs_apt_update` action. A container whose image removed APT's package lists, as images often do to save space, lists no updates until `apt update` runs in it.
 
 Needs `Sys.Audit on /`.
 

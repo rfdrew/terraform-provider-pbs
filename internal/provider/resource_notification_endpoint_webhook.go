@@ -150,8 +150,10 @@ func (r *webhookEndpointResource) Schema(_ context.Context, _ resource.SchemaReq
 				Optional: true,
 				MarkdownDescription: "Body of the request, a template, such as a JSON document; none when left " +
 					"out. Send it with a `Content-Type` header that says what it is. PBS stores it base64-encoded; " +
-					"the provider encodes and decodes it.",
-				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
+					"the provider encodes and decodes it. A JSON body that differs from the one PBS holds only in its " +
+					"layout — spacing, the order of keys, escapes — is no change: the body PBS holds stays.",
+				Validators:    []validator.String{stringvalidator.LengthAtLeast(1)},
+				PlanModifiers: []planmodifier.String{sameJSONKeepsPrior{}},
 			},
 			"header": schema.ListNestedAttribute{
 				Optional: true,

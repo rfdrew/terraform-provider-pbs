@@ -1,0 +1,137 @@
+package pbsclient
+
+import (
+	"context"
+	"net/http"
+	"strings"
+)
+
+// What PBS 4.x does when asked to work on a datastore, read in its source
+// (src/api2/admin/datastore.rs, src/server/gc_job.rs, pbs-datastore
+// datastore.rs; proxmox-backup 7c86c5ad5, after 4.2.11):
+//
+//   - POST /admin/datastore/{store}/gc (Datastore.Modify on
+//     /datastore/{store}, 403 without) opens the datastore for writing, so a
+//     removable datastore that is not mounted and the maintenance modes
+//     read-only, offline, unmount, s3-refresh and delete fail at once — 400
+//     "datastore 'x' is not mounted", "datastore 'x' is unavailable: ..."
+//     (IsDatastoreUnavailable); a missing one is 400 "no such datastore
+//     'x'". A garbage collection already running answers, after up to 10 s,
+//     "garbage collection already running". Otherwise it starts task
+//     garbage_collection, worker ID the datastore, which PBS can abort.
+//     GET /admin/gc/{store} afterwards shows the figures of the last
+//     garbage collection that succeeded, with its UPID: a failed run does
+//     not update them. Chunks are only removed once they are older than the
+//     atime cutoff (24 h 5 min unless the datastore's tuning says
+//     otherwise), so a garbage collection right after a prune mostly
+//     reports pending removals.
+//   - POST /admin/datastore/{store}/mount and …/unmount (both Datastore.Modify
+//     on /datastore/{store} and Sys.Modify on /system/disks, 403 without) are
+//     for removable datastores: any other answers 400 "datastore 'x' is not
+//     removable", a missing one 400 "no such datastore 'x'". Mounting starts
+//     task mount-device, worker ID the datastore, which ends OK at once with
+//     "device is already mounted at '<path>'" when it is, and fails with
+//     "mounting to tmp path failed: ..." when the disk is not connected.
+//     After a mount, and only then, it starts the sync jobs with run-on-mount
+//     that sync to or from the datastore, in a task of their own,
+//     mount-sync-jobs, whose UPID it does not tell; its own log says
+//     "starting <n> sync jobs". Mounting checks no maintenance mode, and PBS
+//     cannot abort it.
+//   - Unmounting answers 400 "Datastore 'x' is not mounted" (with a capital
+//     D) for a datastore that is not mounted. With gc-on-unmount (PBS
+//     4.1.8), it first starts a garbage collection as root@pam, through
+//     its proxy, unless one is running already. When the proxy refuses, the
+//     call fails with the proxy's own error, since proxmox-rest-server
+//     answers with the HttpError under the context PBS adds: in any
+//     maintenance mode — read-only, offline, unmount, s3-refresh, delete —
+//     400 "datastore 'x' is unavailable: <mode>". Only when PBS cannot reach
+//     its proxy does the call fail with 400 "unable to start garbage
+//     collection before unmount", the context itself.
+//     It then sets maintenance mode unmount, replacing any other, and starts
+//     task unmount-device, which waits without limit for the operations that
+//     use the datastore — backups, restores, verifications, syncs, the
+//     garbage collection — to end, logging "waiting for active operations to
+//     finsish before continuing: read <r>, write <w>" (sic; before PBS
+//     4.0.20 "cannot unmount yet, still <r> read and <w> write operations
+//     active") whenever the numbers change. Aborting the task, or anyone changing the maintenance
+//     mode, while it waits ends it with "aborted, due to user request" and
+//     maintenance mode none. Then it runs umount and clears the mode; an
+//     umount that fails leaves the datastore in maintenance mode unmount.
+//   - PUT /admin/datastore/{store}/s3-refresh (Datastore.Modify on
+//     /datastore/{store}) starts task s3-refresh, worker ID the datastore,
+//     which reads the datastore's contents — indexes, groups and
+//     namespaces, not chunks — from its bucket into the local cache, in
+//     maintenance mode s3-refresh, replacing any other mode. It clears the
+//     mode when it succeeds; a failure leaves the mode s3-refresh. From PBS
+//     4.0.20 the call sets the mode before it starts the task, and the task
+//     waits for the datastore's operations as an unmount does, aborted the
+//     same way, then reads holding the lock of datastore.cfg, which every
+//     datastore lookup on the server takes too; before, the task set the
+//     mode itself and read at once. PBS does not check that the datastore is
+//     on S3: from PBS 4.0.20 a datastore that is not fails the task with
+//     "store 'x' not backed by S3" and stays in maintenance mode s3-refresh,
+//     so callers check the backend first.
+//   - GET /admin/datastore/{store}/active-operations (Datastore.Audit)
+//     answers {"read": <n>, "write": <n>}: the operations an unmount or a
+//     refresh waits for (pbs-datastore task_tracking.rs).
+
+// StartGarbageCollection starts a garbage collection of a datastore and
+// returns its task.
+func (c *Client) StartGarbageCollection(ctx context.Context, store string) (UPID, error) {
+	return c.StartTask(ctx, http.MethodPost, Path("admin", "datastore", store, "gc"), nil)
+}
+
+// MountDatastore mounts a removable datastore and returns the task that does
+// it. A datastore that is mounted already stays so, and the task ends OK.
+func (c *Client) MountDatastore(ctx context.Context, store string) (UPID, error) {
+	return c.StartTask(ctx, http.MethodPost, Path("admin", "datastore", store, "mount"), nil)
+}
+
+// UnmountDatastore unmounts a removable datastore and returns the task that
+// does it, which waits for the operations that use the datastore first.
+// IsDatastoreNotMounted reports a datastore that is not mounted.
+func (c *Client) UnmountDatastore(ctx context.Context, store string) (UPID, error) {
+	return c.StartTask(ctx, http.MethodPost, Path("admin", "datastore", store, "unmount"), nil)
+}
+
+// RefreshDatastoreFromS3 reads the contents of a datastore on S3 from its
+// bucket into the local cache, and returns the task that does it. PBS does
+// not check the backend: a datastore that is not on S3 fails the task and
+// stays in maintenance mode s3-refresh.
+func (c *Client) RefreshDatastoreFromS3(ctx context.Context, store string) (UPID, error) {
+	return c.StartTask(ctx, http.MethodPut, Path("admin", "datastore", store, "s3-refresh"), nil)
+}
+
+// ActiveOperations counts the operations that use a datastore.
+type ActiveOperations struct {
+	Read  int64 `json:"read"`
+	Write int64 `json:"write"`
+}
+
+// DatastoreActiveOperations returns how many operations use a datastore.
+func (c *Client) DatastoreActiveOperations(ctx context.Context, store string) (ActiveOperations, error) {
+	var ops ActiveOperations
+	_, err := c.Get(ctx, Path("admin", "datastore", store, "active-operations"), nil, &ops)
+	return ops, err
+}
+
+// IsDatastoreNotMounted reports whether PBS refused a call because the
+// removable datastore is not mounted: 400 "Datastore 'x' is not mounted"
+// from an unmount, "datastore 'x' is not mounted" from calls that open the
+// datastore. IsDatastoreUnavailable covers it too.
+func IsDatastoreNotMounted(err error) bool {
+	apiErr, ok := asError(err)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	message := strings.ToLower(apiErr.Message)
+	return strings.HasPrefix(message, "datastore '") && strings.HasSuffix(message, "' is not mounted")
+}
+
+// IsDatastoreNotRemovable reports whether PBS refused to mount or unmount a
+// datastore that is not removable: 400 "datastore 'x' is not removable".
+func IsDatastoreNotRemovable(err error) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.HasPrefix(apiErr.Message, "datastore '") && strings.HasSuffix(apiErr.Message, "' is not removable")
+}

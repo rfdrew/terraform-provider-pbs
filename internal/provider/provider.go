@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/list"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -28,7 +30,11 @@ import (
 )
 
 // Ensure the implementation satisfies the framework interfaces.
-var _ provider.Provider = &pbsProvider{}
+var (
+	_ provider.Provider                  = &pbsProvider{}
+	_ provider.ProviderWithActions       = &pbsProvider{}
+	_ provider.ProviderWithListResources = &pbsProvider{}
+)
 
 // Address is the provider's source address in the Terraform Registry.
 const Address = "registry.terraform.io/rfdrew/pbs"
@@ -454,6 +460,8 @@ func (p *pbsProvider) Configure(ctx context.Context, req provider.ConfigureReque
 	resp.DataSourceData = data
 	resp.ResourceData = data
 	resp.EphemeralResourceData = data
+	resp.ActionData = data
+	resp.ListResourceData = data
 }
 
 // connectErrorDetail explains why the first call failed.
@@ -580,6 +588,63 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewDisksDataSource,
 		NewAPTUpdatesDataSource,
 		NewServicesDataSource,
+	}
+}
+
+// Actions are the provider's actions, which Terraform 1.14 and later invoke
+// from action blocks; older Terraform and OpenTofu do not ask for them. See
+// action_task.go.
+func (p *pbsProvider) Actions(_ context.Context) []func() action.Action {
+	return []func() action.Action{
+		NewSyncJobRunAction,
+		NewVerifyJobRunAction,
+		NewPruneJobRunAction,
+		NewDatastoreGCAction,
+		NewDatastoreMountAction,
+		NewDatastoreUnmountAction,
+		NewDatastoreS3RefreshAction,
+		NewS3EndpointCheckAction,
+		NewRealmSyncAction,
+		NewNotificationTestAction,
+		NewNodeCertificateRenewAction,
+		NewAPTUpdateAction,
+		NewNetworkReloadAction,
+	}
+}
+
+// ListResources are the provider's list resources, which `terraform query`
+// in Terraform 1.14 and later lists; older Terraform and OpenTofu do not ask
+// for them. Each one lists the objects of the managed resource of the same
+// name; see list_resource.go.
+func (p *pbsProvider) ListResources(_ context.Context) []func() list.ListResource {
+	return []func() list.ListResource{
+		NewUserListResource,
+		NewAPITokenListResource,
+		NewACLListResource,
+		NewOpenIDRealmListResource,
+		NewLDAPRealmListResource,
+		NewADRealmListResource,
+		NewDatastoreListResource,
+		NewNamespaceListResource,
+		NewS3EndpointListResource,
+		NewPruneJobListResource,
+		NewVerifyJobListResource,
+		NewRemoteListResource,
+		NewSyncJobListResource,
+		NewSyncEncryptionKeyListResource,
+		NewTrafficControlRuleListResource,
+		NewSMTPEndpointListResource,
+		NewSendmailEndpointListResource,
+		NewGotifyEndpointListResource,
+		NewWebhookEndpointListResource,
+		NewNotificationMatcherListResource,
+		NewInfluxDBHTTPListResource,
+		NewInfluxDBUDPListResource,
+		NewACMEAccountListResource,
+		NewACMEPluginListResource,
+		NewAPTRepositoryListResource,
+		NewAPTStandardRepositoryListResource,
+		NewNetworkInterfaceListResource,
 	}
 }
 

@@ -69,9 +69,18 @@ type NotificationMatcher struct {
 	// Mode is all or any; unset means all.
 	Mode        string `json:"mode,omitempty"`
 	InvertMatch *bool  `json:"invert-match,omitempty"`
-	Disable     *bool  `json:"disable,omitempty"`
-	Comment     string `json:"comment,omitempty"`
-	Origin      string `json:"origin,omitempty"`
+	// Expression is the matcher's rules as one JSON rule tree, such as
+	// {"all-of":[{"match":{"type":"severity","severities":["error"]}}]},
+	// from PBS 4.2.10: what the matcher editor of that release stores, for a
+	// matcher created or edited in the web interface, in place of the
+	// match-* properties, mode and invert-match, which PBS refuses next to
+	// it (proxmox-notify's matcher/mod.rs, MatcherConfig and
+	// ensure_no_ignored_properties). PBS stores it compacted, with its keys
+	// in the order of its own types (ensure_valid_expression).
+	Expression string `json:"expression,omitempty"`
+	Disable    *bool  `json:"disable,omitempty"`
+	Comment    string `json:"comment,omitempty"`
+	Origin     string `json:"origin,omitempty"`
 }
 
 // GetSMTPEndpoint reads one SMTP endpoint.

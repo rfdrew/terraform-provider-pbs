@@ -161,6 +161,29 @@ func TestNodeCertificateResourceOrderOutcomes(t *testing.T) {
 	}
 }
 
+// A certificate PBS wrote before its task failed is one the provider now
+// trusts for this run only: with a pinned fingerprint, the warning says
+// what to pin, rather than promising that a later apply will.
+func TestNodeCertificateResourceOrderFailsAfterInstallPinned(t *testing.T) {
+	fake := newFakePBS()
+	acme := newFakeACME(t, fake)
+	readyForACME(acme)
+	h := newProtocolHarness(t, fake, withCertFingerprint(acme.certificate().Fingerprint))
+	config := certificateConfig(t, h, nil)
+
+	acme.orderFailureAfterInstall = "unable to open pid file '/run/proxmox-backup/proxy.pid' - No such file or directory"
+	applied := h.apply(t, "pbs_node_certificate", nil, config, h.plan(t, "pbs_node_certificate", nil, config))
+	requireNoProtocolErrors(t, applied.Diagnostics)
+	requireProtocolWarningContaining(t, applied.Diagnostics, "systemctl reload proxmox-backup-proxy")
+	requireProtocolWarningContaining(t, applied.Diagnostics, "Pin the new PBS certificate by its fingerprint")
+	requireProtocolWarningContaining(t, applied.Diagnostics, acme.certificate().Fingerprint)
+	for _, d := range applied.Diagnostics {
+		if strings.Contains(d.Detail, "next apply warns") {
+			t.Fatalf("detail promises a warning nothing gives: %s", d.Detail)
+		}
+	}
+}
+
 // untrustedAfterChange answers the certificate's info with a certificate the
 // client does not trust once the proxy changed it, as a new connection does
 // after the connection of the change closed.
