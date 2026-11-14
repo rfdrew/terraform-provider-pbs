@@ -161,9 +161,10 @@ func (r *syncJobResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"that user — and `Remote.Read` on " +
 			"`/remote/<remote>/<remote_store>`; reading the job also needs `Remote.Audit` on `/remote/<remote>`;\n" +
 			"* for a local pull, the same on `store`, and on `/datastore/<remote_store>[/<remote_ns>]` " +
-			"`Datastore.Audit` with `Datastore.Read`, or `Datastore.Backup` for the owner's own backups;\n" +
-			"* to push, `RemoteDatastore.Backup` on `/remote/<remote>/<remote_store>[/<remote_ns>]` — plus " +
-			"`RemoteDatastore.Prune` for `remove_vanished` — and `Datastore.Read` on `/datastore/<store>[/<ns>]`, " +
+			"`Datastore.Audit` with `Datastore.Read`, or `Datastore.Backup`, with `Datastore.Modify` unless `owner` " +
+			"is the provider's own, for the owner's own backups;\n" +
+			"* to push, `Remote.DatastoreBackup` on `/remote/<remote>/<remote_store>[/<remote_ns>]` — plus " +
+			"`Remote.DatastorePrune` for `remove_vanished` — and `Datastore.Read` on `/datastore/<store>[/<ns>]`, " +
 			"or `Datastore.Backup`, with `Datastore.Modify` unless `owner` is the provider's own, for the owner's " +
 			"own backups; reading the job also needs `Remote.Audit` on the remote path.\n\n" +
 			"With an `owner` other than root@pam, the owner itself needs the same privileges on this server when " +
@@ -743,14 +744,15 @@ func syncJobPrivileges(m syncJobModel) string {
 	target := aclPath("/datastore/"+m.Store.ValueString(), m.NS.ValueString())
 	switch {
 	case m.SyncDirection.ValueString() == pbsclient.SyncDirectionPush:
-		return fmt.Sprintf("RemoteDatastore.Backup on %s, plus RemoteDatastore.Prune for remove_vanished, and "+
+		return fmt.Sprintf("Remote.DatastoreBackup on %s, plus Remote.DatastorePrune for remove_vanished, and "+
 			"Datastore.Audit with Datastore.Read on %s, or Datastore.Backup for the owner's own backups, with "+
 			"Datastore.Modify unless owner is the user or token the provider signs in as",
 			aclPath("/remote/"+m.Remote.ValueString()+"/"+m.RemoteStore.ValueString(), m.RemoteNS.ValueString()), target)
 	case m.Remote.IsNull():
 		return fmt.Sprintf("Datastore.Audit and Datastore.Backup on %s, plus Datastore.Prune for remove_vanished and "+
 			"Datastore.Modify unless owner is the user or token the provider signs in as, and Datastore.Audit with "+
-			"Datastore.Read on %s", target, aclPath("/datastore/"+m.RemoteStore.ValueString(), m.RemoteNS.ValueString()))
+			"Datastore.Read on %s, or Datastore.Backup for the owner's own backups, with Datastore.Modify unless owner "+
+			"is the user or token the provider signs in as", target, aclPath("/datastore/"+m.RemoteStore.ValueString(), m.RemoteNS.ValueString()))
 	default:
 		return fmt.Sprintf("Datastore.Audit and Datastore.Backup on %s, plus Datastore.Prune for remove_vanished and "+
 			"Datastore.Modify unless owner is the user or token the provider signs in as, and Remote.Read on "+

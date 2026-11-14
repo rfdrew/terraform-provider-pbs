@@ -63,7 +63,7 @@ func TestSyncJobResourceFailures(t *testing.T) {
 		"pull":  {nil, "Remote.Read on /remote/offsite/store2"},
 		"local": {map[string]any{"remote": nil, "remote_store": "store3", "remote_ns": "dept1"}, "Datastore.Read on /datastore/store3/dept1"},
 		"push": {map[string]any{"sync_direction": "push", "remote_ns": "site-a", "ns": "dept1"},
-			"RemoteDatastore.Backup on /remote/offsite/store2/site-a, plus RemoteDatastore.Prune for remove_vanished, " +
+			"Remote.DatastoreBackup on /remote/offsite/store2/site-a, plus Remote.DatastorePrune for remove_vanished, " +
 				"and Datastore.Audit with Datastore.Read on /datastore/store1/dept1"},
 	} {
 		t.Run(name, func(t *testing.T) {

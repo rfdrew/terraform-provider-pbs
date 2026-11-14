@@ -31,6 +31,13 @@ Terraform and OpenTofu 1.11 are the first releases with write-only
 attributes, which the provider uses for passwords and other secrets that PBS
 never returns.
 
+Its actions need Terraform 1.14.1 or later, and its list resources
+Terraform 1.14 or later; see **Actions and list resources** below. OpenTofu
+supports neither yet
+([opentofu/opentofu#3309](https://github.com/opentofu/opentofu/issues/3309),
+[#3787](https://github.com/opentofu/opentofu/issues/3787)): with it, and with
+older Terraform, the provider works as before, without them.
+
 ## What it manages
 
 * **Access** — users (`pbs_user`), their API tokens (`pbs_api_token`) and
@@ -147,6 +154,74 @@ in Proxmox VE needs, and a certificate from Let's Encrypt. The guide
 a sync job, the guide **Back up to S3 object storage** puts a datastore
 on an S3-compatible object store, and the guide **Managing the network of a
 PBS node** changes network interfaces without cutting the node off.
+
+## Actions and list resources
+
+**Actions** have PBS do something once — run a job now, collect garbage,
+mount a datastore — and leave nothing in state. Terraform runs one when a
+resource's `lifecycle` `action_trigger` fires, or on demand with
+`terraform apply -invoke=action.<type>.<name>`. Actions that start a PBS task
+wait for it by default, within their `timeout` or the provider's
+`task_timeout`, show its progress, and fail with the end of its log when it
+fails. `wait = false`, where an action offers it, only starts it;
+`pbs_node_certificate_renew` and `pbs_network_reload` always wait.
+
+* Jobs: `pbs_sync_job_run`, `pbs_verify_job_run`, `pbs_prune_job_run`.
+* Datastores: `pbs_datastore_gc`, `pbs_datastore_mount`,
+  `pbs_datastore_unmount`, `pbs_datastore_s3_refresh`, and
+  `pbs_s3_endpoint_check`, which has PBS write, read and delete a test object
+  in a bucket.
+* Access and notifications: `pbs_realm_sync`, which syncs the users of an LDAP
+  or Active Directory realm, and `pbs_notification_test`.
+* Node: `pbs_node_certificate_renew`, `pbs_apt_update`, which refreshes the
+  package lists, and `pbs_network_reload`, which applies pending network
+  changes.
+
+Terraform 1.13 accepts `action` blocks and ignores them: set
+`required_version = ">= 1.14.1"` in configurations that use them.
+
+```terraform
+resource "terraform_data" "after_maintenance" {
+  input = "2026-11"
+
+  lifecycle {
+    action_trigger {
+      events  = [after_create, after_update]
+      actions = [action.pbs_verify_job_run.weekly]
+    }
+  }
+}
+
+action "pbs_verify_job_run" "weekly" {
+  config {
+    id = "weekly-store1"
+  }
+}
+```
+
+**List resources** answer `terraform query`, which lists existing objects to
+bring under Terraform: users, tokens, ACL entries, realms, datastores and
+their namespaces, jobs, remotes, notification endpoints and matchers, S3
+endpoints, traffic control rules, metric servers, ACME accounts and plugins,
+sync encryption keys, network interfaces and APT repositories — each under
+the name of its resource. `terraform query -generate-config-out=generated.tf`
+writes an `import` block and a `resource` block for each object; the
+configuration is what importing the object gives, so `terraform plan` on it
+plans nothing but the import. Secrets are never listed: where a resource
+needs one — a Gotify token, a webhook secret, an S3 access key, the settings
+of a DNS plugin — the page of the list resource says what to fill in.
+
+```terraform
+# users.tfquery.hcl
+list "pbs_user" "pbs" {
+  provider         = pbs
+  include_resource = true
+
+  config {
+    realm = "pbs"
+  }
+}
+```
 
 ## Authentication
 

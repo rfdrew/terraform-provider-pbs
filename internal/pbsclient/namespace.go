@@ -153,7 +153,11 @@ func (c *Client) DeleteNamespace(ctx context.Context, store, ns string, deletion
 // because it is a removable datastore that is not mounted, or because its
 // maintenance mode forbids the operation: 400 "datastore 'x' is not
 // mounted" (with a capital D from some calls), "datastore 'x' is
-// unavailable: offline maintenance mode".
+// unavailable: offline maintenance mode: ...", or one of the modes PBS sets
+// while its own task runs, which refuse reading too: "... is unavailable:
+// datastore is being unmounted", "...: datastore is being deleted",
+// "...: S3 refresh maintenance mode: ..." (pbs-api-types' maintenance.rs,
+// MaintenanceMode::check).
 func IsDatastoreUnavailable(err error) bool {
 	apiErr, ok := asError(err)
 	if !ok || apiErr.StatusCode != http.StatusBadRequest {

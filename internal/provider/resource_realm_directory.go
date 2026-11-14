@@ -447,8 +447,8 @@ func (r *directoryRealmResource) description() string {
 	}
 	return intro +
 		"Only users that exist in PBS can sign in: create them with `pbs_user`, or have a sync create them " +
-		"from the directory — in the web interface, or with `proxmox-backup-manager " + r.kind.typ + " sync " +
-		"<realm>`; `filter`, `user_classes`, `sync_attributes` and `sync_defaults` shape what it does. They " +
+		"from the directory — in the web interface, with `proxmox-backup-manager " + r.kind.typ + " sync " +
+		"<realm>`, or with the `pbs_realm_sync` action (Terraform 1.14.1 or later); `filter`, `user_classes`, `sync_attributes` and `sync_defaults` shape what it does. They " +
 		"have no privileges until a `pbs_acl` grants them some.\n\n" +
 		"~> **PBS checks the connection on every change.** Creating the realm, and every update — even of " +
 		"`comment` — first connects to the server as the realm would after the change, binds as `bind_dn` " +

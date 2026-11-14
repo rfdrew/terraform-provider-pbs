@@ -4,6 +4,139 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Actions, which need Terraform 1.14.1 or later, and list resources, which need
+Terraform 1.14 or later; OpenTofu supports neither yet. With older Terraform
+and with OpenTofu the provider works as in 0.4.0, apart from the changes and
+fixes below, and configurations written for 0.4.0 work unchanged.
+
+### Added
+
+- Actions, which Terraform runs when a resource's `lifecycle`
+  `action_trigger` fires or with `terraform apply -invoke`, and which leave
+  nothing in state. Those that start a PBS task wait for it by default,
+  within their `timeout` or the provider's `task_timeout`, report the lines
+  it logs as progress, and fail with the end of its log when it fails;
+  `wait = false`, where an action offers it, only starts it —
+  `pbs_node_certificate_renew` and `pbs_network_reload` always wait. The wait,
+  except that of `pbs_node_certificate_renew`, outlasts up to two minutes of
+  status polls PBS does not answer. A task goes
+  on in PBS when the action stops waiting, except an unmount, which would
+  block the datastore.
+- `pbs_sync_job_run`, `pbs_verify_job_run` and `pbs_prune_job_run` actions:
+  run a job now, as **Run now** in the web interface does. The run counts as
+  the job's last run and sends the usual notification; the schedule stays as
+  it is. A disabled prune job runs too. The sync action reports PBS's
+  summary, the prune action how many backups it kept and removed.
+- `pbs_datastore_gc` action: garbage collection of a datastore, reporting what
+  PBS removed and what is pending removal.
+- `pbs_datastore_mount` and `pbs_datastore_unmount` actions: mount and unmount
+  a removable datastore. Mounting reports the sync jobs with `run_on_mount`
+  it starts; unmounting a datastore that is not mounted succeeds, and an
+  unmount that still waits for the datastore's operations when the action
+  stops waiting is stopped, which leaves the datastore mounted. With
+  `gc_on_unmount`, the unmount explains a maintenance mode that keeps PBS
+  from starting the garbage collection it runs first.
+- `pbs_datastore_s3_refresh` action: reads a datastore's contents from its S3
+  bucket into its local cache, empty namespaces from PBS 4.1.5. It refuses a
+  datastore that is not on S3, which PBS would leave in maintenance mode
+  `s3-refresh`, and says how to clear that mode after a failed refresh. Its
+  page describes the cases PBS supports — objects removed from the bucket by
+  hand, a damaged cache — and warns that two PBS must never share one
+  datastore.
+- `pbs_s3_endpoint_check` action: has PBS reach a bucket through an S3
+  endpoint and write, read and delete a test object, and explains the step
+  that failed, which is all PBS reports.
+- `pbs_realm_sync` action: syncs the users of an LDAP or Active Directory
+  realm, with `dry_run`, `enable_new` and `remove_vanished` for this run, and
+  reports how many users PBS created, updated and deleted.
+- `pbs_notification_test` action: sends a test notification through an
+  endpoint, `mail-to-root` included, and fails when PBS cannot deliver it.
+- `pbs_node_certificate_renew` action: renews the node's ACME certificate now,
+  or with `force` before it is due; one that is not due is left as it is.
+  It always waits for the renewal, so that, like `pbs_node_certificate`, it
+  trusts the new certificate for the rest of the run; it says when
+  `tls_cert_fingerprint` or fingerprints pinned by Proxmox VE need the new
+  one, and fails when the PBS proxy keeps serving the previous certificate.
+- `pbs_apt_update` action: refreshes the node's package lists, as
+  **Refresh** under Updates does, and reports the updates PBS then lists.
+  Failures of `apt-get update` are warnings: those that make apt-get fail,
+  such as the enterprise repository without a subscription or the lock held
+  by another apt, and network trouble, which PBS ends without a warning and
+  only apt's `Err:` lines in the task log show.
+- `pbs_network_reload` action: applies the node's pending network changes,
+  for `terraform apply -invoke`, and always waits for the reload; it does
+  nothing when nothing is pending, unless `force` is set. There is no action
+  to revert pending changes: it would drop Terraform's own, and bring back
+  interfaces Terraform deleted without Terraform noticing.
+- List resources for `terraform query`, one for each of these resources,
+  under its name: `pbs_user`, `pbs_api_token`, `pbs_acl`,
+  `pbs_realm_openid`, `pbs_realm_ldap`, `pbs_realm_ad`, `pbs_datastore`,
+  `pbs_namespace`, `pbs_s3_endpoint`, `pbs_prune_job`, `pbs_verify_job`,
+  `pbs_remote`, `pbs_sync_job`, `pbs_sync_encryption_key`,
+  `pbs_traffic_control_rule`, the four `pbs_notification_endpoint_*`,
+  `pbs_notification_matcher`, `pbs_metric_server_influxdb_http`,
+  `pbs_metric_server_influxdb_udp`, `pbs_acme_account`, `pbs_acme_plugin`,
+  `pbs_apt_repository`, `pbs_apt_standard_repository` and
+  `pbs_network_interface`. Some take filters, such as `realm` for users,
+  `userid` for tokens, `path` and `auth_id` for ACL entries, `store` for
+  namespaces and jobs, and `node` for node objects. A listed object is what
+  importing it gives, so the configuration
+  `terraform query -generate-config-out` writes plans no change; sensitive
+  values are left out of the results. Where a resource needs a value the
+  results leave out — a secret PBS never returns (the token of a Gotify
+  endpoint, the secrets of a webhook, the password of an SMTP endpoint with a
+  username), a sensitive value it does return (the access key of an S3
+  endpoint, the settings of a DNS plugin), or the contact of a Let's Encrypt
+  account, which Let's Encrypt no longer returns — the generated
+  configuration is incomplete until it is filled in, and a physical
+  interface PBS configured with DHCP gets a `method` the resource refuses
+  there; the list resource's page says what to do. The namespaces of a
+  datastore PBS cannot open are left out with a warning, and on PBS older
+  than 4.2 the sync encryption key list is empty, with a warning.
+- `pbs_notification_matcher`: `expression`, the matcher's rules as a match
+  expression, which needs PBS 4.2.10: the rule tree the matcher editor of the
+  web interface stores, in which `all-of`, `any-of`, `one-of` and `not` nest,
+  best written with `jsonencode()`. The rules are checked when planning, apart
+  from regular expressions and schedules, which PBS checks; and the same rules
+  written another way — PBS stores them rewritten, and Terraform generates
+  them as `jsonencode(…)` — are no change. It cannot be combined with
+  `match_*` rules, `mode = "any"` or `invert_match = true`, which PBS refuses
+  next to it. A matcher edited in the web interface, which turns its `match_*`
+  rules into an expression, gets them back on the next apply, and imported and
+  listed matchers read with their expression.
+
+### Changed
+
+- `pbs_notification_endpoint_webhook`: a JSON `body` that differs from the
+  one PBS holds only in its layout — spacing, the order of keys, escapes —
+  is no change. Terraform writes a JSON body as `jsonencode(…)` when it
+  generates configuration, which would otherwise change the body on the
+  first apply.
+
+### Fixed
+
+- `pbs_user`: destroying a user whose realm was deleted first, such as an
+  LDAP or Active Directory realm destroyed earlier in the same run, no
+  longer fails with "unknown realm". PBS deletes the user before it answers
+  that, but leaves the user's API tokens and their ACL entries, which would
+  apply again to a user created later under the same ID: the provider
+  checks that the user is gone and deletes the tokens.
+- `pbs_api_tokens` with `userid` fails for a user that does not exist, as
+  intended, instead of listing no tokens, which is what PBS answers.
+- `pbs_sync_job` and the guide **Copy backups to an offsite PBS** name the
+  privileges of a push job's remote as PBS does: `Remote.DatastoreBackup` and
+  `Remote.DatastorePrune`, not `RemoteDatastore.Backup` and
+  `RemoteDatastore.Prune`, which PBS does not know; and a local pull job's
+  source as PBS checks it: `Datastore.Backup` for the owner's own backups,
+  with `Datastore.Modify` unless `owner` is the provider's own, will do
+  instead of `Datastore.Read`.
+- `pbs_node_certificate`: when PBS writes a new certificate but its order or
+  upload then fails, the warning says how to update the provider's TLS
+  settings, such as a pinned `tls_cert_fingerprint`, instead of saying that
+  the next apply would warn, which no apply did.
+
 ## [0.4.0] - 2026-11-08
 
 Verified against Proxmox Backup Server 4.0.22, 4.2.0 and 4.2.8. The
@@ -495,6 +628,7 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
+[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0

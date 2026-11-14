@@ -10,10 +10,11 @@ VERSION ?= dev
 TFPLUGINDOCS_VERSION ?= v0.25.0
 
 # tfplugindocs renders from the schema of whichever Terraform it runs. Releases
-# before 1.12 report no resource identities and those before 1.14 no actions or
-# list resources, and tfplugindocs then leaves them out without complaint, so it
-# is told to download this release instead of using the one on PATH. It must be
-# an exact version: tfplugindocs refuses wildcards such as 1.14.x.
+# before 1.12 report no resource identities and those before 1.14 no actions,
+# which tfplugindocs then leaves out without complaint; 1.13 reports list
+# resources wrapped in a block of Terraform's own, which it would render wrong.
+# So it is told to download this release instead of using the one on PATH. It
+# must be an exact version: tfplugindocs refuses wildcards such as 1.14.x.
 TERRAFORM_DOCS_VERSION ?= 1.14.0
 
 # docs-offline and docs-validate need neither Terraform nor a provider build:

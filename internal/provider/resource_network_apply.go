@@ -65,7 +65,9 @@ func (r *networkApplyResource) Schema(_ context.Context, _ resource.SchemaReques
 			"interface, by another tool, or left by an earlier run —, shows them in `pending_changes` and in a " +
 			"warning, and plans to apply them: PBS applies the whole pending configuration or nothing, whoever made " +
 			"it. To drop changes you do not want applied, revert them first: Revert in the Network Interfaces panel " +
-			"of the web interface, or `proxmox-backup-manager network revert` on the node.\n\n" +
+			"of the web interface, or `proxmox-backup-manager network revert` on the node. To apply what is " +
+			"pending once, outside a configuration, Terraform 1.14.1 and later have the `pbs_network_reload` " +
+			"action.\n\n" +
 			"Every apply runs `ifreload -a`, also when nothing is pending, which brings every interface with an " +
 			"`auto` line in line with the whole of `/etc/network/interfaces`: it applies edits made to that file " +
 			"directly, and removes addresses added outside it, such as by hand or by keepalived. `pending_changes` " +

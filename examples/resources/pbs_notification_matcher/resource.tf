@@ -33,3 +33,21 @@ resource "pbs_notification_matcher" "sync_errors" {
   match_field    = ["exact:type=sync"]
   match_severity = ["error"]
 }
+
+# Rules that nest, from PBS 4.2.10: notifications of garbage collection,
+# during working hours or when they are warnings or errors. This is the
+# example of PBS's documentation, the kind of rule tree the matcher editor of
+# the web interface builds; jsonencode writes it as PBS takes it.
+resource "pbs_notification_matcher" "gc" {
+  name   = "gc-alerts"
+  target = [pbs_notification_endpoint_smtp.mail.name]
+  expression = jsonencode({
+    "all-of" = [
+      { "any-of" = [
+        { match = { type = "calendar", schedule = "mon..fri 09:00-17:00" } },
+        { match = { type = "severity", severities = ["warning", "error"] } },
+      ] },
+      { match = { type = "field", field = "type", values = ["gc"] } },
+    ]
+  })
+}

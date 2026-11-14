@@ -1,11 +1,13 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -33,6 +35,10 @@ import (
 //   - a matcher's targets must be endpoints; its match-field entries need
 //     an exact: or regex: prefix, and PBS writes the values of exact: and
 //     match-severity back without spaces around the commas;
+//   - a matcher's expression, as PBS 4.2.10 and later take it, is refused
+//     next to match-*, mode or invert-match, and when it is no valid rule
+//     tree; PBS stores it compacted, with the keys in the order of its own
+//     types. An update applies its delete first;
 //   - an update's delete accepts only the names PBS accepts;
 //   - missing entries are 404 "endpoint 'x' not found" and "matcher 'x' not
 //     found", on GET, PUT and DELETE;
@@ -105,7 +111,7 @@ var (
 		"smtp":     {"author", "comment", "disable", "mailto", "mailto-user", "password", "port", "username"},
 		"gotify":   {"comment", "disable"},
 		"webhook":  {"body", "comment", "disable", "header", "secret"},
-		"matcher":  {"comment", "disable", "invert-match", "match-calendar", "match-field", "match-severity", "mode", "target"},
+		"matcher":  {"comment", "disable", "expression", "invert-match", "match-calendar", "match-field", "match-severity", "mode", "target"},
 	}
 )
 
@@ -356,6 +362,24 @@ func (n *fakeNotifications) applyLocked(w http.ResponseWriter, e *fakeNotificati
 		if severities != nil {
 			e.props["match-severity"] = severities
 		}
+		if expression, ok := e.props["expression"].(string); ok {
+			var conflicting []string
+			for _, key := range []string{"invert-match", "mode", "match-field", "match-severity", "match-calendar"} {
+				if _, set := e.props[key]; set {
+					conflicting = append(conflicting, key)
+				}
+			}
+			if len(conflicting) > 0 {
+				writeError(w, "invalid matcher config: 'expression' property is mutually exclusive with: %s", strings.Join(conflicting, ", "))
+				return false
+			}
+			stored, err := fakeStoredExpression(expression)
+			if err != nil {
+				writeError(w, "invalid matcher config: 'expression' is not valid: %s", err)
+				return false
+			}
+			e.props["expression"] = stored
+		}
 		if _, sent := params["target"]; sent {
 			for _, target := range stringList(e.props["target"]) {
 				if t, ok := n.lookupLocked(target); !ok || t.kind == "matcher" {
@@ -565,4 +589,107 @@ func (n *fakeNotifications) test(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeData(w, nil, "")
+}
+
+// fakeStoredExpression checks a matcher's expression as PBS does and returns
+// it as PBS stores it: compacted, each match test with its type first and
+// then its other keys in the order of proxmox-notify's types, and strings
+// as serde_json writes them, without the HTML escapes encoding/json and
+// jsonencode write.
+func fakeStoredExpression(expression string) (string, error) {
+	if err := checkMatchExpression(expression); err != nil {
+		return "", err
+	}
+	var tree any
+	if err := json.Unmarshal([]byte(expression), &tree); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	// serde_json escapes the quote, the backslash and U+0000 to U+001F only.
+	writeString := func(s string) {
+		b.WriteByte('"')
+		for _, r := range s {
+			switch r {
+			case '"':
+				b.WriteString(`\"`)
+			case '\\':
+				b.WriteString(`\\`)
+			case '\b':
+				b.WriteString(`\b`)
+			case '\f':
+				b.WriteString(`\f`)
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				if r < 0x20 {
+					fmt.Fprintf(&b, `\u%04x`, r)
+				} else {
+					b.WriteRune(r)
+				}
+			}
+		}
+		b.WriteByte('"')
+	}
+	writeStrings := func(list any) {
+		b.WriteByte('[')
+		for i, e := range list.([]any) {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeString(e.(string))
+		}
+		b.WriteByte(']')
+	}
+	var writeRule func(rule any)
+	writeRule = func(rule any) {
+		for key, value := range rule.(map[string]any) {
+			b.WriteString(`{"` + key + `":`)
+			switch key {
+			case "all-of", "any-of", "one-of":
+				b.WriteByte('[')
+				for i, child := range value.([]any) {
+					if i > 0 {
+						b.WriteByte(',')
+					}
+					writeRule(child)
+				}
+				b.WriteByte(']')
+			case "not":
+				writeRule(value)
+			case "constant":
+				b.WriteString(strconv.FormatBool(value.(bool)))
+			case "match":
+				test := value.(map[string]any)
+				kind := test["type"].(string)
+				b.WriteString(`{"type":`)
+				writeString(kind)
+				switch kind {
+				case "field":
+					b.WriteString(`,"field":`)
+					writeString(test["field"].(string))
+					if values, ok := test["values"]; ok {
+						b.WriteString(`,"values":`)
+						writeStrings(values)
+					} else {
+						b.WriteString(`,"regex":`)
+						writeString(test["regex"].(string))
+					}
+				case "severity":
+					b.WriteString(`,"severities":`)
+					writeStrings(test["severities"])
+				case "calendar":
+					b.WriteString(`,"schedule":`)
+					writeString(test["schedule"].(string))
+				}
+				b.WriteByte('}')
+			}
+			b.WriteByte('}')
+		}
+	}
+	writeRule(tree)
+	return b.String(), nil
 }

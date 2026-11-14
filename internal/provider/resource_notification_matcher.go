@@ -26,10 +26,12 @@ import (
 )
 
 var (
-	_ resource.Resource                = &notificationMatcherResource{}
-	_ resource.ResourceWithConfigure   = &notificationMatcherResource{}
-	_ resource.ResourceWithIdentity    = &notificationMatcherResource{}
-	_ resource.ResourceWithImportState = &notificationMatcherResource{}
+	_ resource.Resource                   = &notificationMatcherResource{}
+	_ resource.ResourceWithConfigure      = &notificationMatcherResource{}
+	_ resource.ResourceWithIdentity       = &notificationMatcherResource{}
+	_ resource.ResourceWithImportState    = &notificationMatcherResource{}
+	_ resource.ResourceWithModifyPlan     = &notificationMatcherResource{}
+	_ resource.ResourceWithValidateConfig = &notificationMatcherResource{}
 )
 
 // NewNotificationMatcherResource returns the pbs_notification_matcher
@@ -49,6 +51,7 @@ type notificationMatcherModel struct {
 	MatchCalendar types.Set    `tfsdk:"match_calendar"`
 	Mode          types.String `tfsdk:"mode"`
 	InvertMatch   types.Bool   `tfsdk:"invert_match"`
+	Expression    types.String `tfsdk:"expression"`
 	Disable       types.Bool   `tfsdk:"disable"`
 	Comment       types.String `tfsdk:"comment"`
 	Origin        types.String `tfsdk:"origin"`
@@ -57,7 +60,7 @@ type notificationMatcherModel struct {
 // notificationMatcherDeletable are the properties PBS lets a matcher update
 // delete: all of them.
 var notificationMatcherDeletable = []string{
-	"comment", "disable", "invert-match", "match-calendar", "match-field", "match-severity", "mode", "target",
+	"comment", "disable", "expression", "invert-match", "match-calendar", "match-field", "match-severity", "mode", "target",
 }
 
 // How a matcher combines its match_* rules; all is PBS's default.
@@ -86,8 +89,15 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 			"notification to every matcher; each one that matches sends it to its `target`s.\n\n" +
 			"A notification has a severity — `info`, `notice`, `warning`, `error` or `unknown` — and fields, such " +
 			"as `type` (`gc`, `prune`, `sync`, `verify`, `tape-backup`, `package-updates`, `acme`…), `datastore`, " +
-			"`job-id` or `hostname`. A matcher matches by severity, by field and by time of day; one without any " +
-			"`match_*` rule matches every notification.\n\n" +
+			"`job-id` or `hostname`. A matcher matches by severity, by field and by time of day, with `match_*` " +
+			"rules or with an `expression`; one without either matches every notification.\n\n" +
+			"**`match_*` rules or an `expression`.** The `match_*` rules combine one way, as `mode` says, and " +
+			"`invert_match` inverts their result. An `expression`, from PBS 4.2.10, is a tree of nested rules, as " +
+			"the matcher editor of the web interface builds them. A matcher has one or the " +
+			"other. PBS 4.2.10 and later store the rules of a matcher created or edited in the web interface as an " +
+			"expression, and convert a matcher's `match_*` rules, `mode` and `invert_match` into one when it is " +
+			"edited there: the next plan of a matcher managed with `match_*` rules then removes the expression and " +
+			"restores the rules. Edit the rules of a matcher Terraform manages only through Terraform.\n\n" +
 			"**The built-in `default-matcher`** routes every notification but those of successful prune jobs to " +
 			"`mail-to-root`, the built-in sendmail endpoint. It cannot be created or deleted, only changed: manage " +
 			"it by importing it, and destroying the resource resets it to its built-in settings. To send all " +
@@ -126,7 +136,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 				Optional:    true,
 				MarkdownDescription: "Severities to match. Each entry is one severity — `info`, `notice`, " +
 					"`warning`, `error` or `unknown` — or several separated by commas, such as `warning,error`, " +
-					"which match a notification of any of them.",
+					"which match a notification of any of them. Conflicts with `expression`.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.NoNullValues(),
@@ -139,7 +149,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 				Optional:    true,
 				MarkdownDescription: "Fields to match, each `exact:<field>=<value>[,<value>…]` for one of the " +
 					"values, such as `exact:type=prune` or `exact:datastore=store1,store2`, or " +
-					"`regex:<field>=<regular expression>`, such as `regex:hostname=^pbs-`.",
+					"`regex:<field>=<regular expression>`, such as `regex:hostname=^pbs-`. Conflicts with `expression`.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.NoNullValues(),
@@ -150,7 +160,7 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 				ElementType: types.StringType,
 				Optional:    true,
 				MarkdownDescription: "Times to match, each a time range with optional days, such as `8-17`, " +
-					"`mon..fri 8-17` or `sat,sun 10:00-14:30`. PBS checks them.",
+					"`mon..fri 8-17` or `sat,sun 10:00-14:30`. PBS checks them. Conflicts with `expression`.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.NoNullValues(),
@@ -162,7 +172,8 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 				Computed: true,
 				Default:  stringdefault.StaticString(matcherModeAll),
 				MarkdownDescription: "How the `match_*` rules combine: `all`, the default, matches a notification " +
-					"that every rule matches, `any` one that one of them does.",
+					"that every rule matches, `any` one that one of them does. `any` conflicts with `expression`, " +
+					"whose `any-of` does the same.",
 				Validators: []validator.String{stringvalidator.OneOf(matcherModeAll, matcherModeAny)},
 			},
 			"invert_match": schema.BoolAttribute{
@@ -170,7 +181,29 @@ func (r *notificationMatcherResource) Schema(_ context.Context, _ resource.Schem
 				Computed: true,
 				Default:  booldefault.StaticBool(false),
 				MarkdownDescription: "Whether to match the notifications the rules do not match instead. Defaults " +
-					"to `false`; it has no effect on a matcher without rules.",
+					"to `false`; it has no effect on a matcher without rules. `true` conflicts with `expression`, " +
+					"whose `not` does the same.",
+			},
+			"expression": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "The matcher's rules as a match expression, PBS 4.2.10 and later: a JSON rule " +
+					"tree, best written with `jsonencode()`, as in the example. Each rule is an object with one key: " +
+					"`all-of`, `any-of` or `one-of`, a list of rules, matches when all, at least one or exactly one " +
+					"of them match; `not`, a rule, when that one does not; `constant`, `true` or `false`, always or " +
+					"never; and `match`, a test of the notification:\n\n" +
+					"  - `{ type = \"severity\", severities = [\"warning\", \"error\"] }` — its severity is one of " +
+					"`severities`: `info`, `notice`, `warning`, `error` or `unknown`;\n" +
+					"  - `{ type = \"field\", field = \"type\", values = [\"gc\", \"prune\"] }` — the field has one " +
+					"of the `values`; with `regex = \"^backup-\"` instead of `values`, it matches the regular " +
+					"expression. A notification without the field does not match;\n" +
+					"  - `{ type = \"calendar\", schedule = \"mon..fri 9-17\" }` — it was sent in the time range, " +
+					"with optional days, as in `match_calendar`.\n\n" +
+					"  The provider checks the rules when planning; PBS checks regular expressions and schedules. PBS " +
+					"stores the expression compacted, with its keys in its own order: the same rules written another " +
+					"way are no change. Conflicts with `match_severity`, `match_field` and `match_calendar`, " +
+					"with `mode = \"any\"` and with `invert_match = true`.",
+				Validators:    []validator.String{matchExpressionValidator{}},
+				PlanModifiers: []planmodifier.String{sameJSONKeepsPrior{}},
 			},
 			"disable": schema.BoolAttribute{
 				Optional:            true,
@@ -238,6 +271,7 @@ var notificationMatcherDefaults = notificationMatcherModel{
 	MatchCalendar: types.SetNull(types.StringType),
 	Mode:          types.StringValue(matcherModeAll),
 	InvertMatch:   types.BoolValue(false),
+	Expression:    types.StringNull(),
 	Disable:       types.BoolValue(false),
 	Comment:       types.StringNull(),
 }
@@ -250,12 +284,14 @@ func (m *notificationMatcherModel) changes(prior notificationMatcherModel, c *pr
 	c.StringSet("match-calendar", m.MatchCalendar, prior.MatchCalendar)
 	c.StringDefault("mode", m.Mode, prior.Mode, matcherModeAll)
 	c.BoolDefault("invert-match", m.InvertMatch, prior.InvertMatch, false)
+	c.String("expression", m.Expression, prior.Expression)
 	c.BoolDefault("disable", m.Disable, prior.Disable, false)
 	c.String("comment", m.Comment, prior.Comment)
 }
 
 // fromNotificationMatcher records a matcher as PBS reports it. The name is
-// the one it was looked up by.
+// the one it was looked up by. The expression m holds, the planned or the
+// prior one, stays when PBS reports the same rules, which it rewrites.
 func (m *notificationMatcherModel) fromNotificationMatcher(name string, matcher pbsclient.NotificationMatcher, diags *diag.Diagnostics) {
 	m.ID = types.StringValue(name)
 	m.Name = types.StringValue(name)
@@ -265,6 +301,7 @@ func (m *notificationMatcherModel) fromNotificationMatcher(name string, matcher 
 	m.MatchCalendar = stringSetOrNull(matcher.MatchCalendar, diags)
 	m.Mode = stringOr(matcher.Mode, matcherModeAll)
 	m.InvertMatch = boolOr(matcher.InvertMatch, false)
+	m.Expression = keepSameJSON(m.Expression, matcher.Expression)
 	m.Disable = boolOr(matcher.Disable, false)
 	m.Comment = stringOrNull(matcher.Comment)
 	m.Origin = stringOr(matcher.Origin, pbsclient.OriginUserCreated)
@@ -358,6 +395,68 @@ func (r *notificationMatcherResource) Read(ctx context.Context, req resource.Rea
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
+// ValidateConfig refuses match_* rules, mode any and invert_match true next
+// to an expression, which PBS refuses next to it. Mode all and
+// invert_match false are PBS's defaults, which the resource never sends:
+// Terraform writes them into the configuration it generates for a matcher
+// with an expression, as they are optional attributes with a value.
+func (r *notificationMatcherResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config notificationMatcherModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	// An unknown expression may turn out null, as a variable does in the
+	// validation Terraform runs before every plan.
+	if resp.Diagnostics.HasError() || config.Expression.IsNull() || config.Expression.IsUnknown() {
+		return
+	}
+	conflict := func(name, setting, instead string) {
+		resp.Diagnostics.AddAttributeError(path.Root(name), "Conflicting matcher rules",
+			fmt.Sprintf("%s cannot be set next to expression, which holds all of the matcher's rules and which PBS "+
+				"refuses next to it: %s.", setting, instead))
+	}
+	for name, rules := range map[string]types.Set{
+		"match_severity": config.MatchSeverity, "match_field": config.MatchField, "match_calendar": config.MatchCalendar,
+	} {
+		if !rules.IsNull() && !rules.IsUnknown() {
+			conflict(name, name, "write the rules into the expression as match rules instead, or leave the expression out")
+		}
+	}
+	if config.Mode.ValueString() == matcherModeAny {
+		conflict("mode", `mode = "any"`, "combine rules with any-of in the expression instead")
+	}
+	if config.InvertMatch.ValueBool() {
+		conflict("invert_match", "invert_match = true", "invert rules with not in the expression instead")
+	}
+}
+
+// ModifyPlan refuses an expression on a server older than PBS 4.2.10, which
+// does not know the property. It also keeps origin when nothing else
+// changes: the framework plans the computed origin as unknown when the
+// configuration differs from the state at all, also when it differs only
+// in how it writes the expression, which sameJSONKeepsPrior then plans as
+// the prior one, and the plan would show an update that changes nothing.
+func (r *notificationMatcherResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var expression, origin types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("expression"), &expression)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("origin"), &origin)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.data.requireRelease(&resp.Diagnostics, path.Root("expression"), expression, pbs4210)
+	if req.State.Raw.IsNull() || !origin.IsUnknown() {
+		return
+	}
+	var prior types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("origin"), &prior)...)
+	unchanged := resp.Plan
+	resp.Diagnostics.Append(unchanged.SetAttribute(ctx, path.Root("origin"), prior)...)
+	if !resp.Diagnostics.HasError() && unchanged.Raw.Equal(req.State.Raw) {
+		resp.Plan = unchanged
+	}
+}
+
 func (r *notificationMatcherResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state notificationMatcherModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -370,6 +469,14 @@ func (r *notificationMatcherResource) Update(ctx context.Context, req resource.U
 
 	changes := newPropertyChanges(&resp.Diagnostics, notificationMatcherDeletable...)
 	plan.changes(state, changes)
+	// PBS refuses an expression next to mode or invert-match even at its
+	// default, and a matcher may store one so — default-matcher's built-in
+	// section has mode all —, which the state cannot tell from an absent
+	// one: an update of a matcher with an expression deletes both, which PBS
+	// does before it checks, and also when they are absent.
+	if !plan.Expression.IsNull() && !changes.Empty() {
+		changes.Delete("mode", "invert-match")
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}

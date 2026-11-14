@@ -298,6 +298,10 @@ type Envelope struct {
 	// Changes is the diff of a configuration written but not applied yet,
 	// which PBS sends next to data for the node's network configuration.
 	Changes string `json:"changes,omitempty"`
+	// Total and Active describe a task's log, next to its lines: how many
+	// lines it has, and whether the task still runs.
+	Total  int   `json:"total,omitempty"`
+	Active *bool `json:"active,omitempty"`
 }
 
 // Get, Post, Put and Delete are Call with the method filled in.

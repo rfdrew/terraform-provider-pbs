@@ -244,6 +244,38 @@ func (c *Client) GetACMEPlugin(ctx context.Context, id string) (ACMEPlugin, stri
 	return plugin, env.Digest, nil
 }
 
+// UnreadableACMEPlugin is the ID, and the type, PBS would list in place of a
+// plugin's own for a section of plugins.cfg it parsed but cannot convert into
+// a plugin (proxmox-acme-api/src/plugin_api_impl.rs, modify_cfg_for_api).
+// With PBS's plugin types that does not happen: a section that parses always
+// converts, and a file PBS cannot parse — after a bad edit by hand — makes it
+// refuse the whole listing, and every read, with 400 "parsing
+// \"/etc/proxmox-backup/acme/plugins.cfg\" failed: line N - ..."
+// (plugin_config.rs, plugin_config).
+const UnreadableACMEPlugin = "*Error*"
+
+// ListACMEPlugins lists the ACME plugins PBS has, the built-in standalone
+// one included, in no particular order, without their settings: PBS answers
+// each plugin's data too, decoded, which a list has no use for. It needs
+// Sys.Modify on /system/certificates.
+func (c *Client) ListACMEPlugins(ctx context.Context) ([]ACMEPlugin, error) {
+	var entries []struct {
+		ID              string `json:"plugin"`
+		Type            string `json:"type"`
+		API             string `json:"api,omitempty"`
+		ValidationDelay *int64 `json:"validation-delay,omitempty"`
+		Disable         *bool  `json:"disable,omitempty"`
+	}
+	if _, err := c.Get(ctx, "/config/acme/plugins", nil, &entries); err != nil {
+		return nil, err
+	}
+	plugins := make([]ACMEPlugin, 0, len(entries))
+	for _, e := range entries {
+		plugins = append(plugins, ACMEPlugin{ID: e.ID, Type: e.Type, API: e.API, ValidationDelay: e.ValidationDelay, Disable: e.Disable})
+	}
+	return plugins, nil
+}
+
 // CreateACMEPlugin creates a DNS plugin from params, which must hold "id",
 // "type" (dns), "api" and "data", encoded with EncodeACMEPluginData. The
 // settings are kept out of any error.

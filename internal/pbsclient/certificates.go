@@ -353,12 +353,30 @@ func parsePrivateKeyPEM(key string) (crypto.Signer, error) {
 // change.
 type connectionKey struct{}
 
+// requestTimeoutKey is the context key of a time limit that replaces the
+// client's own for the requests made with that context; see
+// WithRequestTimeout.
+type requestTimeoutKey struct{}
+
+// WithRequestTimeout returns a context whose requests may take up to timeout
+// each, instead of the client's request timeout: for the few calls that PBS
+// answers only after it has talked to another server, such as checking an
+// S3 endpoint, which takes over half a minute to fail when the endpoint does
+// not answer.
+func WithRequestTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	return context.WithValue(ctx, requestTimeoutKey{}, timeout)
+}
+
 // httpClientFor returns the HTTP client a call with ctx goes through.
 func (c *Client) httpClientFor(ctx context.Context) *http.Client {
-	if hc, ok := ctx.Value(connectionKey{}).(*http.Client); ok {
-		return hc
+	hc := c.httpClient
+	if dedicated, ok := ctx.Value(connectionKey{}).(*http.Client); ok {
+		hc = dedicated
 	}
-	return c.httpClient
+	if timeout, ok := ctx.Value(requestTimeoutKey{}).(time.Duration); ok && timeout > 0 && timeout != hc.Timeout {
+		return &http.Client{Timeout: timeout, Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Jar: hc.Jar}
+	}
+	return hc
 }
 
 // dedicatedConnection returns an HTTP client that keeps to one connection,

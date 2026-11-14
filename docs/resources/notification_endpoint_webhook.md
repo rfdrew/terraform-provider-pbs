@@ -84,7 +84,7 @@ resource "pbs_notification_matcher" "errors_to_chat" {
 
 ### Optional
 
-- `body` (String) Body of the request, a template, such as a JSON document; none when left out. Send it with a `Content-Type` header that says what it is. PBS stores it base64-encoded; the provider encodes and decodes it.
+- `body` (String) Body of the request, a template, such as a JSON document; none when left out. Send it with a `Content-Type` header that says what it is. PBS stores it base64-encoded; the provider encodes and decodes it. A JSON body that differs from the one PBS holds only in its layout — spacing, the order of keys, escapes — is no change: the body PBS holds stays.
 - `comment` (String) Free-form comment, up to 128 characters on one line.
 - `disable` (Boolean) Whether the endpoint is disabled: matchers that target it send nothing through it. Defaults to `false`.
 - `header` (Attributes List) HTTP headers of the request, in order, such as `{ name = "Content-Type", value = "application/json" }`. A name may appear more than once. PBS stores the values base64-encoded; the provider encodes and decodes them. A header that holds a credential should take it from a secret, as `{{ secrets.<name> }}`: header values are stored as they are given and readable through the API. (see [below for nested schema](#nestedatt--header))

@@ -97,10 +97,13 @@ func (r *nodeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 			"domains: once two thirds of the certificate's lifetime have passed (from PBS 4.1.9; before that, 30 " +
 			"days before it expires). A refresh reads the renewed certificate into the computed " +
 			"attributes without planning anything. To order a new certificate now — after changing the node's " +
-			"domains, say — change `triggers`. PBS cannot tell an uploaded certificate from an ordered one, so it " +
-			"renews a custom certificate the same way, with an ACME one, on a node with ACME domains: keep " +
-			"`pbs_node_acme` away from a node with a custom certificate. A custom certificate the node no longer " +
-			"serves shows as a change of `certificates`, and the next apply uploads it again.\n\n" +
+			"domains, say — change `triggers`, or, with Terraform 1.14.1 or later, invoke the " +
+			"`pbs_node_certificate_renew` action with `force = true`: without it, PBS renews only a certificate " +
+			"that is due, and a change of domains does not make it due. PBS cannot tell an uploaded certificate " +
+			"from an ordered one, so it renews a custom certificate the same way, with an ACME one, on a node with " +
+			"ACME domains: keep `pbs_node_acme` away from a node with a custom certificate. A custom certificate " +
+			"the node no longer serves shows as a change of `certificates`, and the next apply uploads it " +
+			"again.\n\n" +
 			"**The fingerprint changes** with every new certificate: when it is ordered, uploaded, renewed, and " +
 			"when the resource is destroyed, which has PBS go back to a new self-signed certificate. Whatever " +
 			"pins the old one fails then: the provider itself with `tls_cert_fingerprint`, Proxmox VE's PBS " +
@@ -363,8 +366,11 @@ func (m *nodeCertificateModel) fromUnconfirmed(node string) {
 }
 
 // checkACMESettings fails when the node's ACME settings cannot order a
-// certificate: PBS would end the order without one, or fail it.
-func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node string, diags *diag.Diagnostics) {
+// certificate: PBS would end the order without one, or fail it — and send
+// its acme-err notification. setDomainsFirst ends the advice to set the
+// node's domains with pbs_node_acme: how to have Terraform set them before
+// it orders. pbs_node_certificate_renew checks the settings too.
+func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node, setDomainsFirst string, diags *diag.Diagnostics) {
 	client := r.data.client
 	config, _, err := client.GetNodeConfig(ctx, node)
 	if err != nil {
@@ -379,9 +385,8 @@ func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node st
 	}
 	if domains == 0 {
 		diags.AddError("The PBS node has no ACME domains",
-			"Node "+node+" has no ACME domains, so PBS would order no certificate. Set them with pbs_node_acme, and "+
-				"make this resource depend on it — with triggers that refer to its domains, or depends_on — so "+
-				"that Terraform sets them first.")
+			"Node "+node+" has no ACME domains, so PBS would order no certificate. Set them with pbs_node_acme, "+
+				setDomainsFirst)
 		return
 	}
 	account, err := config.ACMEAccountName()
@@ -406,7 +411,8 @@ func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node st
 func (r *nodeCertificateResource) order(ctx context.Context, plan nodeCertificateModel, state *nodeCertificateModel, diags *diag.Diagnostics) bool {
 	client := r.data.client
 	node := plan.Node.ValueString()
-	r.checkACMESettings(ctx, node, diags)
+	r.checkACMESettings(ctx, node, "and make this resource depend on it — with triggers that refer to its domains, "+
+		"or depends_on — so that Terraform sets them first.", diags)
 	if diags.HasError() {
 		return false
 	}
@@ -562,13 +568,17 @@ func (r *nodeCertificateResource) recordChange(node string, change pbsclient.Cer
 				"later calls of this run fail. "+unconfirmedAdvice(change.Unconfirmed))
 	case err != nil:
 		// The only step after writing the certificate is having the proxy
-		// load it.
+		// load it. The provider trusts the new certificate all the same, so
+		// its TLS settings need what they need after a change that went
+		// well: nothing else warns about them, neither a later plan nor the
+		// action, which runs once.
 		state.fromCertificate(node, change.After, diags)
 		diags.AddWarning("The PBS certificate "+what+" ended with an error",
 			"PBS wrote a new certificate for node "+node+", with fingerprint "+change.After.Fingerprint+", but its "+
 				what+" then failed, probably while having the proxy load it: the proxy may serve the previous "+
-				"certificate until `systemctl reload proxmox-backup-proxy` on the host. Check that first; then "+
-				"see to the provider's TLS settings, as the next apply warns. "+err.Error())
+				"certificate until `systemctl reload proxmox-backup-proxy` on the host. Check that first, and only "+
+				"then change the provider's TLS settings where another warning says they need it. "+err.Error())
+		r.warnTrust(change, diags)
 	default:
 		state.fromCertificate(node, change.After, diags)
 		r.warnTrust(change, diags)

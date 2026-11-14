@@ -138,7 +138,7 @@ func TestAPITokensDataSourceEmptyListIsNotNull(t *testing.T) {
 }
 
 // The tokens of a user that does not exist are an error, with PBS's reason,
-// rather than an empty list that would hide a typo in userid.
+// rather than the empty list PBS answers, which would hide a typo in userid.
 func TestAPITokensDataSourceMissingUser(t *testing.T) {
 	fake := newFakePBS()
 	newFakeAccess(fake)

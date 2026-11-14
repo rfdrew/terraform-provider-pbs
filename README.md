@@ -44,10 +44,23 @@ adds a second server, [Back up to S3 object storage](docs/guides/s3-datastore.md
 puts a datastore on S3, and [Managing the network of a PBS node](docs/guides/network.md)
 changes network interfaces without cutting the node off.
 
+With Terraform 1.14.1 or later, actions run jobs, garbage collection, realm
+syncs, certificate renewals and other one-off operations (`pbs_sync_job_run`,
+`pbs_verify_job_run`, `pbs_prune_job_run`, `pbs_datastore_gc`,
+`pbs_datastore_mount`, `pbs_datastore_unmount`, `pbs_datastore_s3_refresh`,
+`pbs_s3_endpoint_check`, `pbs_realm_sync`, `pbs_notification_test`,
+`pbs_node_certificate_renew`, `pbs_apt_update`, `pbs_network_reload`). With
+Terraform 1.14 or later, list resources let `terraform query` find existing
+objects and generate the configuration that imports them — users, tokens, ACL
+entries, datastores, jobs, remotes, notification endpoints and most other
+resources.
+
 ## Requirements
 
 * PBS 4.0 or newer; verified against 4.2.8.
 * Terraform 1.11+ or OpenTofu 1.11+.
+* For actions, Terraform 1.14.1+; for list resources and `terraform query`,
+  Terraform 1.14+. OpenTofu supports neither yet.
 
 ## Usage
 

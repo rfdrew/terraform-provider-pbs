@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // The node's network configuration is /etc/network/interfaces, in
@@ -245,50 +244,4 @@ func IsUnreachable(err error) bool {
 	apiErr, ok := asError(err)
 	return ok && (apiErr.StatusCode == http.StatusBadGateway || apiErr.StatusCode == http.StatusServiceUnavailable ||
 		apiErr.StatusCode == http.StatusGatewayTimeout)
-}
-
-// WaitTaskThroughOutages is WaitTask for a task that may cut the client off
-// while it runs, such as a network reload, which rebuilds the path to PBS
-// — a bond that takes half a minute to aggregate, a bridge recreated —: a
-// status poll that does not reach PBS (IsUnreachable) is tried again until
-// none has for grace, and that error is returned then, also when the task
-// timeout ends the wait first.
-func (c *Client) WaitTaskThroughOutages(ctx context.Context, upid UPID, grace time.Duration) (TaskStatus, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.taskTimeout)
-	defer cancel()
-
-	delay := firstTaskPoll
-	reached := time.Now()
-	var outage error
-	for {
-		status, err := c.TaskStatus(ctx, upid)
-		switch {
-		case err == nil:
-			reached, outage = time.Now(), nil
-			if status.Status == "stopped" {
-				return status, c.taskEnded(ctx, upid, status)
-			}
-		case ctx.Err() != nil:
-			// The task timeout ended a poll: an outage before it is what
-			// the caller needs to know of, otherwise the task is slow.
-			if outage != nil {
-				return status, outage
-			}
-			return status, fmt.Errorf("%w after %s: %s", ErrTaskTimeout, c.taskTimeout, upid.Raw)
-		case IsUnreachable(err):
-			outage = err
-			if time.Since(reached) >= grace {
-				return status, err
-			}
-		default:
-			return status, err
-		}
-		if err := c.sleep(ctx, delay); err != nil {
-			if outage != nil {
-				return status, outage
-			}
-			return status, fmt.Errorf("%w after %s: %s", ErrTaskTimeout, c.taskTimeout, upid.Raw)
-		}
-		delay = min(delay*2, maxTaskPoll)
-	}
 }
