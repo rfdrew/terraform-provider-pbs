@@ -106,6 +106,16 @@ func (d *apiTokensDataSource) Read(ctx context.Context, req datasource.ReadReque
 			resp.Diagnostics.AddError("Unable to list PBS API tokens", apiErrorDetail(client, userReadPrivilege, err))
 			return
 		}
+		// PBS lists the tokens of a user that does not exist as none, without
+		// looking the user up (src/api2/access/user.rs, list_tokens), which
+		// would hide a typo in userid: no tokens are checked against the user,
+		// which reading needs no more privileges than listing.
+		if len(tokens) == 0 {
+			if _, err := client.GetUser(ctx, config.UserID.ValueString()); err != nil {
+				resp.Diagnostics.AddError("Unable to list PBS API tokens", apiErrorDetail(client, userReadPrivilege, err))
+				return
+			}
+		}
 	} else {
 		users, err := client.ListUsers(ctx, true)
 		if err != nil {

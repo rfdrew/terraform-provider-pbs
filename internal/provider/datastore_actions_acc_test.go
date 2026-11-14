@@ -95,9 +95,11 @@ func testAccCheckMountStatus(name, want string) acc.TestCheckFunc {
 
 // The S3 actions on a datastore on the stand's S3 server: the check passes
 // for the datastore's bucket and prefix, deleting its test object, and
-// fails for a bucket that does not exist; the refresh reads a namespace that
+// fails for a bucket that does not exist; the refresh reads namespaces that
 // only the bucket holds into the datastore, and clears the maintenance mode
-// it sets.
+// it sets. One namespace holds a group, which every release reads; the other
+// is empty, which releases before 4.1.5 skip (proxmox-backup 3ff962875,
+// "datastore: don't skip empty namespaces on s3 refresh").
 func TestAccS3Actions(t *testing.T) {
 	testAccSkipWithoutS3Objects(t)
 	endpointID := "tfacc-" + testAccRandom(8)
@@ -105,7 +107,8 @@ func TestAccS3Actions(t *testing.T) {
 	dir := testAccDatastoreDir(t, name)
 	bucket := testAccS3Bucket()
 	testAccS3CleanUp(t, bucket, name)
-	const namespace = "refreshed"
+	const namespace, groupNamespace = "refreshed", "grouped"
+	emptyNamespaceRefreshed := testAccVersionAtLeast(4, 1, 5)
 
 	base := providerConfig + testAccS3StandEndpoint("test", endpointID, testAccS3StandFingerprint()) + fmt.Sprintf(`
 resource "pbs_datastore" "test" {
@@ -155,6 +158,7 @@ action "pbs_s3_endpoint_check" "test" {
 				Check: acc.ComposeAggregateTestCheckFunc(
 					testAccCheckS3Object(bucket, name+"/"+pbsclient.S3CheckObject, false),
 					testAccCheckNamespace(name, namespace, false),
+					testAccCheckNamespace(name, groupNamespace, false),
 				),
 			},
 			{
@@ -162,12 +166,18 @@ action "pbs_s3_endpoint_check" "test" {
 				ExpectError: regexp.MustCompile(`head\s+object\s+failed`),
 			},
 			{
-				// A namespace that another PBS created in the bucket, which
-				// this one learns of only from a refresh.
-				PreConfig: func() { testAccS3Put(t, bucket, name+"/.cnt/ns/"+namespace+"/.namespace", "") },
-				Config:    base + testAccActionTrigger("action.pbs_datastore_s3_refresh.test", "3"),
+				// Namespaces that another PBS created in the bucket, which
+				// this one learns of only from a refresh: an empty one, as
+				// its marker object, and one with a group, as the group's
+				// owner file.
+				PreConfig: func() {
+					testAccS3Put(t, bucket, name+"/.cnt/ns/"+namespace+"/.namespace", "")
+					testAccS3Put(t, bucket, name+"/.cnt/ns/"+groupNamespace+"/host/tfacc/owner", "root@pam\n")
+				},
+				Config: base + testAccActionTrigger("action.pbs_datastore_s3_refresh.test", "3"),
 				Check: acc.ComposeAggregateTestCheckFunc(
-					testAccCheckNamespace(name, namespace, true),
+					testAccCheckNamespace(name, namespace, emptyNamespaceRefreshed),
+					testAccCheckNamespace(name, groupNamespace, true),
 					testAccCheckDatastoreConfig(name, func(ds pbsclient.Datastore) error {
 						if ds.MaintenanceMode != "" {
 							return fmt.Errorf("datastore %s is in maintenance mode %q after the refresh", name, ds.MaintenanceMode)

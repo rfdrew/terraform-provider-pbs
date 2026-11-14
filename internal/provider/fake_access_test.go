@@ -28,7 +28,10 @@ import (
 //   - only PUT /access/password changes a password: an API token gets 400,
 //     and everyone but root@pam must confirm with their own password;
 //   - deleting a user deletes its tokens and their ACL entries, but not the
-//     user's own; deleting a token deletes its entries;
+//     user's own; deleting a token deletes its entries. A user of a realm
+//     removeRealm took away is deleted, but the deletion answers 400
+//     "unknown realm" and leaves its tokens, which can still be listed and
+//     deleted, as the tokens of any user, existing or not;
 //   - granting a role to a user or token that does not exist is 400 "no such
 //     user." or "no such API token."; granting and removing are idempotent;
 //     NoAccess and the other roles of one user or token on one path exclude
@@ -56,6 +59,8 @@ type fakeAccess struct {
 	// hideACL takes Sys.Audit on /access/acl away from the fake's token: PBS
 	// then shows it only the entries of its own user's tokens.
 	hideACL bool
+	// goneRealms are realms deleted while users of them remain.
+	goneRealms map[string]bool
 }
 
 // fakeRoles is what GET /access/roles answers: a few of PBS's roles, enough
@@ -68,11 +73,12 @@ const fakeRoles = `{"data":[
 // newFakeAccess serves the access API from fake.
 func newFakeAccess(fake *fakePBS) *fakeAccess {
 	a := &fakeAccess{
-		fake:      fake,
-		users:     map[string]pbsclient.User{},
-		passwords: map[string]string{},
-		tokens:    map[string]pbsclient.APIToken{},
-		secrets:   map[string]string{},
+		fake:       fake,
+		users:      map[string]pbsclient.User{},
+		passwords:  map[string]string{},
+		tokens:     map[string]pbsclient.APIToken{},
+		secrets:    map[string]string{},
+		goneRealms: map[string]bool{},
 	}
 	fake.handle("GET /access/users", a.listUsers)
 	fake.handle("POST /access/users", a.createUser)
@@ -88,6 +94,13 @@ func newFakeAccess(fake *fakePBS) *fakeAccess {
 }
 
 // --- test helpers -------------------------------------------------------------
+
+// removeRealm deletes a realm, keeping the users of it, as PBS does.
+func (a *fakeAccess) removeRealm(realm string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.goneRealms[realm] = true
+}
 
 func (a *fakeAccess) addUser(u pbsclient.User) {
 	a.mu.Lock()
@@ -325,6 +338,11 @@ func (a *fakeAccess) serveOneUser(w http.ResponseWriter, req *http.Request, user
 		}
 		delete(a.users, userID)
 		delete(a.passwords, userID)
+		if realm := pbsclient.Realm(userID); a.goneRealms[realm] {
+			a.userGen++
+			writeError(w, "unknown realm '%s'", realm)
+			return
+		}
 		for id := range a.tokens {
 			if owner, _, _ := pbsclient.SplitTokenID(id); owner == userID {
 				a.removeTokenLocked(id)
@@ -369,13 +387,13 @@ func (a *fakeAccess) removeTokenLocked(tokenID string) {
 	}
 }
 
+// listTokens lists the tokens of a user as PBS does, by owner, without
+// looking the user up: the list of a user that does not exist is empty, or
+// the tokens a deletion that answered "unknown realm" left
+// (src/api2/access/user.rs, list_tokens).
 func (a *fakeAccess) listTokens(w http.ResponseWriter, userID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, exists := a.users[userID]; !exists {
-		writeError(w, "no such user '%s'", userID)
-		return
-	}
 	type listed struct {
 		pbsclient.APIToken
 		TokenName string `json:"token-name"`

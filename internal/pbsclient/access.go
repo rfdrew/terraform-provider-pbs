@@ -215,6 +215,19 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 	return err
 }
 
+// IsUserRealmGone reports whether PBS answered the deletion of userID with
+// 400 "unknown realm '<realm>'", as it does for a user whose realm no longer
+// exists. PBS deletes the user and saves user.cfg before it looks the realm
+// up, to remove the user's password there, so the user is gone all the
+// same; what it would do after that — delete the user's API tokens and
+// their ACL entries — it leaves undone (src/api2/access/user.rs,
+// delete_user, and src/auth.rs, lookup_authenticator).
+func IsUserRealmGone(err error, userID string) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.TrimSpace(apiErr.Message) == fmt.Sprintf("unknown realm '%s'", Realm(userID))
+}
+
 // ChangePassword sets a user's password through PUT /access/password, which
 // only a password session may call; with an API token it fails with
 // ErrPasswordChangeNeedsPassword without a request. PBS wants the caller's

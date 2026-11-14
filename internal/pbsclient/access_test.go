@@ -643,6 +643,30 @@ func TestRealm(t *testing.T) {
 	}
 }
 
+// PBS answers the deletion of a user whose realm is gone with 400 "unknown
+// realm", after deleting the user; another realm's or another error is not
+// that.
+func TestIsUserRealmGone(t *testing.T) {
+	if !IsUserRealmGone(apiError(http.StatusBadRequest, "unknown realm 'corp'"), "alice@corp") {
+		t.Error("IsUserRealmGone(400 unknown realm 'corp', alice@corp) = false, want true")
+	}
+	for _, tc := range []struct {
+		status  int
+		message string
+		userID  string
+	}{
+		{400, "unknown realm 'corp'", "alice@other"},
+		{400, "unknown realm 'corp'", "alice@corp@other"},
+		{500, "unknown realm 'corp'", "alice@corp"},
+		{400, "user 'alice@corp' does not exist.", "alice@corp"},
+		{400, "unable to find realm corp", "alice@corp"},
+	} {
+		if IsUserRealmGone(apiError(tc.status, tc.message), tc.userID) {
+			t.Errorf("IsUserRealmGone(%d %q, %s) = true, want false", tc.status, tc.message, tc.userID)
+		}
+	}
+}
+
 // The texts PBS answers when asked to create a user or token that exists;
 // only a 400 with one of them counts.
 func TestIsAlreadyExists(t *testing.T) {

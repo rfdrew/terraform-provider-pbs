@@ -176,6 +176,29 @@ func TestUserResourceDestroyAfterOutsideDeletion(t *testing.T) {
 	}
 }
 
+// A user whose realm was deleted first, such as an LDAP realm destroyed
+// earlier in the same run: PBS deletes the user but answers 400 "unknown
+// realm" and leaves the user's API tokens and their ACL entries, which the
+// destroy deletes, taking the user for gone once PBS no longer has it.
+func TestUserResourceDestroyAfterRealmDeletion(t *testing.T) {
+	h, fake, access := newUserHarness(t)
+	inst := h.create(t, "pbs_user", h.resourceValue(t, "pbs_user", map[string]any{"userid": "alice@corp"}))
+	access.addToken(pbsclient.APIToken{TokenID: "alice@corp!ci"}, "secret")
+	access.addACL(pbsclient.ACLEntry{Path: "/datastore/store1", UGID: "alice@corp!ci", UGIDType: "token", RoleID: "DatastoreAdmin"})
+	access.removeRealm("corp")
+
+	h.destroy(t, inst)
+	if _, exists := access.user("alice@corp"); exists || fake.count("DELETE /access/users/alice@corp") != 1 {
+		t.Fatalf("alice@corp exists = %v after %d deletions", exists, fake.count("DELETE /access/users/alice@corp"))
+	}
+	if _, _, exists := access.token("alice@corp!ci"); exists || fake.count("DELETE /access/users/alice@corp/token/ci") != 1 {
+		t.Fatalf("token alice@corp!ci exists = %v after the destroy", exists)
+	}
+	if got := access.aclEntries(); len(got) != 0 {
+		t.Fatalf("ACL entries after the destroy: %v", got)
+	}
+}
+
 func TestUserResourceValidation(t *testing.T) {
 	h, _, _ := newUserHarness(t)
 

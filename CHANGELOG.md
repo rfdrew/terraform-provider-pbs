@@ -39,11 +39,12 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   `gc_on_unmount`, the unmount explains a maintenance mode that keeps PBS
   from starting the garbage collection it runs first.
 - `pbs_datastore_s3_refresh` action: reads a datastore's contents from its S3
-  bucket into its local cache. It refuses a datastore that is not on S3,
-  which PBS would leave in maintenance mode `s3-refresh`, and says how to
-  clear that mode after a failed refresh. Its page describes the cases PBS
-  supports — objects removed from the bucket by hand, a damaged cache — and
-  warns that two PBS must never share one datastore.
+  bucket into its local cache, empty namespaces from PBS 4.1.5. It refuses a
+  datastore that is not on S3, which PBS would leave in maintenance mode
+  `s3-refresh`, and says how to clear that mode after a failed refresh. Its
+  page describes the cases PBS supports — objects removed from the bucket by
+  hand, a damaged cache — and warns that two PBS must never share one
+  datastore.
 - `pbs_s3_endpoint_check` action: has PBS reach a bucket through an S3
   endpoint and write, read and delete a test object, and explains the step
   that failed, which is all PBS reports.
@@ -116,6 +117,14 @@ fixes below, and configurations written for 0.4.0 work unchanged.
 
 ### Fixed
 
+- `pbs_user`: destroying a user whose realm was deleted first, such as an
+  LDAP or Active Directory realm destroyed earlier in the same run, no
+  longer fails with "unknown realm". PBS deletes the user before it answers
+  that, but leaves the user's API tokens and their ACL entries, which would
+  apply again to a user created later under the same ID: the provider
+  checks that the user is gone and deletes the tokens.
+- `pbs_api_tokens` with `userid` fails for a user that does not exist, as
+  intended, instead of listing no tokens, which is what PBS answers.
 - `pbs_sync_job` and the guide **Copy backups to an offsite PBS** name the
   privileges of a push job's remote as PBS does: `Remote.DatastoreBackup` and
   `Remote.DatastorePrune`, not `RemoteDatastore.Backup` and

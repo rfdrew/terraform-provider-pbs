@@ -17,7 +17,8 @@ import (
 // sync, which creates the user, disabled as enable_new says, with the first
 // name the realm's sync_attributes take from the directory, and deletes a
 // user of the realm the directory does not have, as remove_vanished says.
-// The users of a deleted realm stay in PBS, so the test deletes them.
+// The users of a deleted realm stay in PBS, so the test deletes them; PBS
+// answers that with "unknown realm", having deleted the user all the same.
 func TestAccRealmSyncAction(t *testing.T) {
 	d := testAccLDAP(t)
 	name := testAccRealmName()
@@ -30,8 +31,15 @@ func TestAccRealmSyncAction(t *testing.T) {
 			t.Error(err)
 			return
 		}
+		ctx := context.Background()
 		for _, userID := range []string{synced, vanished} {
-			if err := client.DeleteUser(context.Background(), userID); err != nil && !pbsclient.IsNotFound(err) {
+			err := client.DeleteUser(ctx, userID)
+			if pbsclient.IsUserRealmGone(err, userID) {
+				if _, err = client.GetUser(ctx, userID); err == nil {
+					err = fmt.Errorf("PBS answered unknown realm and kept the user")
+				}
+			}
+			if err != nil && !pbsclient.IsNotFound(err) {
 				t.Errorf("deleting %s: %v", userID, err)
 			}
 		}

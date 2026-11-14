@@ -36,7 +36,8 @@ func (a *datastoreS3RefreshAction) Schema(_ context.Context, _ action.SchemaRequ
 		MarkdownDescription: "Refreshes a Proxmox Backup Server datastore on S3 from its bucket, as **Refresh " +
 			"contents from S3 bucket** under the datastore's Content → More in the web interface does: PBS reads the " +
 			"namespaces, groups and backup indexes the bucket holds under the datastore's name into the datastore's " +
-			"local cache, in place of those the cache had. The chunks stay in the bucket. That brings the cache back " +
+			"local cache, in place of those the cache had — empty namespaces too from PBS 4.1.5, before only those " +
+			"that hold groups. The chunks stay in the bucket. That brings the cache back " +
 			"in line with the bucket, such as after the stray objects of a failed backup were removed from the " +
 			"bucket by hand, which PBS recommends when the object store ran out of space, or after files of the " +
 			"cache were lost or damaged. A datastore created with `reuse_datastore`, such as to take over the " +

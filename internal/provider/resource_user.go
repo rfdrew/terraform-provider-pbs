@@ -451,9 +451,50 @@ func (r *userResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	}
 
 	err = client.WithConfigLock(pbsclient.ConfigUsers, func() error { return client.DeleteUser(ctx, userID) })
+	if pbsclient.IsUserRealmGone(err, userID) {
+		// PBS deleted the user before it found the realm gone, such as one
+		// deleted earlier in the same run, which reading the user confirms,
+		// and stopped there: the user's API tokens and their ACL entries are
+		// left, and would apply again to a user created later under the same
+		// ID. PBS lists and deletes the tokens of a user that does not exist.
+		if _, getErr := client.GetUser(ctx, userID); pbsclient.IsNotFound(getErr) {
+			deleted, tokenErr := deleteUserTokens(ctx, client, userID)
+			if tokenErr != nil {
+				resp.Diagnostics.AddError("Unable to delete the API tokens of PBS user",
+					fmt.Sprintf("PBS deleted user %q, whose realm no longer exists, but stopped before deleting the user's "+
+						"API tokens and their ACL entries, which would apply again to a user created later under the "+
+						"same ID, and deleting them failed. %s", userID, apiErrorDetail(client, userModifyPrivilege, tokenErr)))
+				return
+			}
+			tflog.Info(ctx, "deleted a PBS user whose realm no longer exists, and its API tokens", map[string]any{"userid": userID, "tokens": deleted})
+			err = nil
+		}
+	}
 	if err != nil && !pbsclient.IsNotFound(err) {
 		resp.Diagnostics.AddError("Unable to delete PBS user", apiErrorDetail(client, userModifyPrivilege, err))
 	}
+}
+
+// deleteUserTokens deletes the API tokens of userID, with their secrets and
+// ACL entries, and returns how many it deleted.
+func deleteUserTokens(ctx context.Context, client *pbsclient.Client, userID string) (int, error) {
+	tokens, err := client.ListAPITokens(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, token := range tokens {
+		_, name, ok := pbsclient.SplitTokenID(token.TokenID)
+		if !ok {
+			continue
+		}
+		err := client.WithConfigLock(pbsclient.ConfigUsers, func() error { return client.DeleteAPIToken(ctx, userID, name) })
+		if err != nil && !pbsclient.IsNotFound(err) {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // errACLHidden means the provider may not read every ACL entry: without
