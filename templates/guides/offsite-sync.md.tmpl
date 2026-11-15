@@ -49,7 +49,7 @@ terraform {
   required_providers {
     pbs = {
       source  = "rfdrew/pbs"
-      version = "~> 0.4"
+      version = "~> 1.0"
     }
   }
 }
