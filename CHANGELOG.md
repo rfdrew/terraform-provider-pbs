@@ -4,7 +4,12 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-11-15
+
+The first stable release: from now on, a configuration that works with
+1.0.0 keeps working with every later 1.x release, and changes that would
+break one wait for 2.0. Verified against Proxmox Backup Server 4.0.22,
+4.2.0 and 4.2.8.
 
 Actions, which need Terraform 1.14.1 or later, and list resources, which need
 Terraform 1.14 or later; OpenTofu supports neither yet. With older Terraform
@@ -899,7 +904,7 @@ First release. Verified against Proxmox Backup Server 4.0.22, 4.2.0 and
   certificate only, not one the server sends after it, which anyone could
   send.
 
-[Unreleased]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.4.0...HEAD
+[1.0.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rfdrew/terraform-provider-pbs/compare/v0.1.0...v0.2.0
