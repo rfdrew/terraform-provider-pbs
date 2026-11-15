@@ -2,6 +2,7 @@ package pbsclient
 
 import (
 	"context"
+	"net/url"
 )
 
 // Besides their configuration, PBS reports how datastores are doing: whether
@@ -26,6 +27,18 @@ import (
 //     Datastore.Backup on it. It opens the datastore, and fails while it is
 //     not mounted or offline. A missing datastore is 400 "no such datastore
 //     'x'".
+//   - GET /admin/datastore/{store}/status answers the status of one
+//     datastore, DatastoreStatus. It too opens the datastore: 400
+//     "datastore 'x' is not mounted", "datastore 'x' is unavailable: ..."
+//     in a maintenance mode that forbids reading, and "no such datastore
+//     'x'". Without Datastore.Audit or Datastore.Backup on the datastore,
+//     but with Datastore.Read or a privilege on one of its namespaces, the
+//     figures are zero rather than left out; without any of these, the call
+//     is 403, a missing datastore included. With verbose, PBS counts the
+//     backup groups and snapshots of every namespace before it answers, on
+//     disk — in the local cache for a datastore on S3 — and so within the
+//     request (src/api2/admin/datastore.rs, get_snapshots_count and status,
+//     proxmox-backup 7c86c5ad5, after 4.2.11).
 //
 // The figures of a garbage collection are those of the last run since the
 // datastore was created, kept in its chunk store; they are zero before the
@@ -107,6 +120,62 @@ type DatastoreUsage struct {
 	GCStatus *GCStatus `json:"gc-status,omitempty"`
 }
 
+// DatastoreStatus is the status of one datastore, as GET
+// /admin/datastore/{store}/status answers it (pbs-api-types'
+// DataStoreStatus, proxmox 601a11e6). With verbose, PBS adds the status of
+// the last garbage collection too, which GCJobStatus reads.
+type DatastoreStatus struct {
+	// Total, Used and Avail are the figures of the file system the
+	// datastore is on, in bytes: zero without Datastore.Audit or
+	// Datastore.Backup on the datastore.
+	Total int64 `json:"total"`
+	Used  int64 `json:"used"`
+	Avail int64 `json:"avail"`
+	// BackendType is one of the Backend constants, from PBS 4.1.6.
+	BackendType string `json:"backend-type,omitempty"`
+	// Counts is answered with verbose only.
+	Counts *BackupCounts `json:"counts,omitempty"`
+	// S3Statistics is answered for every datastore on S3 from PBS 4.1.7,
+	// and nil for one on a file system.
+	S3Statistics *S3Statistics `json:"s3-statistics,omitempty"`
+}
+
+// BackupCounts are the backup groups, and the snapshots in them, of a
+// datastore, by backup type, in all its namespaces. PBS counts only groups
+// with at least one snapshot, and answers null for a type without any.
+// Other is never set: PBS has no other backup type to count.
+type BackupCounts struct {
+	CT    *BackupTypeCounts `json:"ct,omitempty"`
+	VM    *BackupTypeCounts `json:"vm,omitempty"`
+	Host  *BackupTypeCounts `json:"host,omitempty"`
+	Other *BackupTypeCounts `json:"other,omitempty"`
+}
+
+// BackupTypeCounts are the backup groups of one type and the snapshots in
+// them.
+type BackupTypeCounts struct {
+	Groups    int64 `json:"groups"`
+	Snapshots int64 `json:"snapshots"`
+}
+
+// S3Statistics are the requests PBS made to the bucket of a datastore on S3,
+// and the bytes it moved, since the counters were last reset. PBS counts a
+// request once, after its retries, whatever the object store answered, and
+// keeps the counters in
+// /var/lib/proxmox-backup/s3-statistics/{endpoint}-{bucket}-{store}.shmem
+// (pbs-datastore/src/datastore.rs and proxmox-s3-client's client.rs).
+type S3Statistics struct {
+	// Uploaded and Downloaded are the bytes of the bodies of the requests
+	// and of the answers.
+	Uploaded   int64 `json:"uploaded"`
+	Downloaded int64 `json:"downloaded"`
+	Get        int64 `json:"get"`
+	Put        int64 `json:"put"`
+	Post       int64 `json:"post"`
+	Head       int64 `json:"head"`
+	Delete     int64 `json:"delete"`
+}
+
 // ListDatastores lists the configuration of the datastores the caller may
 // audit.
 func (c *Client) ListDatastores(ctx context.Context) ([]Datastore, error) {
@@ -148,6 +217,19 @@ func (c *Client) ListDatastoreUsage(ctx context.Context) ([]DatastoreUsage, erro
 	var usage []DatastoreUsage
 	_, err := c.Get(ctx, "/status/datastore-usage", nil, &usage)
 	return usage, err
+}
+
+// DatastoreStatus reads the status of one datastore. verbose has PBS count
+// the backups too, for Counts, which walks the whole datastore within the
+// request.
+func (c *Client) DatastoreStatus(ctx context.Context, store string, verbose bool) (DatastoreStatus, error) {
+	var params url.Values
+	if verbose {
+		params = url.Values{"verbose": {FormatBool(true)}}
+	}
+	var status DatastoreStatus
+	_, err := c.Get(ctx, Path("admin", "datastore", store, "status"), params, &status)
+	return status, err
 }
 
 // GCJobStatus reads the garbage collection status of a datastore. ok is false

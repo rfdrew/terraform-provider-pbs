@@ -134,3 +134,58 @@ func TestGCJobStatus(t *testing.T) {
 		t.Errorf("GCJobStatus() on an unmounted datastore = %v", err)
 	}
 }
+
+// The status of a datastore on S3, as PBS 4.2 answers it: the request
+// statistics always, and the counts with verbose only, null for a type
+// without backups; PBS is asked for verbose only when the caller wants the
+// counts.
+func TestDatastoreStatus(t *testing.T) {
+	const route = "GET /admin/datastore/s3store/status"
+	fake := newFakePBS()
+	fake.reply(route, http.StatusOK, `{"data":{"total":1000,"used":400,"avail":600,"backend-type":"s3",`+
+		`"s3-statistics":{"downloaded":10,"uploaded":2048,"get":1,"post":0,"put":3,"head":4,"delete":0}}}`)
+	client := fake.client(t)
+
+	got, err := client.DatastoreStatus(context.Background(), "s3store", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DatastoreStatus{
+		Total: 1000, Used: 400, Avail: 600, BackendType: BackendS3,
+		S3Statistics: &S3Statistics{Downloaded: 10, Uploaded: 2048, Get: 1, Put: 3, Head: 4},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DatastoreStatus() = %+v, want %+v", got, want)
+	}
+	if query := fake.lastCall(t, route).query; len(query) != 0 {
+		t.Errorf("query = %v, want none", query)
+	}
+
+	fake.reply(route, http.StatusOK, `{"data":{"total":1000,"used":400,"avail":600,"backend-type":"filesystem",`+
+		`"counts":{"ct":null,"host":{"groups":2,"snapshots":7},"other":null,"vm":null},`+
+		`"gc-status":{"index-file-count":0,"index-data-bytes":0,"disk-bytes":0,"disk-chunks":0,"removed-bytes":0,`+
+		`"removed-chunks":0,"pending-bytes":0,"pending-chunks":0,"removed-bad":0,"still-bad":0}}}`)
+	got, err = client.DatastoreStatus(context.Background(), "s3store", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = DatastoreStatus{
+		Total: 1000, Used: 400, Avail: 600, BackendType: BackendFilesystem,
+		Counts: &BackupCounts{Host: &BackupTypeCounts{Groups: 2, Snapshots: 7}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DatastoreStatus(verbose) = %+v, want %+v", got, want)
+	}
+	if verbose := fake.lastCall(t, route).query.Get("verbose"); verbose != "true" {
+		t.Errorf("verbose = %q, want true", verbose)
+	}
+
+	fake.reply(route, http.StatusBadRequest, "datastore 's3store' is unavailable: offline maintenance mode: ")
+	if _, err := client.DatastoreStatus(context.Background(), "s3store", false); !IsDatastoreUnavailable(err) {
+		t.Errorf("DatastoreStatus() of an offline datastore = %v", err)
+	}
+	fake.reply(route, http.StatusBadRequest, "no such datastore 's3store'")
+	if _, err := client.DatastoreStatus(context.Background(), "s3store", false); !IsNotFound(err) {
+		t.Errorf("DatastoreStatus() of a missing datastore = %v", err)
+	}
+}

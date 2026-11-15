@@ -237,6 +237,7 @@ type acmeAccountDataModel struct {
 	Status    types.String `tfsdk:"status"`
 	Contact   types.String `tfsdk:"contact"`
 	ToSURL    types.String `tfsdk:"tos_url"`
+	EABKid    types.String `tfsdk:"eab_kid"`
 }
 
 type acmeAccountsDataSourceModel struct {
@@ -285,6 +286,12 @@ func (d *acmeAccountsDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 						Computed:            true,
 						MarkdownDescription: "URL of the terms of service agreed to at registration; null when none was.",
 					},
+					"eab_kid": schema.StringAttribute{
+						Computed: true,
+						MarkdownDescription: "Key identifier of the External Account Binding the CA returned at " +
+							"registration; null when it returned none, or a later update of the account — of its " +
+							"`contact` — dropped it, as Pebble does.",
+					},
 				}},
 			},
 		},
@@ -321,6 +328,7 @@ func (d *acmeAccountsDataSource) Read(ctx context.Context, _ datasource.ReadRequ
 			Status:    stringOrNull(account.Account.Status),
 			Contact:   stringOrNull(strings.Join(account.Emails(), ",")),
 			ToSURL:    stringOrNull(account.ToS),
+			EABKid:    stringOrNull(account.EABKeyID()),
 		})
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &model)...)

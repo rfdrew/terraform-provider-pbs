@@ -55,8 +55,9 @@ older Terraform, the provider works as before, without them.
   retention, and verify jobs (`pbs_verify_job`); to read them,
   `pbs_datastore`, `pbs_datastores`, `pbs_namespaces`, `pbs_s3_endpoint`,
   `pbs_s3_endpoints` and `pbs_s3_buckets`, which lists the buckets an
-  endpoint reaches, and how they are doing, `pbs_datastore_status` and
-  `pbs_gc_status`.
+  endpoint reaches, and how they are doing: `pbs_datastore_status`, with
+  their space, the requests of those on S3 and, when asked, how many backups
+  they hold, and `pbs_gc_status`.
 * **Notifications** — endpoints that deliver notifications: by the host's
   sendmail (`pbs_notification_endpoint_sendmail`), the built-in
   `mail-to-root` included, by SMTP (`pbs_notification_endpoint_smtp`), to
@@ -76,8 +77,8 @@ older Terraform, the provider works as before, without them.
   CA's terms of service, `pbs_acme_directories` the directories PBS knows,
   `pbs_acme_challenge_schema` the DNS APIs plugins can use and their
   settings, `pbs_acme_accounts` the accounts, and `pbs_node_certificates`
-  the certificate the node serves. CAs that require External Account
-  Binding are not supported yet.
+  the certificate the node serves. Accounts at CAs that require External
+  Account Binding, such as ZeroSSL, take the key the CA gives.
 * **Replication** — other PBS servers as remotes (`pbs_remote`), and sync
   jobs that pull backups from them, push backups to them or copy them
   between two datastores of one server (`pbs_sync_job`), with the keys
@@ -103,9 +104,13 @@ older Terraform, the provider works as before, without them.
   mail, the consent banner of its login page and its notes
   (`pbs_node_config`), its DNS settings (`pbs_dns`), its time zone
   (`pbs_timezone`) and its subscription key (`pbs_subscription`); to read
-  them and more, `pbs_node_status`, `pbs_network_interfaces`,
-  `pbs_disks`, `pbs_apt_updates`, the packages it can upgrade,
-  `pbs_services`, `pbs_subscription` and `pbs_time`.
+  them and more, `pbs_node_config`, `pbs_dns`, `pbs_node_status`,
+  `pbs_network_interface`, `pbs_network_interfaces`, `pbs_disks`,
+  `pbs_apt_updates`, the packages it can upgrade, `pbs_services`,
+  `pbs_subscription` and `pbs_time`; `pbs_tasks` lists the tasks PBS ran and
+  runs — backups, garbage collections, verifications, job runs — with
+  filters, for `check` blocks that warn when one failed, and `pbs_task` reads
+  one task and the end of its log.
 * **Network** — the node's bridges, bonds and VLAN interfaces, and its
   physical interfaces (`pbs_network_interface`), whose changes are pending
   until `pbs_network_apply` applies them. Creating an interface needs
@@ -164,18 +169,23 @@ resource's `lifecycle` `action_trigger` fires, or on demand with
 wait for it by default, within their `timeout` or the provider's
 `task_timeout`, show its progress, and fail with the end of its log when it
 fails. `wait = false`, where an action offers it, only starts it;
-`pbs_node_certificate_renew` and `pbs_network_reload` always wait.
+`pbs_node_certificate_renew`, `pbs_network_reload` and the service actions
+always wait.
 
 * Jobs: `pbs_sync_job_run`, `pbs_verify_job_run`, `pbs_prune_job_run`.
-* Datastores: `pbs_datastore_gc`, `pbs_datastore_mount`,
-  `pbs_datastore_unmount`, `pbs_datastore_s3_refresh`, and
+* Datastores: `pbs_datastore_gc`, `pbs_datastore_verify` and
+  `pbs_datastore_prune`, which verify or prune backups now without a job,
+  `pbs_datastore_mount`, `pbs_datastore_unmount`, `pbs_datastore_s3_refresh`,
+  and
   `pbs_s3_endpoint_check`, which has PBS write, read and delete a test object
   in a bucket.
 * Access and notifications: `pbs_realm_sync`, which syncs the users of an LDAP
   or Active Directory realm, and `pbs_notification_test`.
 * Node: `pbs_node_certificate_renew`, `pbs_apt_update`, which refreshes the
-  package lists, and `pbs_network_reload`, which applies pending network
-  changes.
+  package lists, `pbs_network_reload`, which applies pending network changes,
+  and `pbs_service_reload`, `pbs_service_restart` and `pbs_service_start`,
+  which control the node's services — reload the proxy after a change of its
+  cipher lists, say.
 
 Terraform 1.13 accepts `action` blocks and ignores them: set
 `required_version = ">= 1.14.1"` in configurations that use them.

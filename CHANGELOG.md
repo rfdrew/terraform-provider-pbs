@@ -19,7 +19,8 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   within their `timeout` or the provider's `task_timeout`, report the lines
   it logs as progress, and fail with the end of its log when it fails;
   `wait = false`, where an action offers it, only starts it —
-  `pbs_node_certificate_renew` and `pbs_network_reload` always wait. The wait,
+  `pbs_node_certificate_renew`, `pbs_network_reload` and the `pbs_service_*`
+  actions always wait. The wait,
   except that of `pbs_node_certificate_renew`, outlasts up to two minutes of
   status polls PBS does not answer. A task goes
   on in PBS when the action stops waiting, except an unmount, which would
@@ -70,6 +71,49 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   nothing when nothing is pending, unless `force` is set. There is no action
   to revert pending changes: it would drop Terraform's own, and bring back
   interfaces Terraform deleted without Terraform noticing.
+- `pbs_datastore_verify` action: verifies backups now, without a verify job —
+  a datastore, a namespace and `max_depth` levels below it, one backup
+  `group` or one backup (`snapshot`) — with `ignore_verified`,
+  `outdated_after` and, from PBS 4.1, `read_threads` and `verify_threads`. A
+  single backup is verified again unless `ignore_verified = true` or
+  `outdated_after` is set, as the web interface does for one backup. A
+  datastore, namespace or group keeps PBS's defaults: without
+  `outdated_after`, a backup verified once is skipped for good, where the web
+  interface verifies it again after about a month (`outdated_after = 30` does
+  as **Verify All** does). It reports how many backups PBS verified and
+  skipped, and says when PBS limited a datastore or namespace to the backups
+  the provider's user or token owns, as it does with `Datastore.Backup` alone;
+  it warns when `group` or `snapshot` names nothing, which PBS does not count
+  as an error.
+- `pbs_datastore_prune` action: prunes a datastore or a namespace now, without
+  a prune job, with a `keep` shaped like that of `pbs_prune_job`, which can be
+  assigned to it; `dry_run` reports what PBS would remove and removes nothing.
+  It reports how many backups PBS kept and removed, and explains the "missing
+  permissions" PBS answers without `Datastore.Modify` or `Datastore.Prune`.
+- `pbs_service_reload`, `pbs_service_restart` and `pbs_service_start` actions:
+  reload, restart or start a service of the node — `proxmox-backup`,
+  `proxmox-backup-proxy`, `sshd`, `systemd-journald`, `cron`, `postfix` or
+  `chrony` —, waiting for PBS's task and then for systemd to report the
+  service running. Reload, which the **Restart** button of the web interface
+  runs, is the documented way, and how a change of `ciphers_tls_1_2` or
+  `ciphers_tls_1_3` of `pbs_node_config` takes effect. Before reloading
+  `proxmox-backup-proxy`, which PBS also reloads when asked to restart it, the
+  actions check that the proxy presents the certificate of `proxy.pem`, that
+  OpenSSL takes the `@` commands and operators of `ciphers_tls_1_2`, and that
+  every certificate of the chain — keys and signature digests — meets the
+  OpenSSL security level that list sets (its last `@SECLEVEL`, or Debian's
+  2), since a proxy that cannot load them does not start again. PBS's API
+  has OpenSSL check the rest of the list, such as whether its names match
+  any cipher, before it stores it; a list written into `node.cfg` on the
+  host gets no such check. `skip_certificate_match`, for a reverse proxy or
+  load balancer in front of PBS or a forward proxy that inspects TLS, skips
+  only the certificate match, and `skip_checks` skips all three checks. They
+  wait up to two minutes for the reloaded proxy to answer again. A service that is not
+  installed or is masked is refused, a reload of a stopped service, which
+  does nothing, warns, and a node without systemd, such as PBS in a Docker
+  container, is explained. Restarting the API daemon, `proxmox-backup`, is
+  refused, since PBS would kill the command with every task the daemon runs:
+  reload it instead. There is no action that stops a service.
 - List resources for `terraform query`, one for each of these resources,
   under its name: `pbs_user`, `pbs_api_token`, `pbs_acl`,
   `pbs_realm_openid`, `pbs_realm_ldap`, `pbs_realm_ad`, `pbs_datastore`,
@@ -106,6 +150,54 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   next to it. A matcher edited in the web interface, which turns its `match_*`
   rules into an expression, gets them back on the next apply, and imported and
   listed matchers read with their expression.
+- `pbs_acme_account`: External Account Binding, for CAs that require it such
+  as ZeroSSL and Google Trust Services: `eab_kid`, and the write-only
+  `eab_hmac_key_wo` with `eab_hmac_key_wo_version`. PBS sends the binding
+  once, when it registers the account. A new key identifier or key version
+  registers a new account, after deactivating the old one. Setting them on an
+  existing or imported account, or removing them, is only recorded. The key is
+  taken as the CA gives it, base64url or base64, padded or not, and checked
+  against what PBS can decode. An import fills in `eab_kid` when PBS still
+  holds the binding the CA returned. `pbs_acme_accounts` reads `eab_kid` too.
+- `pbs_acme_account.force_destroy`: destroying removes the account from PBS
+  also when the CA refuses to deactivate it or cannot be reached, as
+  `proxmox-backup-manager acme account deactivate --force` does, with a
+  warning that quotes the CA's answer. Like `pbs_datastore.destroy_data`, it is
+  read from state.
+- `pbs_datastore_status`: `s3_statistics` and `count_backups`. For a datastore
+  on S3, `s3_statistics` has the requests PBS has made to its bucket — `get`,
+  `put`, `post`, `head` and `delete` — and the bytes it has `uploaded` and
+  `downloaded` since the counters were last reset: the counters the
+  datastore's summary shows and `notification_thresholds` compares with its
+  thresholds, the requests of creating the datastore and of
+  `pbs_s3_endpoint_check` with the datastore's name as `store_prefix`
+  included. They are null on a file system and on PBS before 4.1.7.
+  `count_backups = true` fills `counts` with the backup groups and snapshots
+  of all the datastore's namespaces, by type (`vm`, `ct`, `host`). PBS walks
+  the whole datastore for it within one request, which `request_timeout`
+  bounds, so it is off by default. Either takes one more call to PBS, made
+  only for a datastore on S3 or with `count_backups`.
+- `pbs_node_config`, `pbs_dns` and `pbs_network_interface` data sources:
+  every setting of the node, whether Terraform manages it or not, without its
+  ACME settings; its search domain and nameservers as PBS reads them from
+  `/etc/resolv.conf`, which works where Docker or Kubernetes mounts the file;
+  one network interface by name, `lo` included, with the attributes of
+  `pbs_network_interfaces`. Reading one interface needs `Sys.Audit` on that
+  interface only, and works where listing fails with `diff failed`.
+- `pbs_tasks` data source: lists the worker tasks of a node — backups,
+  garbage collections, verifications, prunes, syncs and the rest — in PBS's
+  order, running ones first, for `check` blocks such as "no task failed in
+  the last day". Filters: `store`, `worker_type` and `auth_id`, both matched
+  exactly (a user ID also lists the tasks of its API tokens), `status` (`ok`,
+  `warning`, `error`, `unknown`), `running`, `since`, `until` and `limit` (50
+  by default, `0` for every task). Times are in RFC 3339 format (UTC), with
+  `duration` in seconds. PBS lists only the tasks the provider's user or token
+  may see, without an error; `sees_all_tasks` says whether it has
+  `Sys.Audit` on `/system/tasks` and so sees them all.
+- `pbs_task` data source: reads one task by its UPID — whether it runs, how it
+  ended and, with `log_lines`, the end of its log — with its end time on every
+  PBS 4.x, which reports it itself only from 4.2.1. A task PBS no longer knows
+  is an error, and one the provider may not read says who may.
 
 ### Changed
 
@@ -114,9 +206,56 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   is no change. Terraform writes a JSON body as `jsonencode(…)` when it
   generates configuration, which would otherwise change the body on the
   first apply.
+- `pbs_realm_ldap` and `pbs_realm_ad`: removing `bind_dn` also removes the
+  bind password PBS keeps for the realm in
+  `/etc/proxmox-backup/ldap_passwords.json`. Earlier releases left it there,
+  and PBS bound with it again when `bind_dn` was set again without
+  `password_wo` — at whatever server the realm named by then. PBS removes the
+  password before it checks the connection, so the provider removes it in a
+  second update, once PBS has accepted the realm without `bind_dn`, with the
+  digest of the realm read back; when that update fails, the apply warns and
+  names the command that removes it. Setting `bind_dn` again now needs
+  `password_wo` with `password_wo_version`. A realm whose `bind_dn` an earlier
+  release removed keeps its password until the realm is destroyed or
+  `proxmox-backup-manager ldap update <realm> --delete password` removes it
+  (`ad update` for Active Directory realms; add `--default true` for the
+  default realm, whose flag the command clears otherwise).
+- `pbs_acme_account`: a registration a CA refuses for want of External
+  Account Binding says to set `eab_kid` and `eab_hmac_key_wo`; a refused
+  binding says to check them. A deactivation the CA refuses now advises
+  `force_destroy` first, and says when the CA no longer knows the account;
+  `proxmox-backup-manager acme account deactivate --force` with
+  `terraform state rm` remains the way without Terraform. A deactivation that
+  fails on PBS's own copy of the account, in
+  `/etc/proxmox-backup/acme/accounts`, says what to fix there instead. When
+  PBS fails to read it, before it asks the CA, or fails with `force_destroy`
+  set, `force_destroy` cannot get past it. When PBS fails to record the CA's
+  deactivation — all 100 `_deactivated_<name>_<n>` names taken, a full or
+  read-only file system — the error says that the CA has deactivated the
+  account, and that destroying again needs `force_destroy`, since the CA
+  refuses the account from then on.
+- `pbs_node_config`: the descriptions of `ciphers_tls_1_2` and
+  `ciphers_tls_1_3` point to `pbs_service_reload`, which applies a change of
+  the cipher lists; the warning about `@SECLEVEL` above 2 in
+  `ciphers_tls_1_2`, read as OpenSSL reads it from the last `@SECLEVEL`, says
+  that the action refuses to reload the proxy with a chain too weak for it.
+  `pbs_services` names the actions that control the services.
 
 ### Fixed
 
+- `pbs_datastore_status`: `backend_type` is no longer null on PBS before
+  4.1.6, which lists datastores without it: the provider reads it from the
+  datastore's configuration, which needs `Datastore.Audit`.
+- `pbs_node_config`: `@SECLEVEL` in `ciphers_tls_1_3`, which OpenSSL skips as
+  an unknown cipher suite, no longer warns that it raises the security level;
+  the plan warns that it has no effect. The warning about `ciphers_tls_1_2`
+  reads the last `@SECLEVEL`, as OpenSSL does, rather than any one above 2.
+- `pbs_network_interface`: a refresh that PBS refuses names the privilege on
+  the interface itself, `Sys.Audit` on `/system/network/interfaces/<name>`,
+  not the one listing needs.
+- `pbs_acme_account`: destroying counts an account as gone only on PBS's own
+  "acme account '<name>' does not exist"; before, any failure whose text said
+  "does not exist" counted, which could drop from state an account PBS kept.
 - `pbs_user`: destroying a user whose realm was deleted first, such as an
   LDAP or Active Directory realm destroyed earlier in the same run, no
   longer fails with "unknown realm". PBS deletes the user before it answers

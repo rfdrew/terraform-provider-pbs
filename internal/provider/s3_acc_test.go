@@ -510,9 +510,10 @@ resource "pbs_s3_endpoint" "test" {
 }
 
 // A datastore on the stand's S3 server: PBS lists the server's buckets
-// through the endpoint, marks the datastore in use in the bucket, changes
-// its request counters in place, imports it, and deletes every object under
-// its name when it is destroyed with its data.
+// through the endpoint, marks the datastore in use in the bucket, which PBS
+// 4.1.7 and later count among its requests, changes the settings of its
+// request counters in place, imports it, and deletes every object under its
+// name when it is destroyed with its data.
 func TestAccS3Datastore(t *testing.T) {
 	testAccSkipWithoutS3Objects(t)
 	endpointID := "tfacc-" + testAccRandom(8)
@@ -521,6 +522,7 @@ func TestAccS3Datastore(t *testing.T) {
 	bucket := testAccS3Bucket()
 	buckets := strings.Split(testAccS3Setting(envAccS3Buckets, bucket), ",")
 	counters := testAccVersionAtLeast(4, 2, 0)
+	statistics := testAccVersionAtLeast(4, 1, 7)
 	const resourceName = "pbs_datastore.test"
 
 	config := func(gcSchedule, thresholds string) string {
@@ -548,6 +550,10 @@ resource "pbs_datastore" "test" {
 
 data "pbs_datastore" "test" {
   name = pbs_datastore.test.name
+}
+
+data "pbs_datastore_status" "test" {
+  store = pbs_datastore.test.name
 }
 `, name, dir, gcSchedule, bucket, thresholds)
 	}
@@ -578,6 +584,21 @@ data "pbs_datastore" "test" {
 		acc.TestCheckResourceAttr("data.pbs_datastore.test", "path", dir),
 		testAccCheckS3Datastore(bucket, name, true),
 		testAccCheckS3InUseBy(bucket, name, ""),
+		acc.TestCheckResourceAttr("data.pbs_datastore_status.test", "backend_type", "s3"),
+	}
+	if statistics {
+		// Creating the datastore put its in-use mark and a chunk into the
+		// bucket; whether it read the mark first depends on overwrite_in_use.
+		number, count := regexp.MustCompile(`^[1-9][0-9]*$`), regexp.MustCompile(`^[0-9]+$`)
+		initialChecks = append(initialChecks,
+			acc.TestMatchResourceAttr("data.pbs_datastore_status.test", "s3_statistics.put", number),
+			acc.TestMatchResourceAttr("data.pbs_datastore_status.test", "s3_statistics.uploaded", number))
+		for _, counter := range []string{"get", "post", "head", "delete", "downloaded"} {
+			initialChecks = append(initialChecks,
+				acc.TestMatchResourceAttr("data.pbs_datastore_status.test", "s3_statistics."+counter, count))
+		}
+	} else {
+		initialChecks = append(initialChecks, acc.TestCheckNoResourceAttr("data.pbs_datastore_status.test", "s3_statistics.put"))
 	}
 	changedChecks := []acc.TestCheckFunc{
 		acc.TestCheckResourceAttr(resourceName, "gc_schedule", "sat 05:00"),

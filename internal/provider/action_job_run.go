@@ -295,20 +295,19 @@ func reportSyncSummary(ctx context.Context, client *pbsclient.Client, upid pbscl
 	}
 }
 
-// pruneLogPage is how many lines of a prune's log one read fetches: a line
-// per backup.
-const pruneLogPage = 5000
-
-// pruneMarkLine is a line of a prune's log about one backup: its mark, then
-// the backup as <type>/<id>/<time>.
+// pruneMarkLine is a line of a prune's log about one backup: its mark,
+// after "would " in a dry run, then the backup as <type>/<id>/<time>.
 var pruneMarkLine = regexp.MustCompile(`^([a-z][a-z -]*) (vm|ct|host)/[A-Za-z0-9_][A-Za-z0-9._-]*/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`)
 
-// pruneSummary is what a prune's log says it did.
+// pruneSummary is what a prune's log says it did, or would do in a dry
+// run: a prune job's run, or pbs_datastore_prune's.
 type pruneSummary struct {
 	groups, kept, marked, failed int
-	// keepAll is a job without retention options, which marks every backup
-	// for removal and keeps them all.
+	// keepAll is a prune without retention options, which marks every
+	// backup for removal and keeps them all.
 	keepAll bool
+	// dryRun is a prune that only logs what it would remove.
+	dryRun bool
 }
 
 // count takes in a message of the log.
@@ -318,15 +317,22 @@ func (s *pruneSummary) count(message string) {
 		s.groups++
 	case strings.HasPrefix(message, "No prune selection"):
 		s.keepAll = true
+	case message == "(dry test run)":
+		s.dryRun = true
 	case strings.HasPrefix(message, "failed to remove dir "):
 		s.failed++
 	default:
 		match := pruneMarkLine.FindStringSubmatch(message)
-		switch {
-		case match == nil:
-		case match[1] == "remove":
+		if match == nil {
+			return
+		}
+		// PBS 4.0.0 to 4.0.14 marked protected and partial backups
+		// "protected" and "keep-partial", later releases "keep protected"
+		// and "keep partial".
+		switch mark := strings.TrimPrefix(match[1], "would "); {
+		case mark == "remove":
 			s.marked++
-		case strings.HasPrefix(match[1], "keep") || strings.HasPrefix(match[1], "protected"):
+		case strings.HasPrefix(mark, "keep") || strings.HasPrefix(mark, "protected"):
 			s.kept++
 		}
 	}
@@ -334,11 +340,18 @@ func (s *pruneSummary) count(message string) {
 
 func (s pruneSummary) String() string {
 	if s.groups == 0 {
+		if s.dryRun {
+			return "dry run: found no backup groups to prune"
+		}
 		return "found no backup groups to prune"
 	}
 	kept, removed := s.kept+s.failed, s.marked-s.failed
 	if s.keepAll {
 		kept, removed = s.kept+s.marked, 0
+	}
+	if s.dryRun {
+		return fmt.Sprintf("dry run: PBS would prune %s: keep %s, remove %d; nothing changed",
+			pruneQuantity(s.groups, "backup group"), pruneQuantity(kept, "backup"), removed)
 	}
 	summary := fmt.Sprintf("pruned %s: kept %s, removed %d", pruneQuantity(s.groups, "backup group"),
 		pruneQuantity(kept, "backup"), removed)
@@ -357,26 +370,13 @@ func pruneQuantity(n int, noun string) string {
 }
 
 // reportPruneSummary reads the log of a prune that finished and reports what
-// it kept and removed. A log it cannot read reports nothing.
+// it kept and removed, or would in a dry run. A log it cannot read reports
+// nothing.
 func reportPruneSummary(ctx context.Context, client *pbsclient.Client, upid pbsclient.UPID, progress *actionProgress) {
 	var summary pruneSummary
-	next := 1
-	for {
-		lines, total, _, err := client.TaskLog(ctx, upid, next, pruneLogPage)
-		if err != nil {
-			tflog.Debug(ctx, "could not read the PBS prune task's log", map[string]any{"upid": upid.Raw, "error": err.Error()})
-			return
-		}
-		advanced := false
-		for _, line := range lines {
-			if line.N >= next {
-				summary.count(line.Message())
-				next, advanced = line.N+1, true
-			}
-		}
-		if !advanced || next > total {
-			break
-		}
+	if err := scanTaskLog(ctx, client, upid, summary.count); err != nil {
+		tflog.Debug(ctx, "could not read the PBS prune task's log", map[string]any{"upid": upid.Raw, "error": err.Error()})
+		return
 	}
 	progress.say("%s", summary)
 }

@@ -69,6 +69,10 @@ data "pbs_gc_status" "test" {
 					acc.TestMatchResourceAttr("data.pbs_datastore_status.test", "avail", number),
 					acc.TestCheckResourceAttrSet("data.pbs_datastore_status.test", "used"),
 					acc.TestCheckNoResourceAttr("data.pbs_datastore_status.test", "error"),
+					// From the datastore's configuration on PBS before 4.1.6.
+					acc.TestCheckResourceAttr("data.pbs_datastore_status.test", "backend_type", "filesystem"),
+					acc.TestCheckNoResourceAttr("data.pbs_datastore_status.test", "s3_statistics.put"),
+					acc.TestCheckNoResourceAttr("data.pbs_datastore_status.test", "counts.vm.groups"),
 					acc.TestCheckResourceAttr("data.pbs_gc_status.test", "schedule", "daily"),
 					acc.TestMatchResourceAttr("data.pbs_gc_status.test", "next_run", number),
 					acc.TestCheckNoResourceAttr("data.pbs_gc_status.test", "last_run_state"),
@@ -109,5 +113,60 @@ func TestAccDatastoreDataSourceMissing(t *testing.T) {
 				ExpectError: regexp.MustCompile(`PBS lists no datastore "tfacc-missing"`),
 			},
 		},
+	})
+}
+
+// count_backups counts the backups of every namespace of the datastore, by
+// type. Where the stand can write backups, a backup in the root and one in a
+// namespace, with the same backup ID, are two groups.
+func TestAccDatastoreStatusCounts(t *testing.T) {
+	name := testAccDatastoreName()
+	dir := testAccDatastoreDir(t, name)
+	config := providerConfig + fmt.Sprintf(`
+resource "pbs_datastore" "test" {
+  name         = %q
+  path         = %q
+  destroy_data = true
+}
+
+resource "pbs_namespace" "a" {
+  store         = pbs_datastore.test.name
+  namespace     = "a"
+  delete_groups = true
+}
+
+data "pbs_datastore_status" "test" {
+  store         = pbs_datastore.test.name
+  count_backups = true
+  depends_on    = [pbs_namespace.a]
+}
+`, name, dir)
+	const dataSource = "data.pbs_datastore_status.test"
+	counts := func(host int) acc.TestCheckFunc {
+		checks := []acc.TestCheckFunc{acc.TestCheckResourceAttr(dataSource, "count_backups", "true")}
+		for typ, n := range map[string]int{"vm": 0, "ct": 0, "host": host} {
+			checks = append(checks,
+				acc.TestCheckResourceAttr(dataSource, "counts."+typ+".groups", fmt.Sprint(n)),
+				acc.TestCheckResourceAttr(dataSource, "counts."+typ+".snapshots", fmt.Sprint(n)))
+		}
+		return acc.ComposeAggregateTestCheckFunc(checks...)
+	}
+	steps := []acc.TestStep{{Config: config, Check: counts(0)}}
+	if testAccCanWriteBackup() {
+		steps = append(steps, acc.TestStep{
+			PreConfig: func() {
+				testAccWriteBackup(t, name, "")
+				testAccWriteBackup(t, name, "a")
+			},
+			Config: config,
+			Check:  counts(2),
+		})
+	}
+
+	acc.Test(t, acc.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckDatastoresDestroyed([]string{name}, nil, nil),
+		Steps:                    steps,
 	})
 }

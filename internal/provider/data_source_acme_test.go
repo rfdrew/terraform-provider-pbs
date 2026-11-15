@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/base64"
 	"net/http"
 	"testing"
 
@@ -292,5 +293,28 @@ func TestACMEAccountsDataSourceListsRegisteredAccounts(t *testing.T) {
 	list = h.readDataSource(t, "pbs_acme_accounts", config)
 	if lengthAt(t, list, "accounts") != 1 || stringAt(t, list, "accounts", 0, "name") != "staging" {
 		t.Fatalf("pbs_acme_accounts = %s after le was deactivated, want staging alone", list)
+	}
+}
+
+// The key identifier of an External Account Binding shows as long as PBS
+// holds the binding the CA echoed: Pebble's answer to a later update of the
+// account leaves it out.
+func TestACMEAccountsDataSourceEABKid(t *testing.T) {
+	h, _, acme := newACMEHarness(t)
+	config := h.dataSourceValue(t, "pbs_acme_accounts", map[string]any{})
+	acme.eabKeys["kid-1"] = fakeEABKey("tfacc-eab-1")
+
+	bound := h.create(t, "pbs_acme_account", eabConfig(t, h, "kid-1", base64.RawURLEncoding.EncodeToString(fakeEABKey("tfacc-eab-1")), 1, nil))
+	h.create(t, "pbs_acme_account", accountConfig(t, h, map[string]any{"name": "plain", "tos_url": "https://ca.test/tos"}))
+	list := h.readDataSource(t, "pbs_acme_accounts", config)
+	if stringAt(t, list, "accounts", 0, "name") != "le" || stringAt(t, list, "accounts", 0, "eab_kid") != "kid-1" ||
+		stringAt(t, list, "accounts", 1, "name") != "plain" || !isNullAt(t, list, "accounts", 1, "eab_kid") {
+		t.Fatalf("pbs_acme_accounts = %s", list)
+	}
+
+	h.update(t, bound, eabConfig(t, h, "kid-1", base64.RawURLEncoding.EncodeToString(fakeEABKey("tfacc-eab-1")), 1, map[string]any{"contact": "new@example.org"}))
+	list = h.readDataSource(t, "pbs_acme_accounts", config)
+	if !isNullAt(t, list, "accounts", 0, "eab_kid") {
+		t.Fatalf("pbs_acme_accounts = %s after a contact update", list)
 	}
 }

@@ -321,3 +321,29 @@ func (t actionTask) logTail(ctx context.Context) string {
 func indentLines(text string) string {
 	return "    " + strings.ReplaceAll(text, "\n", "\n    ")
 }
+
+// taskLogPage is how many lines of a task's log one read of scanTaskLog
+// fetches: a prune logs a line per backup, a verification a few.
+const taskLogPage = 5000
+
+// scanTaskLog reads the whole log of a task that has ended, a page at a
+// time, and passes each message, without its timestamp, to see.
+func scanTaskLog(ctx context.Context, client *pbsclient.Client, upid pbsclient.UPID, see func(message string)) error {
+	next := 1
+	for {
+		lines, total, _, err := client.TaskLog(ctx, upid, next, taskLogPage)
+		if err != nil {
+			return err
+		}
+		advanced := false
+		for _, line := range lines {
+			if line.N >= next {
+				see(line.Message())
+				next, advanced = line.N+1, true
+			}
+		}
+		if !advanced || next > total {
+			return nil
+		}
+	}
+}

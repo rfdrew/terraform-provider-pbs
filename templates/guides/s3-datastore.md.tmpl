@@ -317,6 +317,24 @@ PBS notifies once per counter, until `counter_reset_schedule` resets the
 counters: here on the first day of every month, like a monthly bill. Both
 need PBS 4.2 or newer.
 
+`pbs_datastore_status` reads the same counters, in `s3_statistics`, on PBS
+4.1.7 and newer, so that a `check` block warns in every plan before a
+threshold is reached — here at 80 % of the `PUT` threshold above. `uploaded`
+and `downloaded` are bytes, not sizes such as `500GiB`.
+
+```terraform
+data "pbs_datastore_status" "s3store1" {
+  store = pbs_datastore.s3store1.name
+}
+
+check "s3store1_requests" {
+  assert {
+    condition     = try(data.pbs_datastore_status.s3store1.s3_statistics.put, 0) < 1600000
+    error_message = "Datastore s3store1 has made 1.6 million PUT requests to its bucket since its counters were reset."
+  }
+}
+```
+
 The notification has the type `thresholds`, the severity `warning`, and the
 datastore's name in the field `datastore`. PBS's built-in `default-matcher`
 routes it like everything but successful prune jobs — to `mail-to-root`, or

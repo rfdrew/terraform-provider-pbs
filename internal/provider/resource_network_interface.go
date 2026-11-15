@@ -1290,7 +1290,7 @@ func (r *networkInterfaceResource) Read(ctx context.Context, req resource.ReadRe
 	}
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read the PBS network interface",
-			networkErrorDetail(r.data.client, err))
+			networkErrorDetailFor(r.data.client, networkInterfacePrivilege(networkInterfaceReadPrivilege, name), err))
 		return
 	}
 	state.fromInterface(node, iface, &resp.Diagnostics)

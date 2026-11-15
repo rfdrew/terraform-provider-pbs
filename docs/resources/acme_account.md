@@ -5,7 +5,8 @@ subcategory: ""
 description: |-
   Manages a Proxmox Backup Server ACME account: an account at a certificate authority such as Let's Encrypt, which the node uses to order the certificate of its web interface and API (pbs_node_certificate), named in its ACME settings (pbs_node_acme).
   Creating the resource has PBS register the account at the CA; PBS keeps the account's key. A new contact is sent to the CA in place, and a new tos_url only recorded; a new name or directory registers a new account.
-  ~> Destroying the resource deactivates the account at the CA, which cannot be undone. The CA refuses every later request of the account; certificates it issued stay valid until they expire, but PBS can no longer renew them with this account. Replacing the resource — a new name or directory — deactivates the old account the same way.
+  For a CA that requires External Account Binding (EAB), such as ZeroSSL or Google Trust Services, set eab_kid and eab_hmac_key_wo to the key identifier and HMAC key the CA gave you. PBS sends the binding once, when it registers the account, and a new binding registers a new account. PBS cannot tell whether a CA requires one, so without it such a registration fails at apply with the CA's externalAccountRequired error.
+  ~> Destroying the resource deactivates the account at the CA, which cannot be undone. The CA refuses every later request of the account; certificates it issued stay valid until they expire, but PBS can no longer renew them with this account. Replacing the resource — a new name, directory or binding — deactivates the old account the same way, before the new one is registered. When the CA refuses to deactivate the account, or cannot be reached, destroying fails unless force_destroy is set.
   Let's Encrypt stopped storing contact addresses in June 2025: it takes the address at registration but neither keeps nor returns it, and ignores changes. The provider therefore keeps contact as configured, and reports a change made outside Terraform only for a CA that returns its contacts.
   Managing ACME accounts needs Sys.Modify on /system/certificates. Registering, updating and deactivating an account runs as a PBS task; the provider waits for it, up to task_timeout, and reports the CA's error when it fails.
   PBS writes about one account key in 128 in a form that CAs such as Let's Encrypt refuse as malformed (Pebble says "invalid EC public key, wrong length for x" or "for y", Let's Encrypt "Parse error reading JWS"); the provider then tries up to 3 keys in all, registering the account again with a new key.
@@ -17,7 +18,9 @@ Manages a Proxmox Backup Server ACME account: an account at a certificate author
 
 Creating the resource has PBS register the account at the CA; PBS keeps the account's key. A new `contact` is sent to the CA in place, and a new `tos_url` only recorded; a new `name` or `directory` registers a new account.
 
-~> **Destroying the resource deactivates the account at the CA, which cannot be undone.** The CA refuses every later request of the account; certificates it issued stay valid until they expire, but PBS can no longer renew them with this account. Replacing the resource — a new `name` or `directory` — deactivates the old account the same way.
+For a CA that requires External Account Binding (EAB), such as ZeroSSL or Google Trust Services, set `eab_kid` and `eab_hmac_key_wo` to the key identifier and HMAC key the CA gave you. PBS sends the binding once, when it registers the account, and a new binding registers a new account. PBS cannot tell whether a CA requires one, so without it such a registration fails at apply with the CA's `externalAccountRequired` error.
+
+~> **Destroying the resource deactivates the account at the CA, which cannot be undone.** The CA refuses every later request of the account; certificates it issued stay valid until they expire, but PBS can no longer renew them with this account. Replacing the resource — a new `name`, `directory` or binding — deactivates the old account the same way, before the new one is registered. When the CA refuses to deactivate the account, or cannot be reached, destroying fails unless `force_destroy` is set.
 
 Let's Encrypt stopped storing contact addresses in June 2025: it takes the address at registration but neither keeps nor returns it, and ignores changes. The provider therefore keeps `contact` as configured, and reports a change made outside Terraform only for a CA that returns its contacts.
 
@@ -41,6 +44,39 @@ resource "pbs_acme_account" "letsencrypt" {
 
   # directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
 }
+
+# An account at ZeroSSL, which requires External Account Binding: the CA
+# gives you a key identifier and an HMAC key, which PBS sends once, when it
+# registers the account.
+data "pbs_acme_tos" "zerossl" {
+  directory = "https://acme.zerossl.com/v2/DV90"
+}
+
+resource "pbs_acme_account" "zerossl" {
+  name      = "zerossl"
+  contact   = "pbs-admins@example.net"
+  directory = data.pbs_acme_tos.zerossl.directory
+  tos_url   = data.pbs_acme_tos.zerossl.url
+
+  # The HMAC key is write-only: it never reaches the plan or state. A new
+  # eab_kid or eab_hmac_key_wo_version registers a new account; once the
+  # account is registered, the key may be left out, with its version.
+  eab_kid                 = var.zerossl_eab_kid
+  eab_hmac_key_wo         = var.zerossl_eab_hmac_key
+  eab_hmac_key_wo_version = 1
+}
+
+variable "zerossl_eab_kid" {
+  description = "Key identifier of the External Account Binding ZeroSSL gave."
+  type        = string
+}
+
+variable "zerossl_eab_hmac_key" {
+  description = "HMAC key of the External Account Binding ZeroSSL gave."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+}
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -53,7 +89,13 @@ resource "pbs_acme_account" "letsencrypt" {
 
 ### Optional
 
-- `directory` (String) URL of the CA's ACME directory. Defaults to Let's Encrypt's production directory, `https://acme-v02.api.letsencrypt.org/directory`; set `https://acme-staging-v02.api.letsencrypt.org/directory` to try things out with Let's Encrypt's staging directory, whose certificates browsers do not trust and whose rate limits are far higher. PBS itself must reach the directory, and trust its TLS certificate. CAs that require External Account Binding, such as ZeroSSL or Google Trust Services, are not supported yet. Changing it registers a new account and deactivates the old one.
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `directory` (String) URL of the CA's ACME directory. Defaults to Let's Encrypt's production directory, `https://acme-v02.api.letsencrypt.org/directory`; set `https://acme-staging-v02.api.letsencrypt.org/directory` to try things out with Let's Encrypt's staging directory, whose certificates browsers do not trust and whose rate limits are far higher. PBS itself must reach the directory, and trust its TLS certificate. A CA that requires External Account Binding, such as ZeroSSL or Google Trust Services, needs `eab_kid` and `eab_hmac_key_wo`. Changing it registers a new account and deactivates the old one.
+- `eab_hmac_key_wo` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) HMAC key of the External Account Binding, as the CA gave it: base64url, or base64, with or without `=` padding; white space around it is ignored. PBS uses it once, to sign the binding when it registers the account, and keeps no copy. Write-only: Terraform passes it to PBS without storing it in the plan or state. Needed with `eab_kid` when the account is registered — when the resource is created or replaced — and only then: it may be left out afterwards, with its version, as a CA may accept a key only once. Requires `eab_hmac_key_wo_version`, and Terraform or OpenTofu 1.11 or later.
+- `eab_hmac_key_wo_version` (Number) Version of `eab_hmac_key_wo`, which Terraform stores in its place. Changing it from one version to another registers a new account with the key in `eab_hmac_key_wo`, after deactivating the old one; setting it where state has none, as after an import, or removing it with `eab_hmac_key_wo`, is only recorded. Requires `eab_hmac_key_wo`.
+- `eab_kid` (String) Key identifier of the External Account Binding the CA gave you, for a CA that requires one; set with `eab_hmac_key_wo`. PBS sends the binding to the CA when it registers the account, and only then. A new `eab_kid` registers a new account and deactivates the old one, before the new one is registered: should the CA refuse the new binding, no account remains. Setting it where state has none, as after an import, or removing it is only recorded. An import fills it in when the CA returned the binding at registration and PBS still holds it; updating `contact` replaces what PBS holds with the CA's answer, which may leave the binding out.
+- `force_destroy` (Boolean) Whether destroying the account removes it from PBS even when the CA refuses to deactivate it or cannot be reached, as `proxmox-backup-manager acme account deactivate --force` does: PBS then keeps the account's key as `/etc/proxmox-backup/acme/accounts/_deactivated_<name>_<n>`, the account may stay active at the CA, and the provider warns with the CA's answer. Defaults to `false`: destroying fails, and leaves the account in PBS and in state. Destroying uses the value in state: set it in an apply before the one that destroys or replaces the account.
 - `tos_url` (String) URL of the CA's terms of service; setting it agrees to them, which Let's Encrypt requires. The `pbs_acme_tos` data source reads the current URL from the directory. PBS records the agreement at registration only: a new URL later — Let's Encrypt publishes a new one with each version of its subscriber agreement, and applies it to existing accounts — is recorded in state without contacting the CA, and does not register a new account.
 
 ### Read-Only

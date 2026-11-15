@@ -557,7 +557,11 @@ func (n *fakeNetwork) serveInterface(prefix string) http.HandlerFunc {
 			defer n.mu.Unlock()
 			for _, i := range n.configLocked() {
 				if i.Name == name {
-					writeData(w, n.itemLocked(i, n.digestLocked()), "")
+					// PBS adds the name again as iface to the list's
+					// items only.
+					item := n.itemLocked(i, n.digestLocked())
+					delete(item, "iface")
+					writeData(w, item, "")
 					return
 				}
 			}

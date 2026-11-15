@@ -44,9 +44,10 @@ func testAccSkipWithoutBackupClient(t *testing.T) {
 
 // testAccWriteBackup writes a small backup of a directory of the stand into a
 // namespace of a datastore, with proxmox-backup-client in the stand's
-// container, as the provider's API token. Tests that call it call
+// container, as the provider's API token, with extra added to the client's
+// command line, such as --backup-time. Tests that call it call
 // testAccSkipWithoutBackupClient first.
-func testAccWriteBackup(t *testing.T, store, ns string) {
+func testAccWriteBackup(t *testing.T, store, ns string, extra ...string) {
 	t.Helper()
 	container := os.Getenv(envAccContainer)
 	tokenID, secret, err := pbsclient.SplitAPIToken(os.Getenv(envAPIToken))
@@ -60,7 +61,7 @@ func testAccWriteBackup(t *testing.T, store, ns string) {
 		container, "proxmox-backup-client", "backup", "apt.pxar:/etc/apt",
 		"--backup-type", "host", "--backup-id", "tfacc", "--ns", ns,
 	}
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	out, err := exec.Command("docker", append(args, extra...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("writing a backup to %s:%s failed: %v\n%s", store, ns, err, pbsclient.Redact(string(out), secret))
 	}

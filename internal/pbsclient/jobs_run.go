@@ -61,12 +61,12 @@ import (
 //     "sync job '<worker id>' end". A prune logs "Pruning group
 //     <ns>:\"<type>/<id>\"" for each group, then a line per backup, "<mark>
 //     <type>/<id>/<time>": the mark is "remove", or "keep", "keep
-//     protected", "keep partial" or "keep since timestamp in future" — in PBS
-//     4.0 "keep", "protected" and "keep-partial". A prune job without
-//     retention options logs "No prune selection - keeping all files." (a
-//     warning from 4.2.3) and marks every backup "remove" while it keeps
-//     them all; a backup it fails to remove logs a warning, "failed to
-//     remove dir ...".
+//     protected", "keep partial" or, from PBS 4.2.9, "keep since timestamp
+//     in future" — before 4.0.15, "keep", "protected" and "keep-partial".
+//     A prune job without retention options logs "No prune selection -
+//     keeping all files." (a warning from 4.2.3) and marks every backup
+//     "remove" while it keeps them all; a backup it fails to remove logs a
+//     warning, "failed to remove dir ...".
 //   - GET /admin/sync, /admin/verify and /admin/prune list the jobs the
 //     caller may see with their schedule status: next-run, and last-run-upid,
 //     last-run-state ("OK", "WARNINGS: <n>" or the error) and

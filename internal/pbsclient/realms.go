@@ -49,8 +49,12 @@ import (
 //     Connections time out after 5 seconds.
 //   - The bind password goes in the parameter password, and PBS keeps it in
 //     ldap_passwords.json, outside domains.cfg: reads never return it. An
-//     update without one binds with the stored password; delete=password
-//     removes it.
+//     update without one binds with the stored password, and stores one it
+//     carries only once the check passes. delete=password removes the
+//     stored one at once, before the check — after the digest, which PBS
+//     checks first — so an update whose check then fails has removed it all
+//     the same; a realm left with a bind-dn fails every check after that
+//     with "Missing bind password". Deleting bind-dn leaves the password.
 //   - An Active Directory realm has no user-attr: PBS looks users up by
 //     sAMAccountName. Its base-dn is optional: without one, a create — or an
 //     update of a realm that has none — asks the server's root DSE for

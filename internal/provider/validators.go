@@ -255,3 +255,32 @@ func (v nonEmptyObject) ValidateObject(ctx context.Context, req validator.Object
 	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Attribute Value",
 		fmt.Sprintf("Attribute %s %s.", req.Path, v.Description(ctx)))
 }
+
+// upidPattern is a PBS task ID (UPID), as PBS checks it
+// (PROXMOX_UPID_REGEX, proxmox-schema src/upid.rs, proxmox 601a11e6):
+// "UPID:<node>:<pid>:<pstart>:<task ID>:<start time>:<worker type>:<worker
+// ID>:<auth ID>:", the numbers in hexadecimal.
+var upidPattern = regexp.MustCompile(`^UPID:[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8,9}:[0-9A-Fa-f]{8,16}:[0-9A-Fa-f]{8}:[^:\s]+:[^:\s]*:[^:\s]+:$`)
+
+// workerTypePattern is a task's worker type, such as garbage_collection:
+// what a UPID allows there.
+var workerTypePattern = regexp.MustCompile(`^[^:\s]+$`)
+
+// upidValidator checks a PBS task ID. A Proxmox VE UPID, which has one
+// field fewer, does not pass.
+func upidValidator() validator.String {
+	return stringvalidator.RegexMatches(upidPattern,
+		"must be a PBS task ID (UPID), such as UPID:pbs1:00000A1B:0001E240:0000000F:6AE11CDF:garbage_collection:store1:root@pam:")
+}
+
+// rfc3339Validator accepts a time in RFC 3339 format, as timestamp(),
+// plantimestamp() and timeadd() write it.
+func rfc3339Validator() validator.String {
+	return stringCheck{
+		description: "must be a time in RFC 3339 format, such as 2026-11-14T00:00:00Z",
+		check: func(s string) bool {
+			_, err := time.Parse(time.RFC3339, s)
+			return err == nil
+		},
+	}
+}

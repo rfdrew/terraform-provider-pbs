@@ -35,6 +35,7 @@ Read-Only:
 
 - `contact` (String) Contact addresses the CA last returned, separated by commas, as `contact` of `pbs_acme_account` takes them; null when it returned none, as Let's Encrypt has since June 2025.
 - `directory` (String) URL of the CA's ACME directory the account is registered at.
+- `eab_kid` (String) Key identifier of the External Account Binding the CA returned at registration; null when it returned none, or a later update of the account — of its `contact` — dropped it, as Pebble does.
 - `location` (String) URL of the account at the CA.
 - `name` (String) Account name in PBS, such as `default`.
 - `status` (String) Status of the account as the CA last reported it to PBS: `valid`, `deactivated` or `revoked`.

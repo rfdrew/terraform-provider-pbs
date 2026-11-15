@@ -95,6 +95,9 @@ type fakeDatastores struct {
 	// failRefresh makes the S3 refresh of the next create-datastore task
 	// that reuses a datastore on S3 fail.
 	failRefresh bool
+	// adminHandlers serve /admin/datastore/{store}/{sub}, by method and
+	// sub; see handleAdmin.
+	adminHandlers map[string]http.HandlerFunc
 }
 
 // fakeProperties are the properties of one section of a configuration file,
@@ -323,6 +326,43 @@ func cloneProperties(props fakeProperties) fakeProperties {
 }
 
 // --- serving ------------------------------------------------------------------
+
+// handleAdmin has h answer METHOD /admin/datastore/{store}/{sub}, for every
+// store; adminStore tells h which. The fakes that serve parts of a
+// datastore's admin API — its namespaces, its status — share the one prefix
+// fakePBS routes them by, so they register here instead: the prefix goes to
+// serveAdmin, which picks the handler by sub. A route of a store's own, such
+// as a test's POST /admin/datastore/store1/gc, still wins.
+func (d *fakeDatastores) handleAdmin(method, sub string, h http.HandlerFunc) {
+	d.mu.Lock()
+	if d.adminHandlers == nil {
+		d.adminHandlers = map[string]http.HandlerFunc{}
+	}
+	d.adminHandlers[method+" "+sub] = h
+	d.mu.Unlock()
+	d.fake.handlePrefix(method+" /admin/datastore/", d.serveAdmin)
+}
+
+// serveAdmin serves /admin/datastore/{store}/{sub} with the handler
+// handleAdmin registered for the method and sub; anything else is a path PBS
+// does not have.
+func (d *fakeDatastores) serveAdmin(w http.ResponseWriter, req *http.Request) {
+	store, sub, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, fakeAPIPrefix+"/admin/datastore/"), "/")
+	d.mu.Lock()
+	h := d.adminHandlers[req.Method+" "+sub]
+	d.mu.Unlock()
+	if store == "" || h == nil {
+		writeFakeResponse(w, http.StatusNotFound, "Path '"+req.URL.Path+"' not found.")
+		return
+	}
+	h(w, req)
+}
+
+// adminStore is the store of a request to /admin/datastore/{store}/...
+func adminStore(req *http.Request) string {
+	store, _, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, fakeAPIPrefix+"/admin/datastore/"), "/")
+	return store
+}
 
 // startTaskLocked registers a worker task that run performs when it is first
 // polled, returning its exit status, and returns its UPID.

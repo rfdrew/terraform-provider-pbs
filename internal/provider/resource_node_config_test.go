@@ -316,8 +316,34 @@ func TestNodeConfigResourceWarnsAboutSecurityLevels(t *testing.T) {
 	diags := h.validateResource(t, "pbs_node_config", nodeConfigConfig(t, h, map[string]any{"ciphers_tls_1_2": "HIGH:!aNULL@SECLEVEL=3"}))
 	requireNoProtocolErrors(t, diags)
 	requireProtocolWarningContaining(t, diags, "security level to 3")
-	diags = h.validateResource(t, "pbs_node_config", nodeConfigConfig(t, h, map[string]any{"ciphers_tls_1_2": "HIGH:!aNULL@SECLEVEL=2"}))
+	requireProtocolWarningContaining(t, diags, "pbs_service_reload checks the chain")
+
+	// OpenSSL takes the last level, and refuses one that is not a digit
+	// from 0 to 5, as PBS then does.
+	for _, list := range []string{"HIGH:!aNULL@SECLEVEL=2", "@SECLEVEL=4:HIGH:@SECLEVEL=1", "HIGH:@SECLEVEL=9"} {
+		diags = h.validateResource(t, "pbs_node_config", nodeConfigConfig(t, h, map[string]any{"ciphers_tls_1_2": list}))
+		if len(diags) != 0 {
+			t.Fatalf("diagnostics for %q: %v", list, diags)
+		}
+	}
+
+	// OpenSSL ignores @SECLEVEL in the TLS 1.3 list, which neither raises
+	// the level nor makes pbs_service_reload refuse.
+	diags = h.validateResource(t, "pbs_node_config", nodeConfigConfig(t, h, map[string]any{
+		"ciphers_tls_1_3": "TLS_AES_256_GCM_SHA384:@SECLEVEL=4",
+	}))
+	requireNoProtocolErrors(t, diags)
+	requireProtocolWarningContaining(t, diags, "OpenSSL ignores @SECLEVEL in TLS 1.3 cipher suites")
+	requireProtocolWarningContaining(t, diags, `holds "@SECLEVEL=4", which OpenSSL skips`)
+	for _, d := range diags {
+		if strings.Contains(d.Detail, "raises") || strings.Contains(d.Detail, "refuses to reload") {
+			t.Errorf("the warning claims an effect: %s", d.Detail)
+		}
+	}
+	diags = h.validateResource(t, "pbs_node_config", nodeConfigConfig(t, h, map[string]any{
+		"ciphers_tls_1_3": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256",
+	}))
 	if len(diags) != 0 {
-		t.Fatalf("diagnostics for the default level: %v", diags)
+		t.Fatalf("diagnostics for a TLS 1.3 list without a level: %v", diags)
 	}
 }

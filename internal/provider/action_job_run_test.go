@@ -164,7 +164,7 @@ func TestPruneJobRunActionReportsSummary(t *testing.T) {
 // A prune whose log is longer than one read is read to its end.
 func TestPruneJobRunActionReadsLongLogs(t *testing.T) {
 	log := []string{"prune job 'daily'", "retention options: --keep-last 1", `Pruning group :"host/web"`}
-	for i := range pruneLogPage + 10 {
+	for i := range taskLogPage + 10 {
 		mark := "remove"
 		if i == 0 {
 			mark = "keep"
@@ -174,7 +174,7 @@ func TestPruneJobRunActionReadsLongLogs(t *testing.T) {
 	h, fake, _ := newJobRunHarness(t, "prune", "daily", func() *fakeTask { return &fakeTask{log: log} })
 	got := h.invokeAction(t, "pbs_prune_job_run", map[string]any{"id": "daily"})
 	requireNoProtocolErrors(t, got.diagnostics)
-	requireProgressContaining(t, got, fmt.Sprintf("pruned 1 backup group: kept 1 backup, removed %d", pruneLogPage+9))
+	requireProgressContaining(t, got, fmt.Sprintf("pruned 1 backup group: kept 1 backup, removed %d", taskLogPage+9))
 	// The last read is the second page.
 	var logRoute string
 	for _, route := range fake.routes() {
@@ -183,7 +183,7 @@ func TestPruneJobRunActionReadsLongLogs(t *testing.T) {
 		}
 	}
 	query := fake.lastCall(t, logRoute).query
-	if query.Get("start") != fmt.Sprint(pruneLogPage+1) || query.Get("limit") != fmt.Sprint(pruneLogPage) {
+	if query.Get("start") != fmt.Sprint(taskLogPage+1) || query.Get("limit") != fmt.Sprint(taskLogPage) {
 		t.Fatalf("last log read: %v", query)
 	}
 }
@@ -196,13 +196,40 @@ func TestPruneSummary(t *testing.T) {
 	}{
 		{"nothing to prune", []string{"prune job 'daily'", "retention options: --keep-last 2"}, "found no backup groups to prune"},
 		{
-			// PBS 4.0 marks protected and partial backups otherwise.
-			"PBS 4.0", []string{
+			// PBS 4.0.0 to 4.0.14 mark protected and partial backups
+			// otherwise; no stand runs those releases.
+			"PBS 4.0.14", []string{
 				`Pruning group :"vm/100"`, "protected vm/100/2026-11-01T10:00:00Z", "keep-partial vm/100/2026-11-02T10:00:00Z",
 				"remove vm/100/2026-11-03T10:00:00Z", "keep vm/100/2026-11-04T10:00:00Z",
 			},
 			"pruned 1 backup group: kept 3 backups, removed 1",
 		},
+		{
+			"dry run", []string{
+				"Starting datastore prune on datastore 'store1', root namespace, down to full depth", "(dry test run)",
+				"retention options: --keep-last 1", `Pruning group :"vm/100"`, "would remove vm/100/2026-11-01T10:00:00Z",
+				"would keep protected vm/100/2026-11-02T10:00:00Z", "would keep vm/100/2026-11-03T10:00:00Z",
+				`Pruning group dept1:"ct/200"`, "would keep partial ct/200/2026-11-01T10:00:00Z",
+				"would keep since timestamp in future ct/200/2099-01-01T10:00:00Z",
+			},
+			"dry run: PBS would prune 2 backup groups: keep 4 backups, remove 1; nothing changed",
+		},
+		{
+			"dry run, PBS 4.0.14", []string{
+				"(dry test run)", `Pruning group :"vm/100"`, "would protected vm/100/2026-11-01T10:00:00Z",
+				"would keep-partial vm/100/2026-11-02T10:00:00Z", "would remove vm/100/2026-11-03T10:00:00Z",
+				"would remove vm/100/2026-11-04T10:00:00Z",
+			},
+			"dry run: PBS would prune 1 backup group: keep 2 backups, remove 2; nothing changed",
+		},
+		{
+			"dry run, keep all", []string{
+				"(dry test run)", "No prune selection - keeping all files.", `Pruning group :"vm/100"`,
+				"would remove vm/100/2026-11-01T10:00:00Z", "would remove vm/100/2026-11-02T10:00:00Z",
+			},
+			"dry run: PBS would prune 1 backup group: keep 2 backups, remove 0; nothing changed",
+		},
+		{"dry run, nothing to prune", []string{"(dry test run)", "retention options: --keep-last 2"}, "dry run: found no backup groups to prune"},
 		{
 			"newer marks", []string{
 				`Pruning group :"vm/100"`, "keep partial vm/100/2026-11-01T10:00:00Z",
@@ -222,7 +249,8 @@ func TestPruneSummary(t *testing.T) {
 		{
 			// Lines that merely look alike are not counted.
 			"other lines", []string{
-				`Pruning group :"vm/100"`, "remove the lock", "keep going", "remove vm/100/2026-11-01T10:00:00Z",
+				`Pruning group :"vm/100"`, "remove the lock", "keep going", "would keep going",
+				"remove vm/100/2026-11-01T10:00:00Z", "  (dry test run)",
 			},
 			"pruned 1 backup group: kept 0 backups, removed 1",
 		},

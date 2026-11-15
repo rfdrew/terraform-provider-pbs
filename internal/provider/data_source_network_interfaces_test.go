@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	acc "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
@@ -190,6 +191,140 @@ func TestNetworkInterfacesDataSourceExplainsTheMethodAuto(t *testing.T) {
 	}
 }
 
+func TestNetworkInterfaceDataSourceSchemaIsValid(t *testing.T) {
+	requireValidDataSourceSchema(t, &networkInterfaceDataSource{})
+}
+
+// fakeNetworkInterfaceJSON is what PBS 4.2.8 answers for vmbr0 of
+// fakeNetworkJSON on its own: the same object, with the digest inside data
+// but without iface.
+const fakeNetworkInterfaceJSON = `{"data":
+ {"active":true,"autostart":true,"bridge_ports":["bond0"],"bridge_vlan_aware":true,"cidr":"192.0.2.10/24","cidr6":"2001:db8::10/64",
+  "comments":"Management\nDo not change","comments6":"IPv6 uplink","digest":"` + fakeNetworkDigest + `","gateway":"192.0.2.1",
+  "gateway6":"2001:db8::1","method":"static","method6":"static","name":"vmbr0",
+  "options":["bridge-stp off","bridge-fd 0"],"options6":["accept_ra 2"],"type":"bridge"}}`
+
+// One interface reads with the attributes the list has for it, on the node
+// the configuration names, with the digest.
+func TestNetworkInterfaceDataSourceReadsTheInterface(t *testing.T) {
+	fake := newFakePBS()
+	d := &networkInterfaceDataSource{data: fake.configured(t)}
+	fake.reply("GET /nodes/pbs1/network/vmbr0", http.StatusOK, fakeNetworkInterfaceJSON)
+
+	resp := readDataSource(t, d, dataSourceValue(t, d, map[string]any{"node": "pbs1", "name": "vmbr0"}))
+	requireNoErrors(t, resp.Diagnostics)
+	want := dataSourceValue(t, d, wantNetworkInterface(map[string]any{
+		"node": "pbs1", "name": "vmbr0", "type": "bridge", "active": true, "autostart": true,
+		"method": "static", "method6": "static", "cidr": "192.0.2.10/24", "gateway": "192.0.2.1",
+		"cidr6": "2001:db8::10/64", "gateway6": "2001:db8::1", "bridge_ports": []string{"bond0"},
+		"bridge_vlan_aware": true, "comments": "Management\nDo not change", "comments6": "IPv6 uplink",
+		"options": []string{"bridge-stp off", "bridge-fd 0"}, "options6": []string{"accept_ra 2"},
+		"digest": fakeNetworkDigest,
+	}))
+	if !resp.State.Raw.Equal(want) {
+		t.Errorf("state = %s, want %s", resp.State.Raw, want)
+	}
+}
+
+// Through the protocol, against a node with eno1 to eno3 and nothing but lo
+// in its file: lo, which the list leaves out; a NIC the file does not name;
+// the pending configuration, with the list's digest; and a read where the
+// list fails, as PBS cannot diff a pending file without the running one.
+func TestNetworkInterfaceDataSourceThroughTheProtocol(t *testing.T) {
+	h, _, network := newNetworkHarness(t, true)
+	read := func(name string) tftypes.Value {
+		t.Helper()
+		return h.readDataSource(t, "pbs_network_interface", h.dataSourceValue(t, "pbs_network_interface",
+			map[string]any{"name": name}))
+	}
+
+	lo := read("lo")
+	if stringAt(t, lo, "node") != "localhost" || stringAt(t, lo, "name") != "lo" || stringAt(t, lo, "type") != "loopback" ||
+		stringAt(t, lo, "method") != "loopback" || len(stringAt(t, lo, "digest")) != 64 {
+		t.Fatalf("lo = %s", lo)
+	}
+
+	eno3 := read("eno3")
+	if stringAt(t, eno3, "type") != "eth" || stringAt(t, eno3, "method") != "manual" || boolAt(t, eno3, "autostart") ||
+		!isNullAt(t, eno3, "cidr") || lengthAt(t, eno3, "bridge_ports") != 0 {
+		t.Fatalf("eno3 = %s", eno3)
+	}
+
+	network.edit("eno1", func(i *fakeIface) { i.MTU = ptr(int64(9000)) })
+	eno1 := read("eno1")
+	list := h.readDataSource(t, "pbs_network_interfaces", h.dataSourceValue(t, "pbs_network_interfaces", nil))
+	if int64At(t, eno1, "mtu") != 9000 || stringAt(t, eno1, "digest") != stringAt(t, list, "digest") ||
+		stringAt(t, eno1, "digest") == stringAt(t, lo, "digest") {
+		t.Fatalf("eno1 = %s, list = %s", eno1, list)
+	}
+
+	network.mu.Lock()
+	network.hasRunningFile = false
+	network.mu.Unlock()
+	failed := h.readDataSourceResponse(t, "pbs_network_interfaces", h.dataSourceValue(t, "pbs_network_interfaces", nil))
+	requireProtocolErrorContaining(t, failed.Diagnostics, "diff failed")
+	if eno1 = read("eno1"); int64At(t, eno1, "mtu") != 9000 {
+		t.Fatalf("eno1 = %s", eno1)
+	}
+}
+
+// A name PBS does not have fails on name, saying where PBS looked; one PBS
+// would refuse in its path fails validation before any request.
+func TestNetworkInterfaceDataSourceNames(t *testing.T) {
+	h, fake, _ := newNetworkHarness(t, true)
+	resp := h.readDataSourceResponse(t, "pbs_network_interface",
+		h.dataSourceValue(t, "pbs_network_interface", map[string]any{"name": "tfacc9"}))
+	requireProtocolErrorOn(t, resp.Diagnostics, tftypes.NewAttributePath().WithAttributeName("name"))
+	requireProtocolErrorContaining(t, resp.Diagnostics, `PBS has no network interface "tfacc9" on node "localhost"`)
+	requireProtocolErrorContaining(t, resp.Diagnostics, "alternative names")
+	requireProtocolErrorContaining(t, resp.Diagnostics, "interface 'tfacc9' does not exist.")
+
+	reads := fake.count("GET /nodes/localhost/network/eth0:1")
+	for name, want := range map[string]string{
+		"eth0:1":                "must be an interface name",
+		strings.Repeat("a", 16): "string length must be between 1 and 15",
+		"":                      "string length must be between 1 and 15",
+	} {
+		diags := dataSourceConfigDiagnostics(t, h, "pbs_network_interface",
+			h.dataSourceValue(t, "pbs_network_interface", map[string]any{"name": name}))
+		requireProtocolErrorContaining(t, diags, want)
+	}
+	if fake.count("GET /nodes/localhost/network/eth0:1") != reads {
+		t.Fatal("validation sent a request")
+	}
+}
+
+// A token without Sys.Audit on the interface gets 403, and the error names
+// the privilege on that interface — for the data source and for a refresh
+// of pbs_network_interface alike.
+func TestNetworkInterfaceDataSourceExplainsAMissingPrivilege(t *testing.T) {
+	fake := newFakePBS()
+	d := &networkInterfaceDataSource{data: fake.configured(t)}
+	fake.reply("GET /nodes/localhost/network/vmbr0", http.StatusForbidden, "permission check failed")
+
+	resp := readDataSource(t, d, dataSourceValue(t, d, map[string]any{"name": "vmbr0"}))
+	requireErrorContaining(t, resp.Diagnostics, "Unable to read the PBS network interface")
+	requireErrorContaining(t, resp.Diagnostics, "Sys.Audit on /system/network/interfaces/vmbr0")
+	requireErrorContaining(t, resp.Diagnostics, "An API token has no privileges of its own")
+
+	h, fake, _ := newNetworkHarness(t, true)
+	inst := h.importByID(t, "pbs_network_interface", "localhost/eno1")
+	fake.reply("GET /nodes/localhost/network/eno1", http.StatusForbidden, "permission check failed")
+	requireProtocolErrorContaining(t, h.read(t, inst).Diagnostics, "Sys.Audit on /system/network/interfaces/eno1")
+}
+
+// Before PBS 4.2.7 a stanza with the method auto fails every read; the
+// error says why and what to do.
+func TestNetworkInterfaceDataSourceExplainsTheMethodAuto(t *testing.T) {
+	fake := newFakePBS()
+	d := &networkInterfaceDataSource{data: fake.configured(t)}
+	fake.reply("GET /nodes/localhost/network/eno1", http.StatusBadRequest, "line 7: unknown iface option auto")
+
+	resp := readDataSource(t, d, dataSourceValue(t, d, map[string]any{"name": "eno1"}))
+	requireErrorContaining(t, resp.Diagnostics, "line 7: unknown iface option auto")
+	requireErrorContaining(t, resp.Diagnostics, "Upgrade PBS to 4.2.7 or later")
+}
+
 // --- acceptance --------------------------------------------------------------
 
 // Every stand lists something different — its own NICs, a container's veth
@@ -274,4 +409,103 @@ func testAccCheckNetworkInterfacesSorted(name string) acc.TestCheckFunc {
 		}
 		return nil
 	}
+}
+
+// One interface at a time, on every stand: lo, which the parser adds where
+// the file does not name it — neither active nor autostart is checked, as
+// they depend on whether and how the file names it —; the first interface
+// the list has, compared with it where the stand can list them; the first
+// NIC of the network tests, where the stand has them; and a name nothing
+// has. The stand is probed with a read of lo rather than with the list,
+// which fails where PBS cannot diff a pending file, and a stand that cannot
+// read its network configuration at all — no ip binary, an inet6 auto
+// stanza before PBS 4.2.7 — is skipped.
+func TestAccNetworkInterfaceDataSource(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("acceptance test: set TF_ACC")
+	}
+	client, err := testAccClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := client.NetworkInterface(ctx, client.Node(), "lo"); err != nil {
+		for _, environmental := range []string{"unknown iface option", "could not obtain ip link output",
+			"ip link returned non-zero exit code", "could not deserialize ip link output"} {
+			if strings.Contains(err.Error(), environmental) {
+				t.Skipf("the stand cannot read its network configuration: %v", err)
+			}
+		}
+		t.Fatal(err)
+	}
+
+	config := providerConfig + `
+data "pbs_network_interface" "lo" {
+  name = "lo"
+}
+`
+	const lo = "data.pbs_network_interface.lo"
+	checks := []acc.TestCheckFunc{
+		acc.TestCheckResourceAttr(lo, "node", client.Node()),
+		acc.TestCheckResourceAttr(lo, "name", "lo"),
+		acc.TestCheckResourceAttr(lo, "type", "loopback"),
+		acc.TestCheckResourceAttr(lo, "method", "loopback"),
+		acc.TestMatchResourceAttr(lo, "digest", regexp.MustCompile(`^[0-9a-f]{64}$`)),
+	}
+	// PBS cannot read an alias on its own.
+	if interfaces, _, err := client.NetworkInterfaces(ctx, client.Node()); err == nil {
+		for _, iface := range interfaces {
+			if iface.Type == "alias" {
+				continue
+			}
+			const listed = "data.pbs_network_interface.listed"
+			config += fmt.Sprintf(`
+data "pbs_network_interface" "listed" {
+  name = %q
+}
+`, iface.Name)
+			checks = append(checks,
+				acc.TestCheckResourceAttr(listed, "type", iface.Type),
+				acc.TestCheckResourceAttr(listed, "autostart", strconv.FormatBool(iface.Autostart)),
+				acc.TestCheckResourceAttr(listed, "digest", iface.Digest),
+			)
+			if iface.Method == "" {
+				checks = append(checks, acc.TestCheckNoResourceAttr(listed, "method"))
+			} else {
+				checks = append(checks, acc.TestCheckResourceAttr(listed, "method", iface.Method))
+			}
+			break
+		}
+	}
+	if nic, _, _ := strings.Cut(os.Getenv(envAccNetworkNICs), ","); nic != "" {
+		const veth = "data.pbs_network_interface.veth"
+		config += fmt.Sprintf(`
+data "pbs_network_interface" "veth" {
+  name = %q
+}
+`, nic)
+		checks = append(checks,
+			acc.TestCheckResourceAttr(veth, "name", nic),
+			acc.TestCheckResourceAttr(veth, "type", "eth"),
+		)
+	}
+
+	acc.Test(t, acc.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []acc.TestStep{
+			{
+				Config: config,
+				Check:  acc.ComposeAggregateTestCheckFunc(checks...),
+			},
+			{
+				Config: providerConfig + `
+data "pbs_network_interface" "missing" {
+  name = "tfaccmissing0"
+}
+`,
+				ExpectError: regexp.MustCompile(`PBS has no network interface`),
+			},
+		},
+	})
 }

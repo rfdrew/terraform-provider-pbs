@@ -90,24 +90,22 @@ var httpProxyPattern = regexp.MustCompile(`^(http://)?([^\s/@]+@)?([A-Za-z0-9]([
 const maxTaskLogDays = 1000000
 
 // cipherListValidators check an OpenSSL cipher list as PBS does before it
-// asks OpenSSL, and warn about a security level that may keep the proxy
-// from loading its certificate.
-func cipherListValidators() []validator.String {
+// asks OpenSSL, and add level, which looks at its @SECLEVEL.
+func cipherListValidators(level validator.String) []validator.String {
 	return []validator.String{
 		stringvalidator.LengthAtLeast(1),
 		stringvalidator.RegexMatches(regexp.MustCompile(`^[0-9A-Za-z_:,+!\-@=.]([0-9A-Za-z_:, +!\-@=.]*[0-9A-Za-z_:,+!\-@=.])?$`),
 			"must be an OpenSSL cipher list such as ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256, "+
 				"without white space at either end"),
-		securityLevelWarning{},
+		level,
 	}
 }
 
-// securityLevelPattern finds an OpenSSL security level in a cipher list.
-var securityLevelPattern = regexp.MustCompile(`@SECLEVEL=([0-9]+)`)
-
-// securityLevelWarning warns about a cipher list that raises OpenSSL's
-// security level above its default, 2: the proxy then refuses a certificate
-// chain with weaker keys, when it starts, reloads or loads a certificate.
+// securityLevelWarning warns about a TLS 1.2 cipher list that raises
+// OpenSSL's security level above Debian's default, 2: the proxy then
+// refuses a certificate chain with weaker keys, when it starts, reloads or
+// loads a certificate. It reads the level as OpenSSL does, the last
+// @SECLEVEL; a list OpenSSL refuses, PBS refuses too, with OpenSSL's error.
 type securityLevelWarning struct{}
 
 func (securityLevelWarning) Description(_ context.Context) string {
@@ -122,16 +120,47 @@ func (v securityLevelWarning) ValidateString(_ context.Context, req validator.St
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
-	for _, m := range securityLevelPattern.FindAllStringSubmatch(req.ConfigValue.ValueString(), -1) {
-		if level, err := strconv.Atoi(m[1]); err == nil && level > 2 {
-			resp.Diagnostics.AddAttributeWarning(req.Path, "OpenSSL security level above the default",
-				fmt.Sprintf("Attribute %s raises OpenSSL's security level to %d for the proxy's certificate chain too: "+
-					"level 3 needs RSA keys of 3072 bits or more and EC keys of 256 bits or more, intermediates "+
-					"included, and level 4 refuses even RSA-4096 and P-256. With a chain that falls short, the proxy "+
-					"keeps its old certificate when it loads a new one and does not start again — at its next "+
-					"restart, reload or package upgrade — until node.cfg is fixed on the host.", req.Path, level))
-			return
+	level, _, err := pbsclient.CipherListSecurityLevel(req.ConfigValue.ValueString())
+	if err != nil || level <= debianSecurityLevel {
+		return
+	}
+	resp.Diagnostics.AddAttributeWarning(req.Path, "OpenSSL security level above the default",
+		fmt.Sprintf("Attribute %s raises OpenSSL's security level to %d for the proxy's certificate chain too: "+
+			"level 3 needs RSA keys of 3072 bits or more and EC keys of 256 bits or more, intermediates "+
+			"included, and level 4 refuses even RSA-4096 and P-256. With a chain that falls short, the proxy "+
+			"keeps its old certificate when it loads a new one and does not start again — at its next "+
+			"restart, reload or package upgrade — until node.cfg is fixed on the host; pbs_service_reload "+
+			"checks the chain and refuses to reload the proxy then.", req.Path, level))
+}
+
+// suiteSecurityLevelWarning warns about @SECLEVEL in a TLS 1.3 list, which
+// PBS hands to SSL_CTX_set_ciphersuites: OpenSSL reads names of cipher
+// suites there only, separated by ':', and skips one it does not know,
+// @SECLEVEL included, so the level stays what ciphers_tls_1_2 sets.
+type suiteSecurityLevelWarning struct{}
+
+func (suiteSecurityLevelWarning) Description(_ context.Context) string {
+	return "warns about @SECLEVEL, which OpenSSL ignores in TLS 1.3 cipher suites"
+}
+
+func (v suiteSecurityLevelWarning) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v suiteSecurityLevelWarning) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	for name := range strings.SplitSeq(req.ConfigValue.ValueString(), ":") {
+		if !strings.Contains(strings.ToUpper(name), "@SECLEVEL") {
+			continue
 		}
+		resp.Diagnostics.AddAttributeWarning(req.Path, "OpenSSL ignores @SECLEVEL in TLS 1.3 cipher suites",
+			fmt.Sprintf("Attribute %s holds %q, which OpenSSL skips as the name of a cipher suite it does not know: "+
+				"it reads the TLS 1.3 list as names of cipher suites only, so the setting has no effect. The "+
+				"security level of the proxy, which its certificate chain must meet too, comes from @SECLEVEL in "+
+				"ciphers_tls_1_2.", req.Path, strings.TrimSpace(name)))
+		return
 	}
 }
 
@@ -214,19 +243,22 @@ func (r *nodeConfigResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				MarkdownDescription: "OpenSSL cipher list the proxy offers for TLS 1.2, such as " +
 					"`ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384`, instead of OpenSSL's defaults for " +
 					"Mozilla's intermediate configuration. PBS refuses a list that matches no cipher. The proxy reads " +
-					"it only when it starts, reloads (`systemctl reload proxmox-backup-proxy`) or loads a new " +
+					"it only when it starts, reloads — `systemctl reload proxmox-backup-proxy` on the host, or the " +
+					"`pbs_service_reload` action, whose example reloads it after a change — or loads a new " +
 					"certificate, so a change takes effect then. `@SECLEVEL=N` above 2 applies to the proxy's " +
 					"certificate chain too, and a chain with weaker keys then keeps the proxy from starting: the plan " +
-					"warns." + managed,
-				Validators: cipherListValidators(),
+					"warns, and `pbs_service_reload` refuses to reload the proxy. OpenSSL takes the last " +
+					"`@SECLEVEL`, and N is one digit from 0 to 5." + managed,
+				Validators: cipherListValidators(securityLevelWarning{}),
 			},
 			"ciphers_tls_1_3": schema.StringAttribute{
 				Optional: true,
 				MarkdownDescription: "OpenSSL cipher suites the proxy offers for TLS 1.3, such as " +
 					"`TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256`. OpenSSL skips names it does not know, " +
-					"so check the spelling. Like `ciphers_tls_1_2`, it takes effect when the proxy next starts, " +
-					"reloads or loads a certificate." + managed,
-				Validators: cipherListValidators(),
+					"so check the spelling; it skips `@SECLEVEL=N` too, which has an effect in `ciphers_tls_1_2` " +
+					"only, and the plan warns. Like `ciphers_tls_1_2`, it takes effect when the proxy next starts, " +
+					"reloads (`pbs_service_reload`) or loads a certificate." + managed,
+				Validators: cipherListValidators(suiteSecurityLevelWarning{}),
 			},
 			"consent_text": schema.StringAttribute{
 				Optional: true,
@@ -406,8 +438,9 @@ func storedDescription(d string) string {
 
 // decodeConsentText decodes the consent text PBS stores base64-encoded, as
 // UTF-8. A value that is not — written to node.cfg some other way — is
-// null, with a warning, so that a plan writes the configured text encoded:
-// the login page cannot show it as it is.
+// null, with a warning, so that a plan of pbs_node_config writes the
+// configured text encoded: the login page cannot show it as it is. The
+// pbs_node_config data source reads it the same way.
 func decodeConsentText(stored string, diags *diag.Diagnostics) types.String {
 	if stored == "" {
 		return types.StringNull()
@@ -419,8 +452,8 @@ func decodeConsentText(stored string, diags *diag.Diagnostics) types.String {
 	if err != nil {
 		diags.AddWarning("PBS consent text is not base64",
 			"The consent text in node.cfg is not base64-encoded UTF-8, as the web interface writes it, so the "+
-				"login page cannot show it: "+err.Error()+". The provider reads it as no text, so that a plan "+
-				"writes consent_text encoded.")
+				"login page cannot show it: "+err.Error()+". The provider reads it as no text; pbs_node_config "+
+				"writes its consent_text encoded.")
 		return types.StringNull()
 	}
 	return types.StringValue(string(decoded))

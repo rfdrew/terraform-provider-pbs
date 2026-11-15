@@ -582,12 +582,17 @@ func (p *pbsProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		NewACMEAccountsDataSource,
 		NewSubscriptionDataSource,
 		NewTimeDataSource,
+		NewNodeConfigDataSource,
+		NewDNSDataSource,
 		NewNodeStatusDataSource,
 		NewNodeCertificatesDataSource,
+		NewNetworkInterfaceDataSource,
 		NewNetworkInterfacesDataSource,
 		NewDisksDataSource,
 		NewAPTUpdatesDataSource,
 		NewServicesDataSource,
+		NewTasksDataSource,
+		NewTaskDataSource,
 	}
 }
 
@@ -600,6 +605,8 @@ func (p *pbsProvider) Actions(_ context.Context) []func() action.Action {
 		NewVerifyJobRunAction,
 		NewPruneJobRunAction,
 		NewDatastoreGCAction,
+		NewDatastoreVerifyAction,
+		NewDatastorePruneAction,
 		NewDatastoreMountAction,
 		NewDatastoreUnmountAction,
 		NewDatastoreS3RefreshAction,
@@ -609,6 +616,9 @@ func (p *pbsProvider) Actions(_ context.Context) []func() action.Action {
 		NewNodeCertificateRenewAction,
 		NewAPTUpdateAction,
 		NewNetworkReloadAction,
+		NewServiceReloadAction,
+		NewServiceRestartAction,
+		NewServiceStartAction,
 	}
 }
 

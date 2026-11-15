@@ -10,7 +10,8 @@ import (
 )
 
 // What the actions that work on a node — pbs_apt_update,
-// pbs_network_reload — share: the node attribute, which defaults to the
+// pbs_network_reload, pbs_service_reload, pbs_service_restart and
+// pbs_service_start — share: the node attribute, which defaults to the
 // provider's node, as the node resources' does (node.go). An action has no
 // plan to fill a default into, so Invoke takes the provider's node when the
 // configuration leaves the attribute out.

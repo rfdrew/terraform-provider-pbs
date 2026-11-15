@@ -124,8 +124,8 @@ configuration and then applies.
 
 Start from what the node has, with a plan that changes nothing:
 
-1. List the interfaces with the data source `pbs_network_interfaces`, or in
-   the web interface.
+1. List the interfaces with the data source `pbs_network_interfaces`, read
+   one with `pbs_network_interface`, or look in the web interface.
 2. Write a resource for each interface to manage, with the settings it has,
    and import it:
 
