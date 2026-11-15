@@ -223,8 +223,9 @@ func (t *trust) verifyConnection(state tls.ConnectionState) error {
 	// The handshake with an HTTPS proxy, through which net/http reaches
 	// the endpoint, names the proxy: its certificate is verified for it, as
 	// Go would, against the CAs. The client sets ServerName itself; it is
-	// empty for an IP address, which the SNI leaves out.
-	if state.ServerName != "" && state.ServerName != t.host {
+	// empty for an IP address, which the SNI leaves out, and keeps the case
+	// of the URL's host name, which host does not.
+	if state.ServerName != "" && !strings.EqualFold(state.ServerName, t.host) {
 		return (&trust{roots: t.roots, host: state.ServerName}).verifyCertificates(state.PeerCertificates)
 	}
 	if len(state.PeerCertificates) > 0 && t.isAccepted(CertificateFingerprint(state.PeerCertificates[0])) {

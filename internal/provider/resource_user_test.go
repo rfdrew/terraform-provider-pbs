@@ -184,7 +184,7 @@ func TestUserResourceDestroyAfterRealmDeletion(t *testing.T) {
 	h, fake, access := newUserHarness(t)
 	inst := h.create(t, "pbs_user", h.resourceValue(t, "pbs_user", map[string]any{"userid": "alice@corp"}))
 	access.addToken(pbsclient.APIToken{TokenID: "alice@corp!ci"}, "secret")
-	access.addACL(pbsclient.ACLEntry{Path: "/datastore/store1", UGID: "alice@corp!ci", UGIDType: "token", RoleID: "DatastoreAdmin"})
+	access.addACL(pbsclient.ACLEntry{Path: "/datastore/store1", UGID: "alice@corp!ci", UGIDType: "user", RoleID: "DatastoreAdmin"})
 	access.removeRealm("corp")
 
 	h.destroy(t, inst)
@@ -330,19 +330,46 @@ func TestUserResourceExplainsAMissingPrivilege(t *testing.T) {
 	requireProtocolErrorContaining(t, applied.Diagnostics, "An API token has no privileges of its own")
 }
 
-// Without Sys.Audit on /access/acl, PBS would hide the user's entries, so
+// Without Sys.Audit on /access/acl, PBS would hide the user's entries from
+// an API token and from a user signed in with its password alike, so
 // destroying the user fails rather than leave them behind.
 func TestUserResourceDestroyNeedsToSeeTheACL(t *testing.T) {
+	for name, opts := range map[string][]harnessOption{"API token": nil, "password": {withPasswordSignIn()}} {
+		t.Run(name, func(t *testing.T) {
+			h, fake, access := newUserHarness(t, opts...)
+			inst := h.create(t, "pbs_user", h.resourceValue(t, "pbs_user", map[string]any{"userid": "lena@pbs"}))
+			access.addACL(pbsclient.ACLEntry{Path: "/", UGID: "lena@pbs", UGIDType: "user", RoleID: "Audit"})
+			setHideACL(access)
+
+			planned := h.plan(t, "pbs_user", inst, tftypes.NewValue(h.resourceType(t, "pbs_user"), nil))
+			applied := h.apply(t, "pbs_user", inst, tftypes.NewValue(h.resourceType(t, "pbs_user"), nil), planned)
+			requireProtocolErrorContaining(t, applied.Diagnostics, "lacks "+aclReadPrivilege)
+			if _, exists := access.user("lena@pbs"); !exists || fake.count("DELETE /access/users/lena@pbs") != 0 {
+				t.Error("the user was deleted with its ACL entries hidden")
+			}
+			if n := fake.count("GET /access/acl"); n != 0 {
+				t.Errorf("GET /access/acl was called %d times, want none once the privilege is known to be missing", n)
+			}
+		})
+	}
+}
+
+// A provider that may read the ACL but not change it — with the Audit role,
+// say — gets PBS's 400 "Unprivileged ..." when it removes the user's
+// entries, and the error names the privilege that is missing.
+func TestUserResourceDestroyNeedsToChangeTheACL(t *testing.T) {
 	h, fake, access := newUserHarness(t)
 	inst := h.create(t, "pbs_user", h.resourceValue(t, "pbs_user", map[string]any{"userid": "lena@pbs"}))
 	access.addACL(pbsclient.ACLEntry{Path: "/", UGID: "lena@pbs", UGIDType: "user", RoleID: "Audit"})
-	access.hideACL = true
+	fake.reply("PUT /access/acl", http.StatusBadRequest, "Unprivileged API tokens can't set ACL items.")
 
 	planned := h.plan(t, "pbs_user", inst, tftypes.NewValue(h.resourceType(t, "pbs_user"), nil))
 	applied := h.apply(t, "pbs_user", inst, tftypes.NewValue(h.resourceType(t, "pbs_user"), nil), planned)
-	requireProtocolErrorContaining(t, applied.Diagnostics, "lacks "+aclReadPrivilege)
-	if _, exists := access.user("lena@pbs"); !exists || fake.count("DELETE /access/users/lena@pbs") != 0 {
-		t.Error("the user was deleted with its ACL entries hidden")
+	requireProtocolErrorContaining(t, applied.Diagnostics, "Unable to remove the ACL entries of PBS user")
+	requireProtocolErrorContaining(t, applied.Diagnostics, `"`+fakeTokenID+`" lacks `+aclModifyPrivilege+", which only the Admin role grants")
+	requireProtocolErrorContaining(t, applied.Diagnostics, "Unprivileged API tokens can't set ACL items.")
+	if _, exists := access.user("lena@pbs"); !exists {
+		t.Error("the user was deleted with its ACL entries left")
 	}
 }
 

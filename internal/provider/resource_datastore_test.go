@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/rfdrew/terraform-provider-pbs/internal/pbsclient"
@@ -289,6 +290,83 @@ func TestDatastoreResourceDelete(t *testing.T) {
 		t.Errorf("refresh kept a deleted datastore: %s", refreshed.state)
 	}
 	h.destroy(t, inst)
+}
+
+// A delete-datastore task fails on PBS's lock of datastore.cfg when another
+// task holds it for long: at its start, before PBS set maintenance mode
+// delete, or at its end, after it. Only the mode tells which, and the error
+// says what PBS did, and which tasks to wait for.
+func TestDatastoreResourceDeleteFailsOnTheDatastoreConfigLock(t *testing.T) {
+	h, fake, datastores := newDatastoreHarness(t)
+	config := map[string]any{"name": "store1", "path": "/mnt/datastore/store1"}
+	inst := h.create(t, "pbs_datastore", h.resourceValue(t, "pbs_datastore", config))
+	failOnTheLock := func(atEnd bool) {
+		fake.handle("DELETE /config/datastore/store1", func(w http.ResponseWriter, _ *http.Request) {
+			datastores.mu.Lock()
+			defer datastores.mu.Unlock()
+			props := datastores.datastores["store1"]
+			writeData(w, datastores.startTaskLocked("delete-datastore", "store1", func() string {
+				if atEnd {
+					props["maintenance-mode"] = pbsclient.MaintenanceDelete
+				}
+				return datastoreConfigLockedText
+			}), "")
+		})
+	}
+	null := tftypes.NewValue(h.resourceType(t, "pbs_datastore"), nil)
+	destroy := func() []*tfprotov6.Diagnostic {
+		t.Helper()
+		planned := h.plan(t, "pbs_datastore", inst, null)
+		diags := h.apply(t, "pbs_datastore", inst, null, planned).Diagnostics
+		requireProtocolErrorContaining(t, diags, "Unable to delete PBS datastore")
+		requireProtocolErrorContaining(t, diags, datastoreConfigLockedText)
+		requireProtocolErrorContaining(t, diags, datastoreConfigLockHolders)
+		if datastoreDiagnosticsMention(diags, "A datastore in use") {
+			t.Errorf("a failure on the lock is put down to a datastore in use: %v", diags)
+		}
+		return diags
+	}
+
+	// At its start, the task changed nothing, but PBS's handler had deleted
+	// the datastore's jobs and ACL entries already.
+	failOnTheLock(false)
+	diags := destroy()
+	requireProtocolErrorContaining(t, diags, `PBS's task to delete datastore "store1" could not start deleting: the `+
+		"datastore, its data and its maintenance mode are as they were, though PBS had already deleted its prune, "+
+		"verify, sync and tape backup jobs and its ACL entries")
+	requireProtocolErrorContaining(t, diags, "Destroying it again retries.")
+	if datastoreDiagnosticsMention(diags, `"delete" maintenance mode`) {
+		t.Errorf("the error says the datastore is in maintenance mode delete: %v", diags)
+	}
+	config["keep_job_configs"] = true
+	inst = h.update(t, inst, h.resourceValue(t, "pbs_datastore", config))
+	if diags := destroy(); datastoreDiagnosticsMention(diags, "jobs") {
+		t.Errorf("with keep_job_configs, the error mentions jobs: %v", diags)
+	}
+
+	// At its end, PBS keeps the datastore in maintenance mode delete.
+	failOnTheLock(true)
+	diags = destroy()
+	requireProtocolErrorContaining(t, diags, `PBS's task to delete datastore "store1" failed, and PBS keeps the `+
+		`datastore in its "delete" maintenance mode until a deletion succeeds`)
+	if datastoreDiagnosticsMention(diags, "could not start deleting") {
+		t.Errorf("the error says the task did not start deleting: %v", diags)
+	}
+
+	// Without the datastore's mode, the error says both.
+	fake.reply("GET /config/datastore/store1", http.StatusForbidden, "permission check failed")
+	diags = destroy()
+	requireProtocolErrorContaining(t, diags, "the provider cannot tell how far the task got")
+	requireProtocolErrorContaining(t, diags, "Datastore.Audit on /datastore/store1")
+	fake.handle("GET /config/datastore/store1", nil)
+
+	// Once the lock's holder has ended, destroying the datastore again
+	// deletes it.
+	fake.handle("DELETE /config/datastore/store1", nil)
+	h.destroy(t, h.refresh(t, inst))
+	if _, exists := datastores.datastore("store1"); exists {
+		t.Error("the datastore was not deleted")
+	}
 }
 
 // Both import forms read a datastore back in full, with the flags that exist

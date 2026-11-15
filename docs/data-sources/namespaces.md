@@ -3,12 +3,12 @@
 page_title: "pbs_namespaces Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Lists the namespaces of a Proxmox Backup Server datastore, or those below one of them. PBS lists only the namespaces the provider has Datastore.Audit, Datastore.Modify or Datastore.Backup on. A removable datastore must be mounted, and a datastore in maintenance mode offline cannot be read.
+  Lists the namespaces of a Proxmox Backup Server datastore, or those below one of them. PBS lists only the namespaces the provider has Datastore.Audit, Datastore.Modify or Datastore.Backup on. A removable datastore must be mounted, and the maintenance mode offline forbids reading a datastore, as does PBS while it unmounts it, refreshes it from S3 or deletes it.
 ---
 
 # pbs_namespaces (Data Source)
 
-Lists the namespaces of a Proxmox Backup Server datastore, or those below one of them. PBS lists only the namespaces the provider has `Datastore.Audit`, `Datastore.Modify` or `Datastore.Backup` on. A removable datastore must be mounted, and a datastore in maintenance mode `offline` cannot be read.
+Lists the namespaces of a Proxmox Backup Server datastore, or those below one of them. PBS lists only the namespaces the provider has `Datastore.Audit`, `Datastore.Modify` or `Datastore.Backup` on. A removable datastore must be mounted, and the maintenance mode `offline` forbids reading a datastore, as does PBS while it unmounts it, refreshes it from S3 or deletes it.
 
 ## Example Usage
 

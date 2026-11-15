@@ -47,8 +47,10 @@ func (d *aclDataSource) Metadata(_ context.Context, req datasource.MetadataReque
 func (d *aclDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Reads the access control list of a Proxmox Backup Server: which roles users and API " +
-			"tokens have on which paths. With " + aclReadPrivilege + " it shows every entry; without it, PBS shows " +
-			"only the entries of the API tokens of the user the provider signs in as.",
+			"tokens have on which paths. With " + aclReadPrivilege + " it shows every entry. Without it, PBS shows " +
+			"a user signed in with its password only the entries of its own API tokens, not its own, and an API " +
+			"token none at all, not even its own; it does so without an error, and the data source reads what " +
+			"PBS shows.",
 		Attributes: map[string]schema.Attribute{
 			"path": schema.StringAttribute{
 				Optional: true,
@@ -104,7 +106,9 @@ func (d *aclDataSource) Read(ctx context.Context, req datasource.ReadRequest, re
 	}
 	entries, _, err := d.data.client.ListACL(ctx, config.Path.ValueString(), config.Exact.ValueBool())
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to read PBS ACL entries", apiErrorDetail(d.data.client, aclReadPrivilege, err))
+		// PBS lets everyone read the ACL and leaves out what a caller may not
+		// see, so a failure is not about privileges.
+		resp.Diagnostics.AddError("Unable to read PBS ACL entries", err.Error())
 		return
 	}
 	sort.Slice(entries, func(i, j int) bool {

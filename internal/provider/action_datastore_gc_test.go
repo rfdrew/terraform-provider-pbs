@@ -95,6 +95,18 @@ func TestDatastoreGCActionTaskFails(t *testing.T) {
 	}
 }
 
+// A task that fails on PBS's lock of its datastore configuration, which
+// another task held, says which tasks hold it for long and what to do.
+func TestDatastoreGCActionTaskFailsOnTheDatastoreConfigLock(t *testing.T) {
+	exit := `Unable to acquire lock "/etc/proxmox-backup/.datastore.lck" - Interrupted system call (os error 4)`
+	h, _, _ := newGCHarness(t, func() *fakeTask { return &fakeTask{exit: exit} })
+	got := h.invokeAction(t, "pbs_datastore_gc", map[string]any{"store": "store1"})
+	requireProtocolErrorContaining(t, got.diagnostics, exit)
+	requireProtocolErrorContaining(t, got.diagnostics, "(os error 4). The task could not take the lock of PBS's datastore configuration")
+	requireProtocolErrorContaining(t, got.diagnostics, "an S3 refresh holds it")
+	requireProtocolErrorContaining(t, got.diagnostics, "Administration → Tasks")
+}
+
 // With wait = false the action ends once the task has started, without
 // polling it.
 func TestDatastoreGCActionWithoutWaiting(t *testing.T) {

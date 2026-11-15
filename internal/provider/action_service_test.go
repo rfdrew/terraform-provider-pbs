@@ -651,7 +651,7 @@ func TestServiceReloadActionComparesThePresentedCertificate(t *testing.T) {
 	acme.mu.Lock()
 	acme.cert = certificateInfo(served, acme.ca)
 	acme.mu.Unlock()
-	proxy := serveRenewProxy(t, fake)
+	proxy := serveCertificateProxy(t, fake)
 	proxy.present(servedKey, served, acme.ca)
 	h := newProtocolHarness(t, fake, withTransport(proxy.transport()))
 

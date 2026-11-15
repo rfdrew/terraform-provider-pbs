@@ -54,9 +54,9 @@ resource "pbs_namespace" "test" {
 }
 `, name, name, device, extra)
 	}
-	// gc_on_unmount needs PBS 4.2.
+	// gc_on_unmount needs PBS 4.1.8.
 	changed := `comment = "terraform-provider-pbs acceptance tests"`
-	if testAccVersionAtLeast(4, 2, 0) {
+	if testAccVersionAtLeast(4, 1, 8) {
 		changed += "\n  gc_on_unmount = true"
 	}
 

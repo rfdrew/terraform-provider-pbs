@@ -143,8 +143,8 @@ func TestDatastoreResourceRemovableImport(t *testing.T) {
 }
 
 // A datastore that is not removable is planned as such; gc_on_unmount needs
-// PBS 4.2; and a new name on the same device and path needs reuse_datastore,
-// as one in the same directory does.
+// PBS 4.1.8; and a new name on the same device and path needs
+// reuse_datastore, as one in the same directory does.
 func TestDatastoreResourceRemovablePlan(t *testing.T) {
 	h, _, _ := newRemovableHarness(t)
 	planned := h.plan(t, "pbs_datastore", nil, h.resourceValue(t, "pbs_datastore", map[string]any{"name": "store1", "path": "/mnt/s1"}))
@@ -161,11 +161,29 @@ func TestDatastoreResourceRemovablePlan(t *testing.T) {
 	planned = h.plan(t, "pbs_datastore", inst, h.resourceValue(t, "pbs_datastore", renamed))
 	requireNoProtocolErrors(t, planned.Diagnostics)
 
-	old, _, _ := newRemovableHarness(t, fakeVersion40)
+	// PBS 4.1.7 does not know gc-on-unmount; 4.1.8, the release that added
+	// it, takes it.
+	old, _, _ := newRemovableHarness(t, fakeVersion417)
 	config := map[string]any{"name": "usb", "path": "usb", "backing_device": testDeviceUUID, "gc_on_unmount": true}
 	planned = old.plan(t, "pbs_datastore", nil, old.resourceValue(t, "pbs_datastore", config))
-	requireProtocolErrorContaining(t, planned.Diagnostics, "gc_on_unmount needs PBS 4.2 or newer")
+	requireProtocolErrorContaining(t, planned.Diagnostics, "gc_on_unmount needs PBS 4.1.8 or newer")
 	config["gc_on_unmount"] = false
 	planned = old.plan(t, "pbs_datastore", nil, old.resourceValue(t, "pbs_datastore", config))
 	requireNoProtocolErrors(t, planned.Diagnostics)
+
+	first, fake, _ := newRemovableHarness(t, fakeVersion418)
+	config["gc_on_unmount"] = true
+	planned = first.plan(t, "pbs_datastore", nil, first.resourceValue(t, "pbs_datastore", config))
+	requireNoProtocolErrors(t, planned.Diagnostics)
+	first.create(t, "pbs_datastore", first.resourceValue(t, "pbs_datastore", config))
+	if got := fake.lastCall(t, "POST /config/datastore").form.Get("gc-on-unmount"); got != "true" {
+		t.Errorf("POST gc-on-unmount = %q on PBS 4.1.8", got)
+	}
 }
+
+// fakeVersion417 and fakeVersion418 are GET /version of PBS 4.1.7 and 4.1.8,
+// the releases before and with gc-on-unmount.
+const (
+	fakeVersion417 = `{"data":{"release":"7","repoid":"b48af880b","version":"4.1"}}`
+	fakeVersion418 = `{"data":{"release":"8","repoid":"3f3da1a30","version":"4.1"}}`
+)

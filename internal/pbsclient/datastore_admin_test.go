@@ -46,13 +46,23 @@ func TestDatastoreActiveOperations(t *testing.T) {
 	}
 }
 
+// An unmount answers with a capital D, every call that opens the datastore
+// without; the whole message must match, as a maintenance mode's refusal ends
+// with the mode's free text.
 func TestIsDatastoreNotMounted(t *testing.T) {
 	for message, want := range map[string]bool{
 		"Datastore 'store1' is not mounted":                           true,
 		"datastore 'store1' is not mounted":                           true,
+		"datastore 'usb-2.offsite_A' is not mounted":                  true,
 		"datastore 'store1' is unavailable: offline maintenance mode": false,
 		"datastore 'store1' is not removable":                         false,
 		"no such datastore 'store1'":                                  false,
+		// A maintenance message that ends like the refusal.
+		"datastore 'store1' is unavailable: read-only maintenance mode: disk 'usb2' is not mounted":      false,
+		"datastore 'store1' is unavailable: offline maintenance mode: Datastore 'store1' is not mounted": false,
+		"datastore 'store1' is not mounted yet":                                                          false,
+		"DATASTORE 'store1' IS NOT MOUNTED":                                                              false,
+		"unable to start garbage collection before unmount: datastore 'store1' is not mounted":           false,
 	} {
 		if got := IsDatastoreNotMounted(&Error{StatusCode: http.StatusBadRequest, Message: message}); got != want {
 			t.Errorf("IsDatastoreNotMounted(%q) = %t, want %t", message, got, want)
@@ -60,6 +70,9 @@ func TestIsDatastoreNotMounted(t *testing.T) {
 	}
 	if IsDatastoreNotMounted(errors.New("Datastore 'x' is not mounted")) {
 		t.Error("an error that is not PBS's counts as not mounted")
+	}
+	if IsDatastoreNotMounted(&Error{StatusCode: http.StatusForbidden, Message: "datastore 'store1' is not mounted"}) {
+		t.Error("a 403 counts as not mounted")
 	}
 }
 
@@ -74,5 +87,10 @@ func TestIsDatastoreNotRemovable(t *testing.T) {
 	}
 	if IsDatastoreNotRemovable(&Error{StatusCode: http.StatusForbidden, Message: "datastore 'store1' is not removable"}) {
 		t.Error("a 403 counts as not removable")
+	}
+	// The whole message must match: a maintenance mode's free text can end
+	// the same way.
+	if IsDatastoreNotRemovable(&Error{StatusCode: http.StatusBadRequest, Message: "datastore 'store1' is unavailable: offline maintenance mode: datastore 'old' is not removable"}) {
+		t.Error("a maintenance refusal counts as not removable")
 	}
 }

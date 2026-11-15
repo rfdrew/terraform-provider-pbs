@@ -30,9 +30,16 @@ var pbs41 = pbsRelease{4, 1, 0}
 // delete-objects-via-delete-object needs.
 var pbs416 = pbsRelease{4, 1, 6}
 
-// pbs42 is what running garbage collection before unmounting a removable
-// datastore, sync job worker threads and a remote's use of the node's proxy
-// need.
+// pbs418 is what running garbage collection before unmounting a removable
+// datastore needs: proxmox-backup 4.1.8-1, the first package built on
+// pbs-api-types 1.0.13, which added gc-on-unmount, is the first whose API
+// takes the property and whose unmount acts on it (debian/changelog, "api:
+// datastore: add 'gc-on-unmount' option for removable datastores"). 4.1.7
+// would refuse it as an unknown parameter.
+var pbs418 = pbsRelease{4, 1, 8}
+
+// pbs42 is what sync job worker threads and a remote's use of the node's
+// proxy need.
 var pbs42 = pbsRelease{4, 2, 0}
 
 // pbs421 is what the extra audiences of an OpenID realm need.

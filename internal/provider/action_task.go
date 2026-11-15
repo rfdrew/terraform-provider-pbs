@@ -251,8 +251,17 @@ func (t actionTask) reportError(ctx context.Context, err error, diags *diag.Diag
 	var taskErr *pbsclient.TaskError
 	switch {
 	case errors.As(err, &taskErr):
-		diags.AddError(t.what+" failed", fmt.Sprintf("PBS task %s ended with an error: %s%s",
-			t.upid.Raw, taskErr.ExitStatus, t.logTail(ctx)))
+		lines, tail := taskLogTailLines(ctx, t.client, t.upid)
+		advice := taskLockAdvice(taskErr.ExitStatus)
+		if advice != "" && !strings.HasSuffix(taskErr.ExitStatus, ".") {
+			// PBS's lock error ends without a period.
+			advice = "." + advice
+		}
+		if advice == "" {
+			advice = maintenanceWaitLockAdvice(taskErr.ExitStatus, lines)
+		}
+		diags.AddError(t.what+" failed", fmt.Sprintf("PBS task %s ended with an error: %s%s%s",
+			t.upid.Raw, taskErr.ExitStatus, advice, tail))
 		return taskFailed
 	case pbsclient.IsTaskTimeout(err):
 		detail := fmt.Sprintf("The action stopped waiting for PBS task %s, which was still running: %s.", t.upid.Raw, err)
@@ -300,20 +309,69 @@ func (t actionTask) abort() string {
 // logTail returns the end of the task's log as a paragraph to append to a
 // message, or a pointer to it when PBS does not answer.
 func (t actionTask) logTail(ctx context.Context) string {
+	return taskLogTail(ctx, t.client, t.upid)
+}
+
+// taskLogTail returns the end of a task's log as a paragraph to append to a
+// message, or a pointer to it when PBS does not answer or ctx is done: for
+// actions, and for resources whose task failed.
+func taskLogTail(ctx context.Context, client *pbsclient.Client, upid pbsclient.UPID) string {
+	_, tail := taskLogTailLines(ctx, client, upid)
+	return tail
+}
+
+// taskLogTailLines is taskLogTail, also returning the lines it read, if any.
+func taskLogTailLines(ctx context.Context, client *pbsclient.Client, upid pbsclient.UPID) ([]pbsclient.TaskLogLine, string) {
 	where := fmt.Sprintf("Administration → Tasks in the web interface, or `proxmox-backup-manager task log '%s'` "+
-		"on the host", t.upid.Raw)
+		"on the host", upid.Raw)
 	if ctx.Err() != nil {
-		return "\n\nThe task's log: " + where + "."
+		return nil, "\n\nThe task's log: " + where + "."
 	}
-	lines, err := t.client.TaskLogTail(ctx, t.upid, actionTaskLogTail)
+	lines, err := client.TaskLogTail(ctx, upid, actionTaskLogTail)
 	if err != nil || len(lines) == 0 {
 		if err != nil {
-			tflog.Debug(ctx, "could not read the end of the PBS task log", map[string]any{"upid": t.upid.Raw, "error": err.Error()})
+			tflog.Debug(ctx, "could not read the end of the PBS task log", map[string]any{"upid": upid.Raw, "error": err.Error()})
 		}
-		return "\n\nThe task's log: " + where + "."
+		return nil, "\n\nThe task's log: " + where + "."
 	}
-	return "\n\nThe end of the task's log:\n\n" + indentLines(pbsclient.FormatTaskLog(lines)) +
+	return lines, "\n\nThe end of the task's log:\n\n" + indentLines(pbsclient.FormatTaskLog(lines)) +
 		"\n\nThe whole log: " + where + "."
+}
+
+// maintenanceWaitAborted is the exit status of a task that PBS ended while
+// it waited for a datastore's operations in a maintenance mode of its own —
+// an unmount, an S3 refresh —, for any of the reasons the notes on unmounting
+// in pbsclient's datastore_admin.go list.
+const maintenanceWaitAborted = "aborted, due to user request"
+
+// maintenanceWaitLockAdvice explains a task that ended with
+// maintenanceWaitAborted although nobody may have stopped it, or returns ""
+// for any other task. While such a task waits for the datastore's
+// operations, PBS checks every second that the datastore is still in the
+// task's maintenance mode, which takes the lock of datastore.cfg, and ends the
+// task as if it had been stopped when that check fails, also when it could
+// not take the lock in the 10 seconds it waits for it; PBS logs nothing then.
+// It next tries to reset the mode, which takes the lock again, and when that
+// fails too, it logs "maintenance mode was not as expected: Unable to acquire
+// lock \"/etc/proxmox-backup/.datastore.lck\" - ..." and leaves the mode
+// (run_maintenance_locked and expect_maintenance_type,
+// src/api2/admin/datastore.rs; proxmox-backup 7c86c5ad5, after 4.2.11; in
+// 4.0.11, do_unmount_device and expect_maintanance_unmounting): that line,
+// in the end of the log, is the sign. The advice starts with the period that
+// the exit status, which it follows, lacks.
+func maintenanceWaitLockAdvice(exitStatus string, lines []pbsclient.TaskLogLine) string {
+	if exitStatus != maintenanceWaitAborted {
+		return ""
+	}
+	for _, line := range lines {
+		if strings.Contains(line.Message(), pbsclient.DatastoreConfigLockFile) {
+			return ". Unless someone stopped the task or changed the datastore's maintenance mode, PBS ended it so " +
+				"because it could not check that mode while the task waited for the datastore's operations: " +
+				"checking takes the lock of PBS's datastore configuration, which PBS waits 10 seconds for, and the " +
+				"task's log shows that another PBS task held it. " + datastoreConfigLockHolders
+		}
+	}
+	return ""
 }
 
 // indentLines indents text by four spaces, which keeps the lines of a log as

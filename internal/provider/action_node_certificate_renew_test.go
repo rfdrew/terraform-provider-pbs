@@ -87,7 +87,7 @@ func TestNodeCertificateRenewActionNotDue(t *testing.T) {
 	if len(got.diagnostics) != 0 {
 		t.Fatalf("diagnostics: %v", got.diagnostics)
 	}
-	requireProgressContaining(t, got, "Not renewed: the certificate of node localhost, valid until 2026-12-20, is not due yet")
+	requireProgressContaining(t, got, "Not renewed: the certificate of node localhost, valid until 2036-09-18, is not due yet")
 	requireProgressContaining(t, got, "within 30 days of its expiry")
 	requireProgressContaining(t, got, "force = true renews it anyway")
 	if acme.certificate().Fingerprint != before.Fingerprint || fake.count(renewRoute) != 1 || fake.lastCall(t, renewRoute).form.Has("force") {
@@ -147,7 +147,7 @@ func TestNodeCertificateRenewActionDue(t *testing.T) {
 	}
 	requireProgressContaining(t, got, "PBS started task UPID:pbs-acme:")
 	requireProgressContaining(t, got, ":acme-renew-cert:")
-	requireProgressContaining(t, got, "PBS renewed the certificate of node localhost; the new one is valid until 2026-12-20")
+	requireProgressContaining(t, got, "PBS renewed the certificate of node localhost; the new one is valid until 2036-09-18")
 	requireProgressContaining(t, got, "New SHA-256 fingerprint: "+after.Fingerprint)
 	// The system's roots do not know the fake CA, as they do not know
 	// Let's Encrypt's staging CAs: the new certificate is to be pinned.
@@ -236,22 +236,27 @@ func TestNodeCertificateRenewActionChecksTheACMESettings(t *testing.T) {
 	requireProtocolErrorContaining(t, invoke(), "Sys.Audit on /system")
 }
 
-// A failed renewal leaves the certificate as it was. The ACME fake's tasks
-// serve no log, so the error points to it instead of quoting its end.
+// A failed renewal leaves the certificate as it was, and the error names
+// the cause from the task's exit status. The ACME fake's tasks serve no log,
+// so the error points to it instead of quoting its end.
 func TestNodeCertificateRenewActionTaskFails(t *testing.T) {
 	h, fake, acme, _ := newRenewHarness(t)
 	before := acme.certificate()
-	acme.orderFailure = "validation for pbs.example.org failed: connection refused"
+	acme.orderFailure = "urn:ietf:params:acme:error:rateLimited: too many certificates (5) already issued for this " +
+		"exact set of identifiers in the last 168h0m0s, retry after 2026-11-15 10:00:00 UTC"
 
 	got := h.invokeAction(t, "pbs_node_certificate_renew", map[string]any{"force": true})
 	requireProtocolErrorContaining(t, got.diagnostics, "Renewal of the certificate of PBS node localhost failed")
-	requireProtocolErrorContaining(t, got.diagnostics, "The CA did not issue a certificate")
-	requireProtocolErrorContaining(t, got.diagnostics, "connection refused")
+	requireProtocolErrorContaining(t, got.diagnostics, "The CA refused the order for its rate limits")
+	requireProtocolErrorContaining(t, got.diagnostics, "retry after 2026-11-15 10:00:00 UTC")
 	requireProtocolErrorContaining(t, got.diagnostics, "The task's log: Administration → Tasks in the web interface, "+
 		"or `proxmox-backup-manager task log 'UPID:pbs-acme:")
 	for _, d := range got.diagnostics {
 		if strings.Contains(d.Detail, "The end of the task's log") {
 			t.Fatalf("detail quotes a log the fake does not serve: %s", d.Detail)
+		}
+		if strings.Contains(d.Detail, "PBS's task failed") {
+			t.Fatalf("detail does not name the cause: %s", d.Detail)
 		}
 	}
 	if acme.certificate().Fingerprint != before.Fingerprint || fake.count(renewRoute) != 1 {
@@ -268,16 +273,19 @@ func TestNodeCertificateRenewActionTaskFailsWithLog(t *testing.T) {
 	tasks := newFakeTasks(fake)
 	renewWithTasks(fake, tasks, func() *fakeTask {
 		return &fakeTask{
-			log:  []string{"Placing ACME order", "The validation for pbs.example.org is pending", "Setting up validation plugin"},
-			exit: "TXT record _acme-challenge.pbs.example.org not found",
+			log: []string{"Placing ACME order", "The validation for pbs.example.org is pending", "Setting up validation plugin",
+				"Sleeping 30 seconds to wait for TXT record propagation", "Triggering validation", "Sleeping for 5 seconds"},
+			exit: "validating challenge 'https://ca.test/chall/1' failed - status: Invalid",
 		}
 	})
 	h := newProtocolHarness(t, fake)
 
 	got := h.invokeAction(t, "pbs_node_certificate_renew", map[string]any{"force": true})
 	requireProtocolErrorContaining(t, got.diagnostics, "Renewal of the certificate of PBS node localhost failed")
+	requireProtocolErrorContaining(t, got.diagnostics, "could not validate a domain of the node — its challenge ended invalid")
+	requireProtocolErrorContaining(t, got.diagnostics, "validation_delay")
 	requireProtocolErrorContaining(t, got.diagnostics, "The end of the task's log:\n\n    Placing ACME order")
-	requireProtocolErrorContaining(t, got.diagnostics, "    TASK ERROR: TXT record _acme-challenge.pbs.example.org not found")
+	requireProtocolErrorContaining(t, got.diagnostics, "    TASK ERROR: validating challenge 'https://ca.test/chall/1' failed - status: Invalid")
 }
 
 // A task that fails after it wrote the certificate — PBS could not reach

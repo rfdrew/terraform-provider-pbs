@@ -2,6 +2,7 @@ package provider
 
 import (
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -816,6 +817,58 @@ func TestDatastoreResourceS3FailedRefresh(t *testing.T) {
 	}
 	if stringAt(t, inst.state, "maintenance_mode", "type") != "offline" {
 		t.Errorf("state = %s", inst.state)
+	}
+}
+
+// A create-datastore task that fails on PBS's lock of datastore.cfg fails
+// after PBS saved the datastore: taking one over on S3, the refresh that
+// follows waits 10 s for the lock while another refresh reads its bucket,
+// and fails. The datastore is recorded as planned, with a warning, also when
+// reading it back fails, so that the next apply does not fail on a
+// datastore that already exists.
+func TestDatastoreResourceS3ReuseFailsOnTheDatastoreConfigLock(t *testing.T) {
+	h, fake, datastores := newS3DatastoreHarness(t)
+	fake.handle("POST /config/datastore", func(w http.ResponseWriter, req *http.Request) {
+		params := form(req)
+		name := params.Get("name")
+		datastores.mu.Lock()
+		defer datastores.mu.Unlock()
+		writeData(w, datastores.startTaskLocked("create-datastore", name, func() string {
+			datastores.datastores[name] = fakeProperties{"name": name, "path": params.Get("path"),
+				"backend": params.Get("backend"), "maintenance-mode": pbsclient.MaintenanceS3Refresh}
+			return datastoreConfigLockedText
+		}), "")
+	})
+	fake.reply("GET /config/datastore/s3store", http.StatusForbidden, "permission check failed")
+
+	config := h.resourceValue(t, "pbs_datastore", s3StoreAttributes(map[string]any{"reuse_datastore": true}))
+	planned := h.plan(t, "pbs_datastore", nil, config)
+	requireNoProtocolErrors(t, planned.Diagnostics)
+	applied := h.apply(t, "pbs_datastore", nil, config, planned)
+	requireNoProtocolErrors(t, applied.Diagnostics)
+	for _, want := range []string{
+		"PBS datastore created, but its task failed",
+		`PBS's task to create datastore "s3store" failed on the lock of PBS's datastore configuration`,
+		"Taken over on S3, it is most likely in maintenance mode s3-refresh",
+		"proxmox-backup-manager datastore s3-refresh s3store",
+		datastoreConfigLockHolders, datastoreConfigLockedText, "Datastore.Audit on /datastore/s3store",
+	} {
+		requireProtocolWarningContaining(t, applied.Diagnostics, want)
+	}
+	state := h.decodeResource(t, "pbs_datastore", applied.NewState)
+	requireAppliedCompatible(t, h.decodeResource(t, "pbs_datastore", planned.PlannedState), state)
+	if state.IsNull() || stringAt(t, state, "id") != "s3store" {
+		t.Fatalf("state = %s", state)
+	}
+
+	// Once the datastore can be read, a refresh finds it in maintenance mode
+	// s3-refresh, and a plan neither creates nor replaces it.
+	fake.handle("GET /config/datastore/s3store", nil)
+	inst := h.refresh(t, &resourceInstance{typeName: "pbs_datastore", state: state, identity: applied.NewIdentity, private: applied.Private})
+	replan := h.plan(t, "pbs_datastore", inst, config)
+	requireNoProtocolErrors(t, replan.Diagnostics)
+	if len(replan.RequiresReplace) != 0 || fake.count("POST /config/datastore") != 1 {
+		t.Errorf("replacing for %v; routes: %v", replan.RequiresReplace, fake.routes())
 	}
 }
 

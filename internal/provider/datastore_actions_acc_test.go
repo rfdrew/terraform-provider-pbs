@@ -18,16 +18,23 @@ import (
 
 // A removable datastore is unmounted and mounted again by the actions, each
 // of which leaves a datastore that is in that state already as it is; PBS
-// clears the maintenance mode an unmount sets.
+// clears the maintenance mode an unmount sets. From PBS 4.1.8, a datastore
+// with gc_on_unmount in maintenance mode read-only is not unmounted first:
+// the garbage collection PBS starts before the unmount cannot write to it,
+// and PBS's refusal ends with the mode's message, which here ends as PBS's
+// answer for a datastore that is not mounted does. The action fails, rather
+// than finding nothing to unmount, and the datastore stays mounted.
 func TestAccDatastoreMountActions(t *testing.T) {
 	device := testAccRemovableDevice(t)
 	name := testAccDatastoreName()
-	config := providerConfig + fmt.Sprintf(`
+	datastore := func(extra string) string {
+		return providerConfig + fmt.Sprintf(`
 resource "pbs_datastore" "test" {
   name           = %q
   path           = %q
   backing_device = %q
   destroy_data   = true
+  %s
 }
 
 action "pbs_datastore_unmount" "test" {
@@ -42,13 +49,42 @@ action "pbs_datastore_mount" "test" {
     store = pbs_datastore.test.name
   }
 }
-`, name, name, device)
+`, name, name, device, extra)
+	}
+	config := datastore("")
 	unmount := func(input string) string {
 		return config + testAccActionTrigger("action.pbs_datastore_unmount.test", input)
 	}
 	mount := func(input string) string {
 		return config + testAccActionTrigger("action.pbs_datastore_mount.test", input)
 	}
+
+	steps := []acc.TestStep{{Config: config, Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)}}
+	// gc_on_unmount needs PBS 4.1.8.
+	if testAccVersionAtLeast(4, 1, 8) {
+		maintained := datastore(`gc_on_unmount = true
+
+  maintenance_mode = {
+    type    = "read-only"
+    message = "disk 'usb2' is not mounted"
+  }`)
+		steps = append(steps,
+			acc.TestStep{Config: maintained},
+			acc.TestStep{
+				Config: maintained + testAccActionTrigger("action.pbs_datastore_unmount.test", "maintained"),
+				ExpectError: regexp.MustCompile(`could\s+not\s+start\s+the\s+garbage\s+collection[\s\S]*` +
+					`Clear\s+maintenance\s+mode\s+read-only`),
+			},
+			// Without the mode, and gc_on_unmount, it is mounted as before.
+			acc.TestStep{Config: config, Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
+		)
+	}
+	steps = append(steps,
+		acc.TestStep{Config: unmount("1"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusNotMounted)},
+		acc.TestStep{Config: unmount("2"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusNotMounted)},
+		acc.TestStep{Config: mount("3"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
+		acc.TestStep{Config: mount("4"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
+	)
 
 	acc.Test(t, acc.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -57,13 +93,7 @@ action "pbs_datastore_mount" "test" {
 		// A removable datastore is destroyed with its data only while it is
 		// mounted, as the last step leaves it.
 		CheckDestroy: testAccCheckDatastoresDestroyed([]string{name}, nil, nil),
-		Steps: []acc.TestStep{
-			{Config: config, Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
-			{Config: unmount("1"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusNotMounted)},
-			{Config: unmount("2"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusNotMounted)},
-			{Config: mount("3"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
-			{Config: mount("4"), Check: testAccCheckMountStatus(name, pbsclient.MountStatusMounted)},
-		},
+		Steps:        steps,
 	})
 }
 

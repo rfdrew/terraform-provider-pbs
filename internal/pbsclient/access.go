@@ -331,12 +331,20 @@ func (c *Client) DeleteAPIToken(ctx context.Context, userID, tokenName string) e
 // --- ACL ----------------------------------------------------------------------
 
 // ListACL reads ACL entries and the digest of acl.cfg: every entry without a
-// path; with one, the entries on it and, unless exact, those below it. A
-// caller without Sys.Audit on /access/acl sees only the entries of its own
-// API tokens.
+// path; with one, the entries on it and, unless exact, those below it, but
+// never those above it, propagating or not. Every caller may read the ACL:
+// PBS never refuses one, but shows a caller without Sys.Audit on /access/acl,
+// as a success, only some entries — a user signed in with its password those
+// of its own API tokens, neither its own nor a group's, and an API token none
+// at all, not even its own (src/api2/access/acl.rs, read_acl and
+// extract_acl_node_data, proxmox-backup 7c86c5ad5, after 4.2.11).
+//
+// For path "/" without exact, which asks for every entry, no path is sent:
+// PBS would join "/" and the names below it with another slash and name the
+// entries below the root "//datastore", "//datastore/store1" and so on.
 func (c *Client) ListACL(ctx context.Context, path string, exact bool) ([]ACLEntry, string, error) {
 	params := url.Values{}
-	if path != "" {
+	if path != "" && (path != "/" || exact) {
 		params.Set("path", path)
 		if exact {
 			params.Set("exact", "1")
@@ -368,7 +376,8 @@ type ACLChange struct {
 // Granting a role the entry already has sets its propagate flag; removing
 // one it does not have is a no-op. Granting NoAccess removes the other roles
 // of the same user or token on the path, and granting another role removes
-// NoAccess; see NoAccessRole.
+// NoAccess; see NoAccessRole. A caller without Permissions.Modify on
+// /access/acl gets a 400, not a 403; see IsUnprivilegedACLChange.
 func (c *Client) UpdateACL(ctx context.Context, change ACLChange) error {
 	params := url.Values{
 		"path":    {change.Path},
@@ -388,6 +397,23 @@ func (c *Client) UpdateACL(ctx context.Context, change ACLChange) error {
 	return err
 }
 
+// IsUnprivilegedACLChange reports whether PBS refused a change of an ACL
+// entry because the caller lacks Permissions.Modify on /access/acl, which
+// only the Admin role grants. Every caller may call PUT /access/acl, so PBS
+// refuses such a caller itself, with a 400 rather than a 403, unless it is a
+// user signed in with its password changing an entry of its own API tokens
+// (src/api2/access/acl.rs, update_acl, proxmox-backup 7c86c5ad5, after
+// 4.2.11): "Unprivileged API tokens can't set ACL items.", "Unprivileged
+// users can only set ACL items for API tokens.", "Unprivileged users can only
+// set ACL items for their own API tokens.", and for calls the client does
+// not make, without an auth-id or with a group, "Unprivileged user needs to
+// provide auth_id to update ACL item." and "Unprivileged users are not
+// allowed to create group ACL item.".
+func IsUnprivilegedACLChange(err error) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest && strings.HasPrefix(apiErr.Message, "Unprivileged ")
+}
+
 // --- roles and privileges -----------------------------------------------------
 
 // ListRoles reads the roles and the privileges each grants.
@@ -398,10 +424,16 @@ func (c *Client) ListRoles(ctx context.Context) ([]Role, error) {
 }
 
 // Permissions reads the privileges of a user or token — the caller itself
-// when authID is empty — on every path it has an ACL entry for or, with path
-// set, on that path. The result maps each path to its privileges, each to
-// whether it propagates to the paths below. Asking about anyone else needs
-// Sys.Audit on /access.
+// when authID is empty — on path or, without one, on every path acl.cfg has
+// entries on, whoever they are for, and on "/", "/access", "/datastore",
+// "/remote" and "/system". The result maps each path to its privileges, each
+// to whether it propagates to the paths below; PBS leaves out a path where
+// the user or token has no privilege at all. Every caller may ask about
+// itself. Asking about anyone else needs Sys.Audit on /access, except that a
+// user signed in with its password may ask about its own API tokens; an API
+// token may not ask about its user. PBS refuses with a 400, not a 403; see
+// IsListPermissionsRefused (src/api2/access/mod.rs, list_permissions,
+// proxmox-backup 7c86c5ad5, after 4.2.11).
 func (c *Client) Permissions(ctx context.Context, authID, path string) (map[string]map[string]bool, error) {
 	params := url.Values{}
 	if authID != "" {
@@ -413,6 +445,16 @@ func (c *Client) Permissions(ctx context.Context, authID, path string) (map[stri
 	permissions := map[string]map[string]bool{}
 	_, err := c.Get(ctx, "/access/permissions", params, &permissions)
 	return permissions, err
+}
+
+// IsListPermissionsRefused reports whether PBS refused to read the
+// privileges of another user or token: 400 "not allowed to list permissions
+// of <user or token ID>", which it answers a caller without Sys.Audit on
+// /access, rather than a 403 (src/api2/access/mod.rs, list_permissions,
+// proxmox-backup 7c86c5ad5, after 4.2.11).
+func IsListPermissionsRefused(err error) bool {
+	apiErr, ok := asError(err)
+	return ok && apiErr.StatusCode == http.StatusBadRequest && strings.HasPrefix(apiErr.Message, "not allowed to list permissions of ")
 }
 
 func cloneValues(v url.Values) url.Values {

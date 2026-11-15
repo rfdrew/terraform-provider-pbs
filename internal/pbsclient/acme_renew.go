@@ -35,8 +35,9 @@ import (
 //     and has the proxy load it; for a node without domains it logs "No
 //     domains configured to be ordered from an ACME server." and ends OK
 //     with the certificate unchanged. A missing account or plugin fails the
-//     task. Released PBS cannot stop the task: it polls the CA for as long
-//     as the CA keeps the order pending.
+//     task, as other causes do (see acme_order.go, ACMEOrderFailureOf).
+//     Released PBS cannot stop the task: it polls the CA for as long as the
+//     CA keeps the order pending.
 //   - A task that fails sends PBS's acme-err notification, with severity
 //     error from 4.2.6.
 //   - The daily update, proxmox-daily-update, makes the same call without

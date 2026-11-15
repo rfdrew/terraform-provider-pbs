@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
@@ -122,6 +123,25 @@ func TestACLDataSourceFilters(t *testing.T) {
 			query:  url.Values{"path": {"/datastore/store3"}},
 			want:   []string{},
 		},
+		// "/" is every entry, which PBS would name "//datastore/..." below
+		// the root if the path were sent.
+		"root": {
+			config: map[string]any{"path": "/"},
+			query:  url.Values{},
+			want: []string{
+				"/|admin@pbs|Admin|true",
+				"/datastore/store1|alice@pbs|DatastoreAudit|true",
+				"/datastore/store1|alice@pbs|DatastoreReader|false",
+				"/datastore/store1|pve@pbs!cluster1|DatastoreBackup|true",
+				"/datastore/store1/ns1|pve@pbs!cluster1|DatastoreAudit|true",
+				"/datastore/store2|alice@pbs|DatastoreBackup|true",
+			},
+		},
+		"exact root": {
+			config: map[string]any{"path": "/", "exact": true},
+			query:  url.Values{"path": {"/"}, "exact": {"1"}},
+			want:   []string{"/|admin@pbs|Admin|true"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fake, h := newACLFixture(t)
@@ -177,14 +197,69 @@ func TestACLDataSourceExactRequiresPath(t *testing.T) {
 	}
 }
 
-func TestACLDataSourceExplainsAMissingPrivilege(t *testing.T) {
+// PBS lets every caller read the ACL, so a failed read says what PBS
+// answered and names no privilege.
+func TestACLDataSourceReportsAFailedRead(t *testing.T) {
 	fake := newFakePBS()
-	fake.reply("GET /access/acl", http.StatusForbidden, "permission check failed")
+	fake.reply("GET /access/acl", http.StatusBadRequest,
+		`unable to read acl config "/etc/proxmox-backup/acl.cfg" - Permission denied (os error 13)`)
 	h := newProtocolHarness(t, fake)
 
 	resp := h.readDataSourceResponse(t, "pbs_acl", h.dataSourceValue(t, "pbs_acl", map[string]any{}))
 	requireProtocolErrorContaining(t, resp.Diagnostics, "Unable to read PBS ACL entries")
-	requireProtocolErrorContaining(t, resp.Diagnostics, "Sys.Audit on /access/acl")
+	requireProtocolErrorContaining(t, resp.Diagnostics, "unable to read acl config")
+	for _, d := range resp.Diagnostics {
+		if strings.Contains(d.Detail, "Sys.Audit") {
+			t.Errorf("the error names a privilege: %s", d.Detail)
+		}
+	}
+}
+
+// Without Sys.Audit on /access/acl, PBS shows an API token no entry at all
+// and a user signed in with its password only the entries of its own API
+// tokens, without an error; the data source reads that, with no other call.
+func TestACLDataSourceWithoutAudit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts []harnessOption
+		want []string
+	}{
+		"API token": {want: []string{}},
+		"password": {
+			opts: []harnessOption{withPasswordSignIn()},
+			want: []string{
+				"/datastore/store1|" + fakeTokenID + "|DatastoreBackup|true",
+				"/datastore/store1|" + fakeUsername + "!other|DatastoreReader|true",
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, fake, access := newUserHarness(t, tc.opts...)
+			for _, e := range []pbsclient.ACLEntry{
+				// DatastoreAudit, not Audit on /: that would give the user
+				// Sys.Audit on /access/acl, and PBS would show it everything.
+				{Path: "/datastore/store2", UGID: fakeUsername, UGIDType: "user", RoleID: "DatastoreAudit"},
+				{Path: "/datastore/store1", UGID: fakeTokenID, UGIDType: "user", RoleID: "DatastoreBackup"},
+				{Path: "/datastore/store1", UGID: fakeUsername + "!other", UGIDType: "user", RoleID: "DatastoreReader"},
+				{Path: "/datastore/store1", UGID: "pve@pbs!cluster1", UGIDType: "user", RoleID: "DatastoreBackup"},
+				{Path: "/datastore/store1", UGID: "admins", UGIDType: "group", RoleID: "Admin"},
+			} {
+				access.addACL(e)
+			}
+			setHideACL(access)
+
+			before := len(fake.routes())
+			state := h.readDataSource(t, "pbs_acl", h.dataSourceValue(t, "pbs_acl", map[string]any{}))
+			if isNullAt(t, state, "entries") {
+				t.Fatal("entries is null, want a list")
+			}
+			if got := aclEntriesIn(t, state); !slices.Equal(got, tc.want) {
+				t.Errorf("entries = %v, want %v", got, tc.want)
+			}
+			if got := fake.routes()[before:]; !slices.Equal(got, []string{"GET /access/acl"}) {
+				t.Errorf("calls = %q, want one GET /access/acl", got)
+			}
+		})
+	}
 }
 
 // aclEntriesIn returns the entries of a pbs_acl state as

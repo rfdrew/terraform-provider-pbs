@@ -443,7 +443,7 @@ func (r *userResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 			fmt.Sprintf("Before deleting user %q, the provider removes its ACL entries, which PBS would otherwise "+
 				"keep and apply again to a user created later under the same ID, and that failed; the user was "+
 				"not deleted. Reading every ACL entry needs %s, removing them %s. %s", userID, aclReadPrivilege,
-				aclModifyPrivilege, apiErrorDetail(client, "", err)))
+				aclModifyPrivilege, aclModifyErrorDetail(client, err)))
 		return
 	}
 	if removed > 0 {
@@ -497,20 +497,23 @@ func deleteUserTokens(ctx context.Context, client *pbsclient.Client, userID stri
 	return deleted, nil
 }
 
-// errACLHidden means the provider may not read every ACL entry: without
-// Sys.Audit on /access/acl, PBS answers GET /access/acl with only the entries
-// of the caller's own API tokens, as a success.
+// errACLHidden means PBS would hide the user's ACL entries from the
+// provider: without Sys.Audit on /access/acl, PBS answers GET /access/acl,
+// as a success, with only the entries of the caller's own API tokens when it
+// is a user signed in with its password, never its own, and none at all when
+// it is an API token.
 var errACLHidden = errors.New("the provider lacks " + aclReadPrivilege + ", so PBS would hide the user's entries from it")
 
 // removeUserACL removes every ACL entry of a user, not of its tokens, and
-// returns how many there were. It first makes sure PBS shows it every entry,
-// rather than delete the user with its entries hidden and left behind.
+// returns how many there were. It first makes sure PBS shows it the user's
+// entries, rather than delete the user with its entries hidden and left
+// behind: a user's own entries need Sys.Audit on /access/acl, whoever asks.
 func removeUserACL(ctx context.Context, client *pbsclient.Client, userID string) (int, error) {
-	permissions, err := client.Permissions(ctx, "", "/access/acl")
+	visible, err := aclEntriesVisible(ctx, client, userID)
 	if err != nil {
 		return 0, err
 	}
-	if _, ok := permissions["/access/acl"]["Sys.Audit"]; !ok {
+	if !visible {
 		return 0, errACLHidden
 	}
 

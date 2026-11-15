@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -116,6 +117,20 @@ func (r *nodeCertificateResource) Schema(_ context.Context, _ resource.SchemaReq
 			"change, reads the new certificate over it, and trusts the new certificate for the rest of the run, " +
 			"so that the run goes on whatever the provider's TLS settings; it warns when they need changing " +
 			"before the next run. The guide *Set up PBS for a Proxmox VE cluster* shows the whole switch.\n\n" +
+			"**A certificate the proxy cannot load.** PBS writes a new certificate even when its proxy cannot " +
+			"load it — keys too weak for a raised `@SECLEVEL` in `ciphers_tls_1_2` of `pbs_node_config`, say —; " +
+			"the proxy then goes on serving the previous one, which PBS only logs, and does not start again at " +
+			"its next restart. After ordering, uploading or deleting a certificate, the provider looks at the " +
+			"certificate a new connection gets: the apply fails, and records nothing of the new certificate, " +
+			"when the proxy still serves the certificate it served before the change, which PBS reported then or " +
+			"state recorded; otherwise — behind a TLS front end, or after an earlier certificate the proxy could " +
+			"not load either —, it only warns. While the proxy serves the certificate state recorded, a refresh " +
+			"keeps it, with a warning, rather than record the one PBS wrote. A failed order normally leaves the " +
+			"node's certificate as it was. Its error names the cause PBS's task reports, with the end of the task's " +
+			"log, and says when that may not hold: PBS replaced the certificate's key, " +
+			"/etc/proxmox-backup/proxy.key, but could not write the certificate, so the node needs a new " +
+			"certificate before its proxy restarts or reloads; or the certificate could not be read after the " +
+			"order.\n\n" +
 			"Managing the certificate needs `" + certificatesPrivilege + "`, and checking the node's ACME settings " +
 			"`" + nodeConfigReadPrivilege + "`.",
 		Attributes: map[string]schema.Attribute{
@@ -369,13 +384,19 @@ func (m *nodeCertificateModel) fromUnconfirmed(node string) {
 // certificate: PBS would end the order without one, or fail it — and send
 // its acme-err notification. setDomainsFirst ends the advice to set the
 // node's domains with pbs_node_acme: how to have Terraform set them before
-// it orders. pbs_node_certificate_renew checks the settings too.
-func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node, setDomainsFirst string, diags *diag.Diagnostics) {
+// it orders. pbs_node_certificate_renew checks the settings too. It returns
+// the node's account, whose directory names the CA in errors, or nothing
+// after an error.
+//
+// It does not check the domains' plugins: PBS looks a plugin up only for an
+// authorization the CA has not validated yet, so an order whose domains the
+// CA validated recently succeeds without its plugins.
+func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node, setDomainsFirst string, diags *diag.Diagnostics) pbsclient.ACMEAccount {
 	client := r.data.client
 	config, _, err := client.GetNodeConfig(ctx, node)
 	if err != nil {
 		diags.AddError("Unable to read the ACME settings of the PBS node", apiErrorDetail(client, nodeConfigReadPrivilege, err))
-		return
+		return pbsclient.ACMEAccount{}
 	}
 	domains := 0
 	for _, raw := range config.ACMEDomains {
@@ -387,42 +408,62 @@ func (r *nodeCertificateResource) checkACMESettings(ctx context.Context, node, s
 		diags.AddError("The PBS node has no ACME domains",
 			"Node "+node+" has no ACME domains, so PBS would order no certificate. Set them with pbs_node_acme, "+
 				setDomainsFirst)
-		return
+		return pbsclient.ACMEAccount{}
 	}
-	account, err := config.ACMEAccountName()
+	name, err := config.ACMEAccountName()
 	if err != nil {
 		diags.AddError("Unexpected PBS node configuration",
 			fmt.Sprintf("PBS answered an acme property the provider cannot read, %q: %s", config.ACME, err))
-		return
+		return pbsclient.ACMEAccount{}
 	}
-	if _, err := client.GetACMEAccount(ctx, account); err != nil {
+	account, err := client.GetACMEAccount(ctx, name)
+	if err != nil {
 		if pbsclient.IsNotFound(err) {
 			diags.AddError("The ACME account of the PBS node does not exist",
 				fmt.Sprintf("Node %s orders certificates with ACME account %q, which PBS does not have. Register it "+
-					"with pbs_acme_account, and name it in pbs_node_acme. %s", node, account, err))
-			return
+					"with pbs_acme_account, and name it in pbs_node_acme. %s", node, name, err))
+			return pbsclient.ACMEAccount{}
 		}
 		diags.AddError("Unable to read the ACME account of the PBS node", apiErrorDetail(client, certificatesPrivilege, err))
+		return pbsclient.ACMEAccount{}
 	}
+	return account
 }
 
 // order has the node order a certificate and fills state with it, warning
-// about the provider's TLS settings. It reports whether PBS installed one.
-func (r *nodeCertificateResource) order(ctx context.Context, plan nodeCertificateModel, state *nodeCertificateModel, diags *diag.Diagnostics) bool {
+// about the provider's TLS settings. It reports whether PBS installed one
+// that the provider records: not when the proxy kept the certificate it
+// served before (see checkProxyLoad).
+//
+// It starts the task and waits for it within the client's task_timeout, as
+// pbs_node_certificate_renew does, so that it knows the task: a failure
+// ends with the end of the task's log, and a wait that ends first says
+// that the task goes on.
+func (r *nodeCertificateResource) order(ctx context.Context, plan nodeCertificateModel, prior, state *nodeCertificateModel, diags *diag.Diagnostics) bool {
 	client := r.data.client
 	node := plan.Node.ValueString()
-	r.checkACMESettings(ctx, node, "and make this resource depend on it — with triggers that refer to its domains, "+
+	account := r.checkACMESettings(ctx, node, "and make this resource depend on it — with triggers that refer to its domains, "+
 		"or depends_on — so that Terraform sets them first.", diags)
 	if diags.HasError() {
 		return false
 	}
 
+	// The order's task, once PBS has started it, and how waiting for it
+	// ended.
+	var task *pbsclient.UPID
+	var waitErr error
 	change, err := client.ChangeCertificate(ctx, node, func(ctx context.Context) error {
-		return client.OrderACMECertificate(ctx, node)
+		upid, err := client.OrderACMECertificate(ctx, node)
+		if err != nil {
+			return err
+		}
+		task = &upid
+		_, waitErr = client.WatchTask(ctx, upid, pbsclient.TaskWatch{})
+		return waitErr
 	})
 	switch {
 	case err != nil && !change.Changed():
-		diags.AddError("Unable to order an ACME certificate for the PBS node", orderErrorDetail(client, err))
+		orderFailed(ctx, client, task, account.Directory, waitErr, err, diags)
 		return false
 	case !change.Changed():
 		diags.AddError("PBS installed no new certificate",
@@ -430,15 +471,98 @@ func (r *nodeCertificateResource) order(ctx context.Context, plan nodeCertificat
 				"probably removed meanwhile. Check the task log in PBS.")
 		return false
 	}
+	wrote := "PBS wrote a new certificate for node " + node + ", with SHA-256 fingerprint " + change.After.Fingerprint
+	switch r.checkProxyLoad(ctx, wrote, change, err, recordedFingerprint(prior), diags) {
+	case proxyLoadFailed:
+		detail := proxyKeptPreviousDetail(wrote) + " This apply records no certificate. Reload the proxy, once the " +
+			"cause is fixed, before applying again, so that it serves the certificate PBS wrote: the next apply orders " +
+			"another certificate, which counts against the CA's rate limits. For a resource not created yet, " +
+			"`terraform import` after the reload records the written certificate without ordering."
+		if client.PinsCertificate() {
+			detail += " Once the proxy serves the new certificate, the provider's tls_cert_fingerprint (or " +
+				"PBS_TLS_FINGERPRINT) must name its fingerprint — or be removed, for a certificate the system's CAs " +
+				"trust — before the next apply or import, which otherwise fail to connect."
+		}
+		diags.AddError("The PBS proxy did not load the ordered certificate", detail)
+		return false
+	case proxyLoadUnclear:
+		*state = plan
+		state.fromCertificate(node, change.After, diags)
+		return true
+	}
 	*state = plan
 	r.recordChange(node, change, err, "task", state, diags)
 	return true
 }
 
+// recordedFingerprint is the normalised fingerprint of the certificate
+// prior's state recorded, which Read keeps only while PBS's proxy serves it
+// (see Read), or "" without one: no prior state, or an import not yet read.
+func recordedFingerprint(prior *nodeCertificateModel) string {
+	if prior == nil {
+		return ""
+	}
+	fingerprint, err := pbsclient.NormaliseFingerprint(prior.Fingerprint.ValueString())
+	if err != nil {
+		return ""
+	}
+	return fingerprint
+}
+
+// orderFailed explains why an order changed nothing: PBS refused it, its
+// task failed, the provider stopped waiting for the task or lost it, or the
+// certificate could not be read after it. task is nil when PBS started
+// none, and waitErr is how waiting for it ended; err is the whole error, and
+// directory the CA's, or "". It is renewalFailed of
+// pbs_node_certificate_renew for an apply, which records no certificate:
+// the next apply orders another, which counts against the CA's rate limits.
+func orderFailed(ctx context.Context, client *pbsclient.Client, task *pbsclient.UPID, directory string, waitErr, err error, diags *diag.Diagnostics) {
+	const summary = "Unable to order an ACME certificate for the PBS node"
+	const orderAgain = " This apply records no certificate, and the next one orders another, which counts against " +
+		"the CA's rate limits: let this task end first. For a resource not created yet, `terraform import` records " +
+		"the certificate the task installs without ordering another."
+	var taskErr *pbsclient.TaskError
+	switch {
+	case task == nil:
+		diags.AddError(summary, orderErrorDetail(client, directory, err))
+	case errors.As(waitErr, &taskErr):
+		diags.AddError(summary, orderErrorDetail(client, directory, err)+taskLogTail(ctx, client, *task))
+	case pbsclient.IsTaskTimeout(waitErr):
+		detail := fmt.Sprintf("The provider stopped waiting for PBS task %s, which was still running, after its "+
+			"task_timeout: %s.", task.Raw, waitErr)
+		if ctx.Err() != nil {
+			detail = fmt.Sprintf("Terraform stopped the apply while PBS task %s was running.", task.Raw)
+		}
+		detail += " The task goes on in PBS, which cannot stop an ACME order, and installs the new certificate if " +
+			"the CA issues it; Administration → Tasks in its web interface shows how it ends. The provider then " +
+			"trusts the new certificate only as its TLS settings say: a pinned tls_cert_fingerprint needs its " +
+			"fingerprint." + orderAgain
+		if ctx.Err() == nil {
+			detail += " Raise the provider's task_timeout to wait longer."
+		}
+		diags.AddError(summary, detail)
+	case waitErr != nil:
+		// PBS answered a status poll with an error.
+		diags.AddError(summary, fmt.Sprintf("PBS started task %s, but the provider could not follow it. The task goes "+
+			"on in PBS, whose web interface shows how it ends (Administration → Tasks).%s %s", task.Raw, orderAgain,
+			apiErrorDetail(client, "", err)))
+	default:
+		// The task ended well, but the certificate could not be read after
+		// it, over the connection the provider trusted before.
+		diags.AddError(summary, fmt.Sprintf("PBS task %s ended well, but reading the node's certificate afterwards "+
+			"failed, so the provider does not know whether PBS installed a new one, and trusts none: calls later in "+
+			"this run may fail. Check the node's certificate (Configuration → Certificates) and the provider's TLS "+
+			"settings. This apply records no certificate, and the next one orders another, which counts against the "+
+			"CA's rate limits; for a resource not created yet, `terraform import` records the installed certificate "+
+			"without ordering. %s", task.Raw, apiErrorDetail(client, certificatesPrivilege, err)))
+	}
+}
+
 // upload installs the planned custom certificate, with the key in config —
 // unless force is false and the node serves the certificate already —, and
 // fills state with it. It reports whether the certificate is in place.
-func (r *nodeCertificateResource) upload(ctx context.Context, plan nodeCertificateModel, force bool, config tfsdk.Config, state *nodeCertificateModel, diags *diag.Diagnostics) bool {
+// prior is the resource's state before, nil on Create.
+func (r *nodeCertificateResource) upload(ctx context.Context, plan nodeCertificateModel, force bool, config tfsdk.Config, prior, state *nodeCertificateModel, diags *diag.Diagnostics) bool {
 	client := r.data.client
 	node := plan.Node.ValueString()
 	certificates := plan.Certificates.ValueString()
@@ -463,7 +587,11 @@ func (r *nodeCertificateResource) upload(ctx context.Context, plan nodeCertifica
 			diags.AddError("Unable to read the certificate of the PBS node", apiErrorDetail(client, certificatesPrivilege, err))
 			return false
 		}
-		if sameCertificateChain(served.PEM, certificates) {
+		// The node's file holds the chain, but PBS's proxy may still serve
+		// the certificate state recorded, which Read keeps while it does: an
+		// earlier upload it could not load. Uploading again has PBS reload
+		// it, after a fix of the cause, and the check below report it.
+		if sameCertificateChain(served.PEM, certificates) && !r.servesRecorded(ctx, prior, leaf) {
 			*state = plan
 			state.fromCertificate(node, served, diags)
 			return true
@@ -507,49 +635,186 @@ func (r *nodeCertificateResource) upload(ctx context.Context, plan nodeCertifica
 				pbsclient.FormatFingerprint(leaf), node, change.After.Fingerprint))
 		return false
 	}
-	if r.proxyKeptPrevious(ctx, change, leaf) {
+	// Only an upload that PBS answered without an error had the proxy load
+	// the certificate: one that failed after PBS wrote it — the proxy's PID
+	// file or control socket out of reach — never told the proxy, and
+	// recordChange says to reload it.
+	wrote := "PBS wrote the uploaded certificate to node " + node + ", with SHA-256 fingerprint " + pbsclient.FormatFingerprint(leaf)
+	switch r.checkProxyLoad(ctx, wrote, change, err, recordedFingerprint(prior), diags) {
+	case proxyLoadFailed:
+		// Without a prior state, nothing is recorded that a destroy would
+		// delete.
+		remedy := " Fix the cause, then run `systemctl reload proxmox-backup-proxy` on the host: the next apply " +
+			"uploads the certificate again and records it. Or set certificates and key_wo to a certificate the " +
+			"proxy can load."
+		if prior != nil {
+			remedy = " Upload another one, or destroy pbs_node_certificate, which has PBS generate a new self-signed " +
+				"one; or fix the cause, run `systemctl reload proxmox-backup-proxy` on the host, and apply again."
+		}
 		diags.AddError("The PBS proxy did not load the uploaded certificate",
 			"PBS wrote the certificate with SHA-256 fingerprint "+pbsclient.FormatFingerprint(leaf)+" to node "+node+
 				", but its proxy still serves the previous one: it could not load the new chain — its journal says "+
 				"\"error reloading certificate\". The proxy will not start again, at its next restart, reload or "+
-				"package upgrade, until it has a certificate it can load: upload another one, or destroy "+
-				"pbs_node_certificate, which has PBS generate a new self-signed one. A raised security level in "+
-				"ciphers_tls_1_2 of pbs_node_config (@SECLEVEL) is a common cause.")
+				"package upgrade, until it has a certificate it can load. A raised security level in "+
+				"ciphers_tls_1_2 of pbs_node_config (@SECLEVEL) is a common cause."+remedy)
 		return false
+	case proxyLoadUnclear:
+		state.fromCertificate(node, change.After, diags)
+	default:
+		// Uploaded again because the proxy still served the recorded
+		// certificate, though the node's file held this one already: the
+		// file did not change, so ChangeCertificate trusted nothing, but
+		// what the provider's endpoint serves did — from the recorded
+		// certificate, which the provider's settings trust, to this one,
+		// which the configuration holds and PBS reported over the trusted
+		// connection. Recorded as the change it is, with its advice.
+		if recorded := recordedFingerprint(prior); err == nil && !change.Changed() && recorded != "" && recorded != leaf {
+			if trustErr := client.TrustCertificate(leaf); trustErr == nil {
+				change.Before.Fingerprint = pbsclient.FormatFingerprint(recorded)
+			}
+		}
+		r.recordChange(node, change, err, "upload", state, diags)
 	}
-	r.recordChange(node, change, err, "upload", state, diags)
 	r.warnACMERenewal(ctx, node, diags)
 	return true
 }
 
-// proxyKeptPrevious reports whether, after a change PBS reports done, its
-// proxy still presents the certificate from before on a new connection:
-// PBS writes the files before the proxy tries to load them, and only logs
-// when it cannot. A certificate other than both — from a TLS front end —
-// is no sign of that. The proxy loads the new certificate before PBS
-// answers, so a few tries are enough.
-func (r *nodeCertificateResource) proxyKeptPrevious(ctx context.Context, change pbsclient.CertificateChange, leaf string) bool {
+// proxyLoad is what a new connection to the provider's endpoint gets after
+// PBS wrote a new certificate, compared with what it got before the change.
+//
+// PBS writes the files, then has its proxy load them by a command on the
+// proxy's control socket, and the proxy answers that command OK even when
+// it cannot load the new certificate: it only logs "error reloading
+// certificate" and keeps the certificate it has, until its next restart,
+// reload or package upgrade, which then fails to start it — read in PBS's
+// source (src/bin/proxmox-backup-proxy.rs, the reload-certificate command;
+// src/server/mod.rs, reload_proxy_certificate; proxmox-backup 7c86c5ad5,
+// after 4.2.11, and v4.0.11 to v4.2.10). GET certificates/info, which reads
+// the file, reports the new certificate all the same. The proxy swaps its
+// certificate before it answers, so a new connection gets the new one as
+// soon as PBS reports the change done.
+type proxyLoad int
+
+const (
+	// proxyLoadNotSeen: nothing to tell — the new certificate, a look that
+	// failed or could not be made, a certificate other than the one from
+	// before, or a change that did not end well.
+	proxyLoadNotSeen proxyLoad = iota
+	// proxyLoadFailed: the certificate a new connection got before the
+	// change, which was the one PBS reported then: PBS's proxy could not
+	// load the new certificate.
+	proxyLoadFailed
+	// proxyLoadUnclear: the certificate a new connection got before the
+	// change, which was not the one PBS reported then: a TLS front end
+	// serves PBS under the endpoint with a certificate of its own, or PBS's
+	// proxy could not load an earlier certificate either, such as one of
+	// PBS's daily renewal.
+	proxyLoadUnclear
+)
+
+// checkProxyLoad looks, after a change whose call returned no error and
+// whose new certificate the provider read, at the certificate a new
+// connection gets, and reports what it found (see proxyLoad). It warns
+// about proxyLoadUnclear itself, in place of recordChange's advice about
+// the provider's TLS settings, which a certificate the node may not serve
+// does not need; proxyLoadFailed is the caller's to report, with
+// proxyKeptPreviousDetail and what to do next. wrote opens the warning: what
+// PBS did, ending with the new certificate's fingerprint.
+//
+// A change that returned an error is left to the caller: PBS's error says
+// what happened, such as an upload whose proxy PBS could not reach. An
+// unconfirmed certificate is not the one from before. recorded is the
+// normalised fingerprint the resource's state recorded, or "" (see
+// proxyLoaded).
+func (r *nodeCertificateResource) checkProxyLoad(ctx context.Context, wrote string, change pbsclient.CertificateChange, err error, recorded string, diags *diag.Diagnostics) proxyLoad {
+	if err != nil || change.Unconfirmed != nil {
+		return proxyLoadNotSeen
+	}
+	leaf, normErr := pbsclient.NormaliseFingerprint(change.After.Fingerprint)
+	if normErr != nil {
+		return proxyLoadNotSeen
+	}
+	outcome, presented := r.proxyLoaded(ctx, change, leaf, recorded)
+	if outcome == proxyLoadUnclear {
+		diags.AddWarning("The PBS proxy may not serve the new certificate",
+			wrote+", but a new connection to the provider's endpoint still gets the certificate it got before the "+
+				"change, with SHA-256 fingerprint "+pbsclient.FormatFingerprint(presented)+", although PBS reported "+
+				"another one then, with "+change.Before.Fingerprint+". Either a TLS front end, such as a reverse "+
+				"proxy, serves PBS under endpoint with a certificate of its own, and all is well; or PBS's proxy "+
+				"could not load a certificate PBS wrote earlier — at an earlier change, or a renewal of PBS's daily "+
+				"update —, still serves an older one, and will not start again, at its next restart, reload or "+
+				"package upgrade, until it has a certificate it can load. Check on the host: the proxy's journal "+
+				"(`journalctl -u proxmox-backup-proxy`) says \"error reloading certificate\" when it could not "+
+				"load one — a raised security level in ciphers_tls_1_2 of pbs_node_config (@SECLEVEL) is a common "+
+				"cause —; fix that, then run `systemctl reload proxmox-backup-proxy`. Pin the new fingerprint "+
+				"nowhere before the node serves the new certificate.")
+	}
+	return outcome
+}
+
+// proxyLoaded looks at the certificate a new connection gets, up to
+// proxyLoadAttempts times, and tells whether it is still the one it got
+// before the change — change.PresentedBefore, or, when the client could not
+// look then, the certificate PBS reported — and whether PBS reported that
+// one too then, or the resource's state recorded it: Read keeps a recorded
+// certificate other than the file's only while the proxy serves it, after a
+// change the proxy did not load. It returns that certificate's normalised
+// fingerprint.
+func (r *nodeCertificateResource) proxyLoaded(ctx context.Context, change pbsclient.CertificateChange, leaf, recorded string) (proxyLoad, string) {
 	before, err := pbsclient.NormaliseFingerprint(change.Before.Fingerprint)
-	if err != nil || before == leaf {
-		return false
+	if err != nil {
+		before = ""
+	}
+	reference := change.PresentedBefore
+	if reference == "" {
+		reference = before
+	}
+	if reference == "" || reference == leaf {
+		return proxyLoadNotSeen, ""
 	}
 	for attempt := 1; ; attempt++ {
 		presented, err := r.data.client.PresentedFingerprint(ctx)
-		if err != nil || presented != before {
-			return false
+		if err != nil || presented != reference {
+			return proxyLoadNotSeen, ""
 		}
 		if attempt == proxyLoadAttempts {
-			return true
+			break
 		}
 		select {
 		case <-time.After(proxyLoadInterval):
 		case <-ctx.Done():
-			return false
+			return proxyLoadNotSeen, ""
 		}
 	}
+	if reference == before || reference == recorded {
+		return proxyLoadFailed, reference
+	}
+	return proxyLoadUnclear, reference
 }
 
-// How often, and how far apart, proxyKeptPrevious looks.
+// servesRecorded reports whether PBS's proxy still serves the certificate
+// prior's state recorded, which is not leaf: a new connection gets it.
+func (r *nodeCertificateResource) servesRecorded(ctx context.Context, prior *nodeCertificateModel, leaf string) bool {
+	recorded := recordedFingerprint(prior)
+	if recorded == "" || recorded == leaf {
+		return false
+	}
+	presented, err := r.data.client.PresentedFingerprint(ctx)
+	return err == nil && presented == recorded
+}
+
+// proxyKeptPreviousDetail is the detail of the error when PBS's proxy did
+// not load the certificate PBS wrote; wrote says what PBS did, ending with
+// the new certificate's fingerprint.
+func proxyKeptPreviousDetail(wrote string) string {
+	return wrote + ", but its proxy still serves the previous one: it could not load the new one — its journal " +
+		"says \"error reloading certificate\". The proxy will not start again, at its next restart, reload or " +
+		"package upgrade, until it has a certificate it can load. Look for the reason in the journal " +
+		"(`journalctl -u proxmox-backup-proxy`) — a raised security level in ciphers_tls_1_2 of pbs_node_config " +
+		"(@SECLEVEL) is a common one —, then run `systemctl reload proxmox-backup-proxy` on the host."
+}
+
+// How often, and how far apart, proxyLoaded looks.
 const (
 	proxyLoadAttempts = 3
 	proxyLoadInterval = 500 * time.Millisecond
@@ -614,16 +879,159 @@ func unconfirmedAdvice(unconfirmed *pbsclient.UnconfirmedCertificateError) strin
 		"before you pin it anywhere or change the provider's TLS settings to trust it. " + unconfirmed.Error()
 }
 
-// orderErrorDetail explains a failed order.
-func orderErrorDetail(client *pbsclient.Client, err error) string {
-	var taskErr *pbsclient.TaskError
-	if errors.As(err, &taskErr) {
-		return "The CA did not issue a certificate. The task log in PBS (Administration → Tasks) shows each step; " +
-			"common causes are a DNS plugin whose settings or API token are wrong, a validation_delay too short " +
-			"for the zone's DNS servers, port 80 not reachable from the CA for a domain without a plugin, and " +
-			"the CA's rate limits. " + err.Error()
+// orderErrorDetail explains why PBS installed no certificate when asked to
+// order or renew one. err is ChangeCertificate's error, and directory the
+// ACME directory of the node's account, or "" when unknown. A failed task's
+// cause is read from its exit status (pbsclient.ACMEOrderFailureOf);
+// callers append the end of its log. Any other error — PBS refused to
+// start the task, or the certificate could not be read before the change —
+// is apiErrorDetail's.
+func orderErrorDetail(client *pbsclient.Client, directory string, err error) string {
+	failure, ok := pbsclient.ACMEOrderFailureOf(err)
+	if !ok {
+		return apiErrorDetail(client, certificatesPrivilege, err)
 	}
-	return apiErrorDetail(client, certificatesPrivilege, err)
+	var read *pbsclient.CertificateReadError
+	readAfter := errors.As(err, &read) && read.After
+	detail := orderFailureCause(failure, directory, readAfter)
+	if readAfter {
+		detail += " Reading the node's certificate afterwards failed too, so the provider cannot tell whether PBS " +
+			"installed a new one, and trusts none: calls later in this run may fail."
+	}
+	raw := err.Error()
+	var taskErr *pbsclient.TaskError
+	if failure.Cause == pbsclient.ACMEOrderNoResult && errors.As(err, &taskErr) {
+		// The task error says that PBS does not know the task, which PBS
+		// answers alike for a task it knows stopped without a result.
+		raw = strings.Replace(raw, taskErr.Error(), fmt.Sprintf("PBS task %s (%s) ended with exit status %q.",
+			taskErr.UPID.WorkerType, taskErr.UPID.Raw, taskErr.ExitStatus), 1)
+	}
+	return detail + " " + raw
+}
+
+// orderFailureCause says why an ACME order or renewal task failed, and what
+// to do, from its exit status (see internal/pbsclient/acme_order.go).
+// directory is the CA's, or "". readAfter is set when the certificate could
+// not be read after the task, so that the provider cannot tell what the
+// node serves.
+func orderFailureCause(failure pbsclient.ACMEOrderFailure, directory string, readAfter bool) string {
+	switch failure.Cause {
+	case pbsclient.ACMEOrderNoResult:
+		return "PBS's task stopped without a result: the process that ran it ended mid-task — it crashed or was " +
+			"killed, a `systemctl stop` or `restart` outlasted systemd's stop timeout, or the host rebooted —, so " +
+			"how far it got is unknown. The task log in PBS (Administration → Tasks) shows its last step."
+	case pbsclient.ACMEOrderAccountUnreadable:
+		return "PBS could not load the node's ACME account, so it asked the CA for nothing: the account was deleted " +
+			"or replaced after the provider checked it, just before ordering. Register it with pbs_acme_account, " +
+			"and name it in pbs_node_acme."
+	case pbsclient.ACMEOrderPluginMissing:
+		return fmt.Sprintf("Domain %s of the node names ACME plugin %q, which PBS does not have, so PBS could not "+
+			"have the domain validated. Create the plugin with pbs_acme_plugin, or name another one in "+
+			"pbs_node_acme; a domain without a plugin is validated over HTTP, on port 80.", failure.Domain, failure.Plugin)
+	case pbsclient.ACMEOrderNoHTTPChallenge:
+		return "The CA offers no HTTP challenge for a domain of the node without a DNS plugin — some CAs validate " +
+			"by DNS only —, so PBS could not have it validated. Give the domain a DNS plugin in pbs_node_acme; the " +
+			"task log names the domain (\"The validation for <domain> is pending\")."
+	case pbsclient.ACMEOrderNoDNSChallenge:
+		return "The CA offers no DNS challenge for a domain of the node with a DNS plugin, so PBS could not have it " +
+			"validated. Validate the domain over HTTP instead, without a plugin, in pbs_node_acme; the task log " +
+			"names the domain (\"The validation for <domain> is pending\")."
+	case pbsclient.ACMEOrderDNSPluginFailed:
+		return "The node's DNS plugin could not set the TXT record of a challenge: PBS's plugin script failed " +
+			"before the CA was asked to validate anything. The script's output, in the task log, says why — most " +
+			"often credentials or settings in the plugin's data that the DNS provider refuses, or an api that is " +
+			"not the DNS provider's (pbs_acme_plugin)."
+	case pbsclient.ACMEOrderPort80InUse:
+		return "PBS could not listen on port 80 to answer the CA's HTTP challenge for a domain without a DNS " +
+			"plugin: another service on the host holds the port — a web server in front of PBS, say —, or another " +
+			"certificate order that runs at the same time, such as the renewal of PBS's daily update. Free the " +
+			"port while PBS orders and renews certificates, which its daily update does on its own, or validate " +
+			"the domain with a DNS plugin (pbs_acme_plugin, pbs_node_acme)."
+	case pbsclient.ACMEOrderCAUnreachable:
+		ca := "the CA"
+		if directory != "" {
+			ca += " at " + directory
+		}
+		return "PBS could not talk to " + ca + ": check that the host resolves the CA's name, reaches it over " +
+			"HTTPS and trusts its TLS certificate, and that the directory of the node's ACME account is the CA's. " +
+			"PBS's ACME client connects directly: it does not use the node's http_proxy (pbs_node_config)."
+	case pbsclient.ACMEOrderRateLimited:
+		return "The CA refused the order for its rate limits; its message, below, says which limit, and when it " +
+			"allows the next order. Wait until then before ordering — or renewing — again; for tests, use the CA's " +
+			"staging directory, such as Let's Encrypt's, which has far higher limits, through a pbs_acme_account " +
+			"of its own."
+	case pbsclient.ACMEOrderAccountRefused:
+		switch failure.CAError {
+		case "userActionRequired":
+			return "The CA requires action on the node's ACME account before it issues more certificates " +
+				"(userActionRequired), most often agreeing to new terms of service. Register a new account, with the " +
+				"current tos_url, with pbs_acme_account, and name it in pbs_node_acme."
+		case "unauthorized":
+			return "The CA refused the node's ACME account (unauthorized): the account was deactivated, by a client " +
+				"holding its key, or the CA revoked it, and the CA accepts nothing from it any more. PBS still lists " +
+				"the account, since it learns of this from the CA only. Register a new account with pbs_acme_account, " +
+				"and name it in pbs_node_acme."
+		}
+		return "The CA does not know the node's ACME account (accountDoesNotExist): it has no account at the URL " +
+			"the node's account records — a test CA such as Pebble forgot it when it restarted, say, or the account " +
+			"was registered with another directory. Register a new account with pbs_acme_account, and name it in " +
+			"pbs_node_acme."
+	case pbsclient.ACMEOrderValidationFailed:
+		lead := fmt.Sprintf("The CA could not validate a domain of the node — its challenge ended %s — and issued "+
+			"no certificate. PBS does not report the CA's reason; the task log names the domain (\"The validation "+
+			"for <domain> is pending\").", strings.ToLower(failure.Status))
+		if failure.Domain != "" {
+			lead = fmt.Sprintf("The CA did not finish validating domain %s within five minutes, and PBS gave up; "+
+				"the CA issued no certificate.", failure.Domain)
+		}
+		return lead + " For a domain with a DNS plugin, most often the CA did not find the TXT record: raise the " +
+			"plugin's validation_delay (pbs_acme_plugin) if the zone's DNS servers are slow to update, and check " +
+			"the domain's alias (pbs_node_acme). For a domain without one, most often the CA could not fetch the " +
+			"challenge over HTTP on port 80: the domain must resolve to this host, and port 80 be reachable from " +
+			"the CA."
+	case pbsclient.ACMEOrderRefused:
+		if failure.CAError == "" {
+			return fmt.Sprintf("The CA turned the order %s after PBS had validated the domains, and issued no "+
+				"certificate; the task log shows the last steps.", strings.ToLower(failure.Status))
+		}
+		detail := fmt.Sprintf("The CA refused the order (%s) and issued no certificate; its message, below, says why.", failure.CAError)
+		switch failure.CAError {
+		case "caa":
+			detail += " A CAA record of one of the domains does not allow this CA to issue certificates for it."
+		case "rejectedIdentifier":
+			detail += " The CA does not issue certificates for one of the domains."
+		}
+		return detail
+	case pbsclient.ACMEOrderCAMisbehaved:
+		return "The CA answered PBS in a way PBS could not use, so PBS installed no certificate; the task log shows " +
+			"the last steps. Try again later."
+	case pbsclient.ACMEOrderNotWritten:
+		still := ", so the node still serves its previous certificate"
+		if readAfter {
+			still = ""
+		}
+		const counted = " The CA counts the certificate against its rate limits all the same."
+		switch {
+		case failure.ConfigDirectory:
+			return "The CA issued a certificate, but PBS could not write it: its configuration directory, " +
+				"/etc/proxmox-backup, is missing or has the wrong owner or permissions — it must belong to " +
+				"backup:backup, with mode 700 —" + still + "." + counted
+		case failure.KeyReplaced:
+			return "The CA issued a certificate, but PBS could not write it, /etc/proxmox-backup/proxy.pem, after it " +
+				"had replaced the key, /etc/proxmox-backup/proxy.key, which no longer matches the certificate the " +
+				"proxy serves: the proxy keeps serving it until it restarts, but cannot load it again — order or " +
+				"upload a certificate before PBS's proxy restarts or reloads." + counted
+		default:
+			return "The CA issued a certificate, but PBS could not write its key, /etc/proxmox-backup/proxy.key" +
+				still + "." + counted
+		}
+	default:
+		// The exit status may come from any step, the CA's issuing one
+		// included, or from PBS's notification about the failure.
+		return "PBS's task failed; the task log in PBS (Administration → Tasks) shows each step. Common causes are " +
+			"a DNS plugin whose settings or API token are wrong, a validation_delay too short for the zone's DNS " +
+			"servers, port 80 not reachable from the CA for a domain without a plugin, and the CA's rate limits."
+	}
 }
 
 // warnTrust warns when the provider's settings do not trust the certificate
@@ -687,9 +1095,9 @@ func (r *nodeCertificateResource) Create(ctx context.Context, req resource.Creat
 	var state nodeCertificateModel
 	var installed bool
 	if plan.Source.ValueString() == certificateSourceCustom {
-		installed = r.upload(ctx, plan, true, req.Config, &state, &resp.Diagnostics)
+		installed = r.upload(ctx, plan, true, req.Config, nil, &state, &resp.Diagnostics)
 	} else {
-		installed = r.order(ctx, plan, &state, &resp.Diagnostics)
+		installed = r.order(ctx, plan, nil, &state, &resp.Diagnostics)
 	}
 	if !installed {
 		return
@@ -702,7 +1110,17 @@ func (r *nodeCertificateResource) Create(ctx context.Context, req resource.Creat
 // renewal without planning anything. A node that serves the self-signed
 // certificate PBS generates has no certificate of the resource any more:
 // the resource is gone, and Terraform plans to install one. A node that does
-// not serve the custom certificate of the resource gets it uploaded again.
+// not serve the custom certificate of the resource gets it uploaded again,
+// unless the configuration holds the certificate the node serves.
+//
+// The node's certificate is what PBS reports, which is its certificate
+// file. When the file holds another certificate than the one state
+// recorded, but PBS's proxy still serves the recorded one, PBS wrote a
+// certificate its proxy could not load (see proxyLoad) — at an upload,
+// order or destroy of this resource that failed, a renewal of PBS's daily
+// update, or a change outside Terraform —: state keeps the certificate the
+// node serves, with a warning, rather than record one it does not, or
+// remove the resource while it does.
 func (r *nodeCertificateResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state nodeCertificateModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -718,13 +1136,18 @@ func (r *nodeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 			apiErrorDetail(r.data.client, certificatesPrivilege, err))
 		return
 	}
+	if r.proxyServesRecorded(ctx, node, &state, cert, &resp.Diagnostics) {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		return
+	}
 	switch {
 	case state.Source.ValueString() == certificateSourceCustom:
 		if !sameCertificateChain(state.Certificates.ValueString(), cert.PEM) {
 			resp.Diagnostics.AddWarning("The PBS node serves another certificate",
 				"Node "+node+" serves a certificate issued by "+cert.Issuer+", not the custom certificate of "+
 					"pbs_node_certificate: PBS renewed it with ACME, as it does on a node with ACME domains, or it was "+
-					"changed outside Terraform. A plan uploads the custom certificate again.")
+					"changed outside Terraform. A plan uploads the custom certificate again, unless the configuration "+
+					"holds the certificate the node serves.")
 			state.Certificates = certificateChainValue{StringValue: types.StringValue(cert.PEM)}
 		}
 	case cert.Generated():
@@ -737,6 +1160,34 @@ func (r *nodeCertificateResource) Read(ctx context.Context, req resource.ReadReq
 	}
 	state.fromCertificate(node, cert, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// proxyServesRecorded reports, and warns, when the node's certificate file,
+// cert, holds another certificate than the one state recorded, while PBS's
+// proxy still serves the recorded one (see Read).
+func (r *nodeCertificateResource) proxyServesRecorded(ctx context.Context, node string, state *nodeCertificateModel, cert pbsclient.CertificateInfo, diags *diag.Diagnostics) bool {
+	recorded := recordedFingerprint(state)
+	file, err := pbsclient.NormaliseFingerprint(cert.Fingerprint)
+	if recorded == "" || err != nil || file == recorded {
+		return false
+	}
+	presented, err := r.data.client.PresentedFingerprint(ctx)
+	if err != nil || presented != recorded {
+		return false
+	}
+	diags.AddWarning("The PBS proxy has not loaded the node's certificate",
+		"The certificate file of node "+node+" holds a certificate with SHA-256 fingerprint "+cert.Fingerprint+
+			", issued by "+cert.Issuer+", but PBS's proxy still serves the one pbs_node_certificate recorded, with "+
+			pbsclient.FormatFingerprint(recorded)+": PBS wrote a certificate its proxy could not load — at an "+
+			"upload, order or destroy of this resource that failed, a renewal of PBS's daily update, or a change "+
+			"outside Terraform —, and the proxy will not start again, at its next restart, reload or package "+
+			"upgrade, until it has a certificate it can load. Look for the reason in the journal (`journalctl -u "+
+			"proxmox-backup-proxy` says \"error reloading certificate\") — a raised security level in "+
+			"ciphers_tls_1_2 of pbs_node_config (@SECLEVEL) is a common one; PBS's own and ACME certificates have "+
+			"RSA keys of 4096 bits, which no @SECLEVEL of 4 or more accepts —, fix it, then run `systemctl reload "+
+			"proxmox-backup-proxy` on the host. pbs_node_certificate keeps the certificate the proxy serves until "+
+			"then.")
+	return true
 }
 
 // Update orders a new certificate when triggers or the source changed, and
@@ -759,9 +1210,9 @@ func (r *nodeCertificateResource) Update(ctx context.Context, req resource.Updat
 			// first apply after an import, uploads only a chain the node
 			// does not serve.
 			force := !prior.Source.IsNull() && writeOnlyChanged(plan.KeyWOVersion, prior.KeyWOVersion)
-			installed = r.upload(ctx, plan, force, req.Config, &state, &resp.Diagnostics)
+			installed = r.upload(ctx, plan, force, req.Config, &prior, &state, &resp.Diagnostics)
 		} else {
-			installed = r.order(ctx, plan, &state, &resp.Diagnostics)
+			installed = r.order(ctx, plan, &prior, &state, &resp.Diagnostics)
 		}
 		if !installed {
 			return
@@ -789,7 +1240,9 @@ func (r *nodeCertificateResource) Update(ctx context.Context, req resource.Updat
 }
 
 // Delete has the node go back to a new self-signed certificate, which the
-// provider trusts for the rest of the run, and reports its fingerprint.
+// provider trusts for the rest of the run, and reports its fingerprint. When
+// PBS's proxy keeps serving the certificate from before (see
+// checkProxyLoad), it fails, and the resource stays in state.
 func (r *nodeCertificateResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state nodeCertificateModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -803,6 +1256,28 @@ func (r *nodeCertificateResource) Delete(ctx context.Context, req resource.Delet
 	})
 	if err != nil && !change.Changed() {
 		resp.Diagnostics.AddError("Unable to delete the certificate of the PBS node", apiErrorDetail(client, certificatesPrivilege, err))
+		return
+	}
+	wrote := "PBS deleted the certificate of node " + node + " and generated a new self-signed one, with SHA-256 " +
+		"fingerprint " + change.After.Fingerprint
+	switch r.checkProxyLoad(ctx, wrote, change, err, recordedFingerprint(&state), &resp.Diagnostics) {
+	case proxyLoadFailed:
+		// A refresh after the reload removes a resource whose node serves
+		// PBS's own certificate — but not a custom one, whose refresh records
+		// whatever the node serves for the next apply to upload over.
+		next := "after which the next refresh finds PBS's own certificate and removes the resource — or destroy " +
+			"it again, which has PBS generate another self-signed one —, or remove it with `terraform state rm`."
+		if state.Source.ValueString() == certificateSourceCustom {
+			next = "after which the next refresh keeps the resource, recording PBS's own certificate, and destroying " +
+				"it again has PBS generate another self-signed one, with a new fingerprint: once the proxy serves the " +
+				"self-signed certificate, finish with `terraform state rm`."
+		}
+		resp.Diagnostics.AddError("The PBS proxy did not load the self-signed certificate", proxyKeptPreviousDetail(wrote)+
+			" PBS's own certificates have RSA keys of 4096 bits, which no @SECLEVEL of 4 or more accepts. "+
+			"pbs_node_certificate stays in state while the proxy serves the certificate it recorded: once the "+
+			"cause is fixed, run `systemctl reload proxmox-backup-proxy` on the host, "+next)
+		return
+	case proxyLoadUnclear:
 		return
 	}
 	var detail string
