@@ -579,7 +579,7 @@ func TestAccCertificateChangeKeepsTheClientWorking(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, err := testAccInsecureClient()
 		if err == nil {
-			err = cleanup.DeactivateACMEAccount(ctx, account, true)
+			_, err = cleanup.DeactivateACMEAccount(ctx, account, true)
 		}
 		if err != nil {
 			t.Errorf("deactivating the account: %v", err)

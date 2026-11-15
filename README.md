@@ -27,11 +27,13 @@ time zone and subscription (`pbs_node_config`, `pbs_dns`, `pbs_timezone`,
 applies changes to them (`pbs_network_interface`, `pbs_network_apply`),
 can be managed, with data sources to read the
 users, tokens and ACL entries, the roles and the effective permissions,
-the realms, the datastores, their namespaces, usage and garbage
-collection, the notification targets and matcher fields, the metric
-servers, the ACME directories, DNS APIs and accounts, the node's status,
-certificate, network interfaces, disks, pending updates, services,
-subscription and time, besides `pbs_version`,
+the realms, the datastores, their namespaces, usage, backup counts, S3
+request statistics and garbage collection, the notification targets and
+matcher fields, the metric servers, the ACME directories, DNS APIs and
+accounts, the node's settings, DNS settings, status, certificate, network
+interfaces (one or all), disks, pending updates, services, subscription and
+time, the tasks it ran and runs (`pbs_tasks`, `pbs_task`), besides
+`pbs_version`,
 `pbs_fingerprint` and `pbs_acme_tos`. Remotes and sync jobs (`pbs_remote`,
 `pbs_sync_job`) copy backups between servers, encrypted with keys PBS keeps
 (`pbs_sync_encryption_key`) if need be, with data sources for them and
@@ -44,12 +46,15 @@ adds a second server, [Back up to S3 object storage](docs/guides/s3-datastore.md
 puts a datastore on S3, and [Managing the network of a PBS node](docs/guides/network.md)
 changes network interfaces without cutting the node off.
 
-With Terraform 1.14.1 or later, actions run jobs, garbage collection, realm
-syncs, certificate renewals and other one-off operations (`pbs_sync_job_run`,
+With Terraform 1.14.1 or later, actions run jobs, garbage collection,
+verifications and prunes without a job, realm syncs, certificate renewals,
+service reloads and other one-off operations (`pbs_sync_job_run`,
 `pbs_verify_job_run`, `pbs_prune_job_run`, `pbs_datastore_gc`,
-`pbs_datastore_mount`, `pbs_datastore_unmount`, `pbs_datastore_s3_refresh`,
-`pbs_s3_endpoint_check`, `pbs_realm_sync`, `pbs_notification_test`,
-`pbs_node_certificate_renew`, `pbs_apt_update`, `pbs_network_reload`). With
+`pbs_datastore_verify`, `pbs_datastore_prune`, `pbs_datastore_mount`,
+`pbs_datastore_unmount`, `pbs_datastore_s3_refresh`, `pbs_s3_endpoint_check`,
+`pbs_realm_sync`, `pbs_notification_test`, `pbs_node_certificate_renew`,
+`pbs_apt_update`, `pbs_network_reload`, `pbs_service_reload`,
+`pbs_service_restart`, `pbs_service_start`). With
 Terraform 1.14 or later, list resources let `terraform query` find existing
 objects and generate the configuration that imports them — users, tokens, ACL
 entries, datastores, jobs, remotes, notification endpoints and most other

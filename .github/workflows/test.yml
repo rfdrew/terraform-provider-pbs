@@ -201,7 +201,8 @@ jobs:
           echo "::add-mask::${PBS_API_TOKEN#*:}"
           echo "::add-mask::${PBS_ACC_PASSWORD}"
           echo "::add-mask::${PBS_ACC_ADMIN_PASSWORD}"
-          for secret in "${PBS_ACC_LDAP_BIND_PASSWORD:-}" "${PBS_ACC_LDAP_USER_PASSWORD:-}"; do
+          for secret in "${PBS_ACC_LDAP_BIND_PASSWORD:-}" "${PBS_ACC_LDAP_USER_PASSWORD:-}" \
+            "${PBS_ACC_ACME_EAB_HMAC_KEY:-}" "${PBS_ACC_ACME_EAB_HMAC_KEY_2:-}"; do
             if [ -n "$secret" ]; then echo "::add-mask::${secret}"; fi
           done
           if [ -n "${PBS_ACC_S3_SECRET_KEY:-}" ]; then

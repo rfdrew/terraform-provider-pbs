@@ -1146,3 +1146,285 @@ func TestDirectoryRealmErrorAdvice(t *testing.T) {
 		})
 	}
 }
+
+// appliedInstance is the instance an apply's answer leaves, errors, warnings
+// and all.
+func appliedInstance(t *testing.T, h *protocolHarness, typeName string, resp *tfprotov6.ApplyResourceChangeResponse) *resourceInstance {
+	t.Helper()
+	return &resourceInstance{typeName: typeName, state: h.decodeResource(t, typeName, resp.NewState),
+		identity: resp.NewIdentity, private: resp.Private}
+}
+
+// Removing bind_dn removes the bind password PBS keeps, in a second update
+// sent with the digest of the read back, and default = true again for the
+// default realm; later updates send no delete=password, and bind_dn set
+// again needs password_wo.
+func TestDirectoryRealmResourceRemovingBindDNRemovesPassword(t *testing.T) {
+	for _, k := range directoryKinds {
+		t.Run(k.typeName, func(t *testing.T) {
+			h, fake, realms := newDirectoryRealmHarness(t)
+			put := k.route(http.MethodPut, "corp")
+			inst := h.create(t, k.typeName, k.config(t, h, map[string]any{"bind_dn": k.bindDN,
+				"password_wo": testBindPassword, "password_wo_version": 1, "default": true}))
+
+			skip := len(fake.routes())
+			attrs := map[string]any{"default": true}
+			config := k.config(t, h, attrs)
+			inst = h.update(t, inst, config)
+			forms := formsSince(fake, put, skip)
+			if len(forms) != 2 {
+				t.Fatalf("sent %d updates, want 2: %v", len(forms), forms)
+			}
+			requireForm(t, "first PUT", forms[0], map[string]string{"delete": "bind-dn", "default": "true"})
+			realms.mu.Lock()
+			readDigest := fakeDigest("domains.cfg", realms.gen-1)
+			realms.mu.Unlock()
+			requireForm(t, "second PUT", forms[1], map[string]string{"delete": "password", "default": "true",
+				"digest": readDigest})
+			if _, ok := realms.bindPassword("corp"); ok {
+				t.Error("PBS kept the bind password")
+			}
+			if stored, _ := realms.realm("corp"); stored["bind-dn"] != nil || realms.defaultRealm() != "corp" {
+				t.Errorf("stored realm = %v, default realm %q", stored, realms.defaultRealm())
+			}
+			if !isNullAt(t, inst.state, "bind_dn") || !isNullAt(t, inst.state, "password_wo_version") {
+				t.Errorf("state = %s", inst.state)
+			}
+			requireNoPlannedChange(t, h, inst, config)
+
+			// Without bind_dn, an update removes no password.
+			attrs["comment"] = "Anonymous"
+			config = k.config(t, h, attrs)
+			skip = len(fake.routes())
+			inst = h.update(t, inst, config)
+			forms = formsSince(fake, put, skip)
+			if len(forms) != 1 {
+				t.Fatalf("sent %d updates, want 1: %v", len(forms), forms)
+			}
+			requireForm(t, "PUT", forms[0], map[string]string{"comment": "Anonymous", "default": "true"})
+
+			// bind_dn set again needs the password, which PBS no longer has ...
+			attrs["bind_dn"] = k.bindDN
+			resp := directoryUpdateResponse(t, h, inst, k.config(t, h, attrs))
+			requireProtocolErrorContaining(t, resp.Diagnostics, "PBS has no password for bind_dn")
+			requireProtocolErrorContaining(t, resp.Diagnostics, "Missing bind password for "+k.bindDN)
+			if stored, _ := realms.realm("corp"); stored["bind-dn"] != nil {
+				t.Errorf("stored realm = %v after a refused update", stored)
+			}
+
+			// ... and binds with password_wo.
+			attrs["password_wo"] = testBindPassword
+			attrs["password_wo_version"] = 1
+			config = k.config(t, h, attrs)
+			inst = h.update(t, inst, config)
+			requireForm(t, "PUT", fake.lastCall(t, put).form, map[string]string{"bind-dn": k.bindDN,
+				"password": testBindPassword, "default": "true"})
+			if got, _ := realms.bindPassword("corp"); got != testBindPassword {
+				t.Errorf("bind password = %q", got)
+			}
+			requireNoPlannedChange(t, h, inst, config)
+		})
+	}
+}
+
+// The update that removes the bind password of a realm that is not the
+// default sends no default = true, which would take the default from
+// another realm: pam, the default of the fake, keeps it. A realm that was
+// the default, and whose update removes default along with bind_dn, is no
+// longer the default when the password goes, and stays so.
+func TestDirectoryRealmResourceRemovingBindDNFromNonDefaultRealm(t *testing.T) {
+	for _, k := range directoryKinds {
+		for _, tc := range []struct {
+			name       string
+			wasDefault bool
+			// firstPUT is the form of the update that removes bind_dn,
+			// defaultRealm the default realm after both updates.
+			firstPUT     map[string]string
+			defaultRealm string
+		}{
+			{"not the default", false, map[string]string{"delete": "bind-dn"}, "pam"},
+			{"default removed too", true, map[string]string{"delete": "bind-dn,default"}, ""},
+		} {
+			t.Run(k.typeName+"/"+tc.name, func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				put := k.route(http.MethodPut, "corp")
+				attrs := map[string]any{"bind_dn": k.bindDN, "password_wo": testBindPassword, "password_wo_version": 1}
+				if tc.wasDefault {
+					attrs["default"] = true
+				}
+				inst := h.create(t, k.typeName, k.config(t, h, attrs))
+
+				skip := len(fake.routes())
+				config := k.config(t, h, map[string]any{})
+				inst = h.update(t, inst, config)
+				forms := formsSince(fake, put, skip)
+				if len(forms) != 2 {
+					t.Fatalf("sent %d updates, want 2: %v", len(forms), forms)
+				}
+				requireForm(t, "first PUT", forms[0], tc.firstPUT)
+				realms.mu.Lock()
+				readDigest := fakeDigest("domains.cfg", realms.gen-1)
+				realms.mu.Unlock()
+				requireForm(t, "second PUT", forms[1], map[string]string{"delete": "password", "digest": readDigest})
+				if _, ok := realms.bindPassword("corp"); ok {
+					t.Error("PBS kept the bind password")
+				}
+				if got := realms.defaultRealm(); got != tc.defaultRealm {
+					t.Errorf("default realm = %q, want %q", got, tc.defaultRealm)
+				}
+				if stored, _ := realms.realm("corp"); stored["bind-dn"] != nil || stored["default"] != nil {
+					t.Errorf("stored realm = %v", stored)
+				}
+				requireNoPlannedChange(t, h, inst, config)
+			})
+		}
+	}
+}
+
+// An update removing bind_dn that PBS refuses removes no password. When the
+// update removing the password fails, the realm is as planned, with a
+// warning that says how to remove the password; a realm changed in between,
+// which the digest tells, is read again, and keeps its password when it has
+// a bind_dn again.
+func TestDirectoryRealmResourceBindPasswordRemovalFailures(t *testing.T) {
+	for _, k := range directoryKinds {
+		t.Run(k.typeName, func(t *testing.T) {
+			put := k.route(http.MethodPut, "corp")
+			withBindDN := map[string]any{"bind_dn": k.bindDN, "password_wo": testBindPassword, "password_wo_version": 1,
+				"default": true}
+			// removesPassword reports whether a request removes the password.
+			removesPassword := func(req *http.Request) bool {
+				return slices.Equal(form(req)[pbsclient.DeleteParam], []string{"password"})
+			}
+
+			t.Run("first update refused", func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				inst := h.create(t, k.typeName, k.config(t, h, withBindDN))
+				puts := fake.count(put)
+				resp := directoryUpdateResponse(t, h, inst, k.config(t, h, map[string]any{"server1": "ldap-down.example.com",
+					"default": true}))
+				requireProtocolErrorContaining(t, resp.Diagnostics, "Unable to update PBS "+k.name+" realm")
+				if got := fake.count(put) - puts; got != 1 {
+					t.Errorf("sent %d updates, want 1", got)
+				}
+				if got, _ := realms.bindPassword("corp"); got != testBindPassword {
+					t.Errorf("bind password = %q after a refused update", got)
+				}
+				if stored, _ := realms.realm("corp"); stored["bind-dn"] != k.bindDN {
+					t.Errorf("stored realm = %v after a refused update", stored)
+				}
+			})
+
+			t.Run("read back fails", func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				inst := h.create(t, k.typeName, k.config(t, h, withBindDN))
+				fake.reply(k.route(http.MethodGet, "corp"), http.StatusInternalServerError, "unable to parse domains.cfg")
+				resp := directoryUpdateResponse(t, h, inst, k.config(t, h, map[string]any{"default": true}))
+				requireProtocolErrorContaining(t, resp.Diagnostics, "Unable to read PBS "+k.name+" realm back after update")
+				requireProtocolErrorContaining(t, resp.Diagnostics, "PBS also still has the bind password of the realm")
+				requireProtocolErrorContaining(t, resp.Diagnostics,
+					"`proxmox-backup-manager "+k.realmType+" update corp --delete password --default true`")
+				if got, _ := realms.bindPassword("corp"); got != testBindPassword {
+					t.Errorf("bind password = %q, want it kept", got)
+				}
+				if n := fake.count(k.route(http.MethodPut, "corp")); n != 1 {
+					t.Errorf("sent %d updates, want 1", n)
+				}
+			})
+
+			t.Run("second update fails", func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				inst := h.create(t, k.typeName, k.config(t, h, withBindDN))
+				inner := realms.serveDirectoryRealm(k.realmType)
+				fake.handle(put, func(w http.ResponseWriter, req *http.Request) {
+					if removesPassword(req) {
+						writeError(w, "unable to acquire lock \"/etc/proxmox-backup/.domains.lck\" - got timeout")
+						return
+					}
+					inner(w, req)
+				})
+				config := k.config(t, h, map[string]any{"default": true})
+				resp := directoryUpdateResponse(t, h, inst, config)
+				requireNoProtocolErrors(t, resp.Diagnostics)
+				requireProtocolWarningContaining(t, resp.Diagnostics, "PBS may still have the bind password")
+				requireProtocolWarningContaining(t, resp.Diagnostics,
+					"`proxmox-backup-manager "+k.realmType+" update corp --delete password --default true`")
+				requireProtocolWarningContaining(t, resp.Diagnostics, "got timeout")
+				requireNoSecretIn(t, resp.Diagnostics, testBindPassword)
+				inst = appliedInstance(t, h, k.typeName, resp)
+				if !isNullAt(t, inst.state, "bind_dn") {
+					t.Errorf("state = %s", inst.state)
+				}
+				if got, _ := realms.bindPassword("corp"); got != testBindPassword {
+					t.Errorf("bind password = %q, want it kept", got)
+				}
+				if stored, _ := realms.realm("corp"); stored["bind-dn"] != nil {
+					t.Errorf("stored realm = %v", stored)
+				}
+				requireNoPlannedChange(t, h, inst, config)
+			})
+
+			t.Run("domains.cfg changed in between", func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				inst := h.create(t, k.typeName, k.config(t, h, withBindDN))
+				inner := realms.serveDirectoryRealm(k.realmType)
+				changed := false
+				fake.handle(put, func(w http.ResponseWriter, req *http.Request) {
+					if removesPassword(req) && !changed {
+						changed = true
+						realms.addRealm("other", pbsclient.RealmTypeOpenID, fakeProperties{"issuer-url": testIssuerURL, "client-id": "x"})
+					}
+					inner(w, req)
+				})
+				skip := len(fake.routes())
+				resp := directoryUpdateResponse(t, h, inst, k.config(t, h, map[string]any{"default": true}))
+				requireNoProtocolErrors(t, resp.Diagnostics)
+				for _, d := range resp.Diagnostics {
+					t.Errorf("unexpected diagnostic: %s: %s", d.Summary, d.Detail)
+				}
+				forms := formsSince(fake, put, skip)
+				if len(forms) != 3 || forms[1].Get(pbsclient.DigestParam) == forms[2].Get(pbsclient.DigestParam) {
+					t.Errorf("updates = %v, want the removal twice, with the digest of a new read", forms)
+				}
+				if _, ok := realms.bindPassword("corp"); ok {
+					t.Error("PBS kept the bind password")
+				}
+				if realms.defaultRealm() != "corp" {
+					t.Errorf("default realm = %q", realms.defaultRealm())
+				}
+			})
+
+			t.Run("bind_dn set again in between", func(t *testing.T) {
+				h, fake, realms := newDirectoryRealmHarness(t)
+				inst := h.create(t, k.typeName, k.config(t, h, withBindDN))
+				inner := realms.serveDirectoryRealm(k.realmType)
+				fake.handle(put, func(w http.ResponseWriter, req *http.Request) {
+					if removesPassword(req) {
+						// Another client sets bind_dn again first.
+						realms.mu.Lock()
+						realms.realms["corp"]["bind-dn"] = k.bindDN
+						realms.gen++
+						realms.mu.Unlock()
+					}
+					inner(w, req)
+				})
+				skip := len(fake.routes())
+				resp := directoryUpdateResponse(t, h, inst, k.config(t, h, map[string]any{"default": true}))
+				requireNoProtocolErrors(t, resp.Diagnostics)
+				requireProtocolWarningContaining(t, resp.Diagnostics, "PBS kept the bind password")
+				requireProtocolWarningContaining(t, resp.Diagnostics, "another client set bind_dn again, to \""+k.bindDN+"\"")
+				if forms := formsSince(fake, put, skip); len(forms) != 2 {
+					t.Errorf("updates = %v, want one removal, refused", forms)
+				}
+				if got, _ := realms.bindPassword("corp"); got != testBindPassword {
+					t.Errorf("bind password = %q, want it kept for the bind_dn", got)
+				}
+				// The realm still signs in: PBS binds with the password.
+				if err := fake.configured(t).client.UpdateDirectoryRealm(context.Background(), k.realmType, "corp",
+					url.Values{"comment": {"check"}, "default": {"true"}}); err != nil {
+					t.Errorf("the realm no longer connects: %v", err)
+				}
+			})
+		})
+	}
+}

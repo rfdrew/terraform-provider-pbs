@@ -87,13 +87,22 @@ func testAccRestoreNodeSettings(t *testing.T, client *pbsclient.Client) {
 	})
 }
 
+// The data source reads what the resource wrote, after it: every setting,
+// in the form PBS reads it back.
 func TestAccNodeConfig(t *testing.T) {
 	client := testAccNodeClient(t)
 	testAccRestoreNodeSettings(t, client)
 	const resourceName = "pbs_node_config.this"
+	const dataSourceName = "data.pbs_node_config.this"
 	location := ""
+	locationChecks := []acc.TestCheckFunc{acc.TestCheckNoResourceAttr(dataSourceName, "location.name")}
 	if testAccVersionAtLeast(4, 2, 1) {
 		location = `location = { name = "Vienna", latitude = 48.2, longitude = 16.37 }`
+		locationChecks = []acc.TestCheckFunc{
+			acc.TestCheckResourceAttr(dataSourceName, "location.name", "Vienna"),
+			acc.TestCheckResourceAttr(dataSourceName, "location.latitude", "48.2"),
+			acc.TestCheckResourceAttr(dataSourceName, "location.longitude", "16.37"),
+		}
 	}
 	consent := "Authorised use **only**.\nEverything is logged."
 	config := func(managed string) string {
@@ -106,6 +115,10 @@ resource "pbs_node_config" "this" {
   %s
   %s
 }
+
+data "pbs_node_config" "this" {
+  depends_on = [pbs_node_config.this]
+}
 `, consent, location, managed)
 	}
 
@@ -117,7 +130,7 @@ resource "pbs_node_config" "this" {
 			{
 				Config: config(`email_from = "tfacc@pbs.test"
   task_log_max_days = 30`),
-				Check: acc.ComposeAggregateTestCheckFunc(
+				Check: acc.ComposeAggregateTestCheckFunc(append([]acc.TestCheckFunc{
 					acc.TestCheckResourceAttr(resourceName, "id", pbsclient.DefaultNode),
 					acc.TestCheckResourceAttr(resourceName, "email_from", "tfacc@pbs.test"),
 					acc.TestCheckResourceAttr(resourceName, "consent_text", consent),
@@ -127,7 +140,16 @@ resource "pbs_node_config" "this" {
 							s.Description == "Acceptance tests\n\nof terraform-provider-pbs\n" && string(decoded) == consent &&
 							(location == "" || s.Location == "name=Vienna,latitude=48.2,longitude=16.37")
 					}),
-				),
+					acc.TestCheckResourceAttr(dataSourceName, "node", pbsclient.DefaultNode),
+					acc.TestCheckResourceAttr(dataSourceName, "email_from", "tfacc@pbs.test"),
+					acc.TestCheckResourceAttr(dataSourceName, "task_log_max_days", "30"),
+					acc.TestCheckResourceAttr(dataSourceName, "default_lang", "de"),
+					acc.TestCheckResourceAttr(dataSourceName, "ciphers_tls_1_2",
+						"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"),
+					acc.TestCheckResourceAttr(dataSourceName, "consent_text", consent),
+					// PBS reads the notes back ending in a line break.
+					acc.TestCheckResourceAttr(dataSourceName, "description", "Acceptance tests\n\nof terraform-provider-pbs\n"),
+				}, locationChecks...)...),
 			},
 			{
 				// Removing settings deletes them.
@@ -137,6 +159,8 @@ resource "pbs_node_config" "this" {
 					testAccCheckNodeSettings(func(s pbsclient.NodeSettings) bool {
 						return s.EmailFrom == "" && s.TaskLogMaxDays != nil && *s.TaskLogMaxDays == 7
 					}),
+					acc.TestCheckNoResourceAttr(dataSourceName, "email_from"),
+					acc.TestCheckResourceAttr(dataSourceName, "task_log_max_days", "7"),
 				),
 			},
 			{

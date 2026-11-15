@@ -24,7 +24,10 @@ import (
 //     there is no digest. Registering, updating and deactivating one talk to
 //     the CA, so all three answer with the UPID of a task — acme-register,
 //     acme-update, acme-deactivate — whose exit status carries the CA's
-//     error. Only "account 'x' already exists" is refused before the task.
+//     error. Only two things are refused before the task, with 400:
+//     "account x already exists", and an External Account Binding given
+//     half ("either both or none of 'eab_kid' and 'eab_hmac_key' have to
+//     be set.").
 //   - Reading an account answers what PBS stored: the directory URL, the
 //     account's URL at the CA (location), the terms of service agreed to,
 //     and the CA's account object, whose contact list is what the CA
@@ -32,8 +35,24 @@ import (
 //     account 'x' does not exist", on GET and in the tasks of PUT and
 //     DELETE.
 //   - Deactivating an account tells the CA, which cannot be undone, and
-//     renames the file to _deactivated_<name>_<n>: the name is free again.
-//     With force, the file is renamed even when the CA refuses.
+//     renames the file to _deactivated_<name>_<n>, the first n from 0 to 99
+//     that is free: the name is free again. With force, the file is renamed
+//     even when the CA refuses, and the task logs the CA's answer as a
+//     warning, "error deactivating account <name>, proceedeing anyway -
+//     <error>" ("proceeding" before 4.1.2), so that it ends "WARNINGS: 1".
+//     Force does not help when the file is missing: the task fails with
+//     "acme account 'x' does not exist" all the same.
+//   - External Account Binding (EAB), which CAs such as ZeroSSL and Google
+//     Trust Services require, is sent once, when an account is registered:
+//     eab_kid and eab_hmac_key, both or neither. PBS checks neither before
+//     the task, and cannot tell whether a CA requires a binding; the CA's
+//     refusal fails the task. PBS keeps neither apart: reading the account
+//     returns the CA's account object, which holds the binding — the key
+//     identifier in its protected header, never the key — only when the CA
+//     echoed it at registration, as Pebble does, and no later update
+//     replaced the object with the CA's answer, which Pebble gives without
+//     it (src/api2/config/acme.rs, register_account; proxmox-acme-api's
+//     account_api_impl.rs).
 //   - Plugins live in /etc/proxmox-backup/acme/plugins.cfg, with a digest.
 //     The built-in plugin "standalone" answers HTTP-01 challenges on port 80
 //     and always exists: it cannot be created ("ACME plugin ID ... already
@@ -87,6 +106,72 @@ type ACMEAccountData struct {
 	Contact []string `json:"contact,omitempty"`
 	// Status is valid, deactivated or revoked.
 	Status string `json:"status,omitempty"`
+	// ExternalAccountBinding is the binding the CA echoed at registration,
+	// a JWS {protected, payload, signature}, kept raw so that a CA's odd
+	// answer cannot fail reading the account; see EABKeyID.
+	ExternalAccountBinding json.RawMessage `json:"externalAccountBinding,omitempty"`
+}
+
+// EABKeyID returns the key identifier of the External Account Binding the
+// CA echoed when PBS registered the account: the "kid" of the binding's
+// protected header, base64url-encoded JSON such as {"alg":"HS256",
+// "kid":"...","url":"..."} (proxmox-acme's eab.rs). It is empty when the
+// account object holds no binding, or one that cannot be read.
+func (a ACMEAccount) EABKeyID() string {
+	var binding struct {
+		Protected string `json:"protected"`
+	}
+	if len(a.Account.ExternalAccountBinding) == 0 || json.Unmarshal(a.Account.ExternalAccountBinding, &binding) != nil {
+		return ""
+	}
+	header, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(binding.Protected, "="))
+	if err != nil {
+		return ""
+	}
+	var protected struct {
+		KID string `json:"kid"`
+	}
+	if json.Unmarshal(header, &protected) != nil {
+		return ""
+	}
+	return protected.KID
+}
+
+// PBS reads an External Account Binding's HMAC key in one of two ways
+// (proxmox-acme's account.rs, set_eab_credentials): a key holding "+" or
+// "/" as standard base64, with or without "=" padding, and any other as
+// base64url without padding, which refuses "=". Either way the trailing
+// bits must be zero, and white space is refused; the API passes the key on
+// as given, while the interactive CLI trims it. CAs hand keys out in either
+// alphabet, ZeroSSL's sometimes padded, and a key read with file() ends in
+// a line break.
+
+// NormalizeEABHMACKey returns an External Account Binding's HMAC key as PBS
+// reads it in either way: without white space around it and without "="
+// padding. The bytes it stands for are the same.
+func NormalizeEABHMACKey(key string) string {
+	return strings.TrimRight(strings.TrimSpace(key), "=")
+}
+
+// ValidEABHMACKey reports whether PBS can decode an External Account
+// Binding's HMAC key once NormalizeEABHMACKey has normalized it: at least one
+// byte, in standard base64 when it holds "+" or "/" — then without "-" or
+// "_" — and in base64url otherwise.
+func ValidEABHMACKey(key string) bool {
+	key = NormalizeEABHMACKey(key)
+	// Go's decoders skip line breaks, which PBS's refuse.
+	if key == "" || strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r >= 0x7f }) {
+		return false
+	}
+	encoding := base64.RawURLEncoding
+	if strings.ContainsAny(key, "+/") {
+		if strings.ContainsAny(key, "-_") {
+			return false
+		}
+		encoding = base64.RawStdEncoding
+	}
+	decoded, err := encoding.Strict().DecodeString(key)
+	return err == nil && len(decoded) > 0
 }
 
 // Emails returns the account's contact addresses without "mailto:".
@@ -106,11 +191,13 @@ func (c *Client) GetACMEAccount(ctx context.Context, name string) (ACMEAccount, 
 }
 
 // RegisterACMEAccount registers an account at a CA from params — "name",
-// "contact" and optionally "directory" and "tos_url" — and waits for the
-// task, whose error, such as the CA refusing, is a *TaskError. When the CA
+// "contact" and optionally "directory", "tos_url", and "eab_kid" with
+// "eab_hmac_key" for an External Account Binding — and waits for the task,
+// whose error, such as the CA refusing, is a *TaskError. When the CA
 // refuses the account key (IsACMEKeyRefused), it registers again, with a
-// new key, up to ACMERegisterAttempts times in all, as long as PBS kept no
-// account of that name.
+// new key and the same binding, up to ACMERegisterAttempts times in all, as
+// long as PBS kept no account of that name. The HMAC key is kept out of any
+// error.
 func (c *Client) RegisterACMEAccount(ctx context.Context, params url.Values) error {
 	name := params.Get("name")
 	if name == "" {
@@ -137,10 +224,21 @@ func (c *Client) RegisterACMEAccount(ctx context.Context, params url.Values) err
 
 func (c *Client) registerACMEAccount(ctx context.Context, params url.Values) error {
 	env, err := c.Post(ctx, "/config/acme/account", params, nil)
-	if err != nil {
-		return err
+	if err == nil {
+		err = c.WaitTaskIn(ctx, env.Data)
 	}
-	return c.WaitTaskIn(ctx, env.Data)
+	// Neither PBS's errors nor Pebble's quote the key, but an error is shown
+	// and logged, and the key is a secret.
+	return redactTaskError(redactAPIError(err, params.Get("eab_hmac_key")), params.Get("eab_hmac_key"))
+}
+
+// redactTaskError removes secrets from the exit status of a failed task.
+func redactTaskError(err error, secrets ...string) error {
+	var taskErr *TaskError
+	if errors.As(err, &taskErr) {
+		taskErr.ExitStatus = Redact(taskErr.ExitStatus, secrets...)
+	}
+	return err
 }
 
 // PBS's ACME client, proxmox-acme, generates a new P-256 key for every
@@ -189,17 +287,49 @@ func (c *Client) UpdateACMEAccountContact(ctx context.Context, name, contact str
 
 // DeactivateACMEAccount has the CA deactivate an account, for good, and
 // waits for the task. With force, PBS forgets the account even when the CA
-// refuses.
-func (c *Client) DeactivateACMEAccount(ctx context.Context, name string, force bool) error {
+// refuses: the task then ends with a warning, and refusal is the CA's
+// answer, read from the task's log — or, should the log not say, a text
+// that points to it. Without force, the CA's refusal fails the task, and so
+// does an account PBS does not have, also with force.
+func (c *Client) DeactivateACMEAccount(ctx context.Context, name string, force bool) (refusal string, err error) {
 	var params url.Values
 	if force {
 		params = url.Values{"force": {"true"}}
 	}
 	env, err := c.Delete(ctx, Path("config", "acme", "account", name), params, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return c.WaitTaskIn(ctx, env.Data)
+	upid, ok := UPIDFromData(env.Data)
+	if !ok {
+		return "", nil
+	}
+	status, err := c.WaitTask(ctx, upid)
+	if err != nil || !force || !strings.HasPrefix(status.ExitStatus, "WARNINGS") {
+		return "", err
+	}
+	return c.acmeDeactivationRefusal(ctx, upid), nil
+}
+
+// acmeDeactivationRefusal reads what the CA answered from the log of a
+// forced deactivation that ended with warnings. The deactivation logs no
+// other warning, and its log is a few lines long.
+func (c *Client) acmeDeactivationRefusal(ctx context.Context, upid UPID) string {
+	lines, err := c.TaskLogTail(ctx, upid, 50)
+	if err != nil {
+		return fmt.Sprintf("the CA's answer is in the log of task %s, which could not be read: %v", upid.Raw, err)
+	}
+	for _, line := range lines {
+		_, rest, ok := strings.Cut(line.Message(), "error deactivating account ")
+		if !ok {
+			continue
+		}
+		// "proceedeing" from PBS 4.1.2, "proceeding" before.
+		if _, answer, ok := strings.Cut(rest, " anyway - "); ok && strings.TrimSpace(answer) != "" {
+			return strings.TrimSpace(answer)
+		}
+	}
+	return fmt.Sprintf("the log of task %s does not say what the CA answered", upid.Raw)
 }
 
 // ACMETermsOfService returns the URL of the terms of service a CA's

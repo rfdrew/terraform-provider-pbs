@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Lists the system services of a Proxmox Backup Server node and their state, as the Services panel of its interface shows them. PBS reports a fixed set of services, always in this order: proxmox-backup (the API server), proxmox-backup-proxy (the proxy that serves the web interface and the API on port 8007), sshd, systemd-journald, cron, postfix and chrony. A service that is not installed is still listed, with unit_state not-found.
   PBS asks systemd, with systemctl show, and leaves out a service systemd cannot show. A node without systemd, such as PBS in a Docker container, therefore reports no services: services is an empty list then, not an error.
+  The pbs_service_reload, pbs_service_restart and pbs_service_start actions control the services; none stops one.
   Needs Sys.Audit on /system/services.
 ---
 
@@ -13,6 +14,8 @@ description: |-
 Lists the system services of a Proxmox Backup Server node and their state, as the Services panel of its interface shows them. PBS reports a fixed set of services, always in this order: `proxmox-backup` (the API server), `proxmox-backup-proxy` (the proxy that serves the web interface and the API on port 8007), `sshd`, `systemd-journald`, `cron`, `postfix` and `chrony`. A service that is not installed is still listed, with `unit_state` `not-found`.
 
 PBS asks systemd, with `systemctl show`, and leaves out a service systemd cannot show. A node without systemd, such as PBS in a Docker container, therefore reports no services: `services` is an empty list then, not an error.
+
+The `pbs_service_reload`, `pbs_service_restart` and `pbs_service_start` actions control the services; none stops one.
 
 Needs `Sys.Audit on /system/services`.
 

@@ -28,7 +28,10 @@
 # and starts Pebble, Let's Encrypt's test CA, in the PBS container's network
 # namespace, as the ACME directory https://localhost:14000/dir for PBS. Pebble
 # validates every challenge without looking (PEBBLE_VA_ALWAYS_VALID), so
-# ordering a certificate needs neither DNS nor a reachable port 80. It also
+# ordering a certificate needs neither DNS nor a reachable port 80. Pebble
+# also knows two External Account Binding keys, tfacc-eab-1 and tfacc-eab-2,
+# which it checks whenever a registration carries a binding; it requires
+# none, so the other ACME tests register without. It also
 # starts an S3 server, Silo (a maintained fork of MinIO, whose own images are
 # gone), in the same network namespace at https://127.0.0.1:9000, with the
 # buckets tfacc-s3 and tfacc-s3-spare, for the S3 endpoint and S3 datastore
@@ -59,7 +62,8 @@
 # It then prints what the provider reads — PBS_ENDPOINT, PBS_API_TOKEN and
 # PBS_TLS_FINGERPRINT — and the PBS_ACC_* facts the tests need: the test
 # user's password, the admin account, the datastore, the container, the
-# variant, the PBS version, the ACME directory, the files of PBS's own
+# variant, the PBS version, the ACME directory and its External Account
+# Binding keys, the files of PBS's own
 # certificate and key, which the certificate tests put back when they end,
 # the UUID of the file system for removable datastores, whether PBS can
 # write /etc/resolv.conf, the NICs for the network tests and whether PBS can
@@ -114,6 +118,11 @@
 #     store; Pebble shares the PBS container's network, where the
 #     certificate's name, localhost, is right. Pebble rejects 5% of nonces
 #     unless told not to, which PBS retries only three times.
+#   * Pebble reads its External Account Binding keys as base64url without
+#     padding, and refuses to start on any other. PBS reads a key holding +
+#     or / as standard base64 and any other as base64url without padding, so
+#     the second key always holds - or _, for the tests to send it in
+#     standard base64 too.
 #   * PBS mounts a removable datastore's file system with `mount UUID=<uuid>`
 #     and tells whether it is mounted by comparing the device numbers of
 #     /dev/disk/by-uuid/<uuid> and of the mount's source. The packages stand
@@ -213,6 +222,11 @@ PEBBLE="${PBS_TEST_PEBBLE:-1}"
 PEBBLE_IMAGE="${PBS_TEST_PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1}"
 PEBBLE_CONTAINER="${CONTAINER}-pebble"
 ACME_DIRECTORY="https://localhost:14000/dir"
+# Pebble's External Account Binding keys, made by pebble_files.
+EAB_KID_1="tfacc-eab-1"
+EAB_KID_2="tfacc-eab-2"
+EAB_KEY_1=""
+EAB_KEY_2=""
 REMOVABLE="${PBS_TEST_REMOVABLE:-1}"
 # The image of the file system for removable datastores, in the container,
 # and the file that notes its loop device, for the teardown.
@@ -276,6 +290,17 @@ base_url() { echo "https://127.0.0.1:${PORT}"; }
 api_url() { echo "$(base_url)/api2/json$1"; }
 
 rand_hex() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# eab_key prints a random External Account Binding key, 48 bytes in base64url
+# without padding, as Pebble reads its keys; with "mixed", one holding - or _.
+eab_key() {
+  local key
+  while :; do
+    key="$(openssl rand -base64 48 | tr -d '\n=' | tr '+/' '-_')"
+    if [[ "${1:-}" != mixed || "$key" == *[-_]* ]]; then break; fi
+  done
+  printf '%s' "$key"
+}
 
 T0="$(date +%s)"
 timing() { log "timing: $1 $(($(date +%s) - $2))s"; }
@@ -388,12 +413,16 @@ build_packages_image() {
   # so that the log also tells which releases the repository still serves.
   # proxmox-backup-client comes along to write test backups, e2fsprogs to
   # make the file system for removable datastores, and ifupdown2, which PBS
-  # only recommends, to apply network changes.
+  # only recommends, to apply network changes. dbus, which systemd only
+  # recommends, as a node has it: PBS's proxy, which runs as user backup,
+  # reads the state of services with `systemctl show`, which reaches systemd
+  # over D-Bus unless it runs as root; without it, PBS lists no services and
+  # the service actions find none.
   cat >"$ctx/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends ca-certificates curl systemd systemd-sysv \\
+ && apt-get install -y --no-install-recommends ca-certificates curl systemd systemd-sysv dbus \\
  && curl -fsSL -o /usr/share/keyrings/proxmox-archive-keyring.gpg \\
       https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \\
  && printf '%s\n' 'Types: deb' 'URIs: http://download.proxmox.com/debian/pbs' 'Suites: trixie' \\
@@ -701,27 +730,30 @@ pebble_files() {
   openssl x509 -req -in "$dir/cert.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" -set_serial "0x$(rand_hex)" \
     -sha256 -days 30 -out "$dir/cert.pem" \
     -extfile <(printf 'basicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:localhost, IP:127.0.0.1\nauthorityKeyIdentifier = keyid\n') >&2
-  # Pebble's own test configuration, with the certificate above and one
-  # profile, so that every order gets a 90-day certificate.
-  cat >"$dir/pebble-config.json" <<'JSON'
-{
-  "pebble": {
-    "listenAddress": "0.0.0.0:14000",
-    "managementListenAddress": "0.0.0.0:15000",
-    "certificate": "/cfg/cert.pem",
-    "privateKey": "/cfg/key.pem",
-    "httpPort": 5002,
-    "tlsPort": 5001,
-    "ocspResponderURL": "",
-    "externalAccountBindingRequired": false,
-    "retryAfter": { "authz": 3, "order": 5 },
-    "keyAlgorithm": "ecdsa",
-    "profiles": {
-      "default": { "description": "90-day certificates", "validityPeriod": 7776000 }
+  # Pebble's own test configuration, with the certificate above, one
+  # profile, so that every order gets a 90-day certificate, and the External
+  # Account Binding keys, which print_exports hands to the tests. The keys
+  # are globals: start_pebble runs in the main shell.
+  EAB_KEY_1="$(eab_key)"
+  EAB_KEY_2="$(eab_key mixed)"
+  jq -n --arg kid1 "$EAB_KID_1" --arg key1 "$EAB_KEY_1" --arg kid2 "$EAB_KID_2" --arg key2 "$EAB_KEY_2" '{
+    pebble: {
+      listenAddress: "0.0.0.0:14000",
+      managementListenAddress: "0.0.0.0:15000",
+      certificate: "/cfg/cert.pem",
+      privateKey: "/cfg/key.pem",
+      httpPort: 5002,
+      tlsPort: 5001,
+      ocspResponderURL: "",
+      externalAccountBindingRequired: false,
+      externalAccountMACKeys: { ($kid1): $key1, ($kid2): $key2 },
+      retryAfter: { authz: 3, order: 5 },
+      keyAlgorithm: "ecdsa",
+      profiles: {
+        default: { description: "90-day certificates", validityPeriod: 7776000 }
+      }
     }
-  }
-}
-JSON
+  }' >"$dir/pebble-config.json"
 }
 
 # start_pebble starts Pebble in the PBS container's network namespace, has
@@ -1252,9 +1284,13 @@ print_exports() {
   printf 'export PBS_ACC_HOST_ADDRESS=%q\n' "host.docker.internal"
   if [[ "$PEBBLE" != "0" ]]; then
     printf 'export PBS_ACC_ACME_DIRECTORY=%q\n' "$ACME_DIRECTORY"
+    printf 'export PBS_ACC_ACME_EAB_KID=%q\n' "$EAB_KID_1"
+    printf 'export PBS_ACC_ACME_EAB_HMAC_KEY=%q\n' "$EAB_KEY_1"
+    printf 'export PBS_ACC_ACME_EAB_KID_2=%q\n' "$EAB_KID_2"
+    printf 'export PBS_ACC_ACME_EAB_HMAC_KEY_2=%q\n' "$EAB_KEY_2"
   else
     # Clear what an earlier run exported in the same shell.
-    printf 'unset PBS_ACC_ACME_DIRECTORY\n'
+    printf 'unset PBS_ACC_ACME_DIRECTORY PBS_ACC_ACME_EAB_KID PBS_ACC_ACME_EAB_HMAC_KEY PBS_ACC_ACME_EAB_KID_2 PBS_ACC_ACME_EAB_HMAC_KEY_2\n'
   fi
   if [[ "$S3" != "0" ]]; then
     printf 'export PBS_ACC_S3_CONTAINER=%q\n' "$S3_CONTAINER"

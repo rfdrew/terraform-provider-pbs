@@ -26,7 +26,10 @@ func NewACMEAccountListResource() list.ListResource {
 				"has returned no addresses since June 2025, so for its accounts `contact` is null, and the generated " +
 				"configuration is invalid (`Missing Configuration for Required Attribute`) until you fill in the " +
 				"addresses; the first apply then sends them to the CA, which Let's Encrypt accepts and ignores. " +
-				"`tos_url` is the URL of the terms of service agreed to at registration.\n\n" +
+				"`tos_url` is the URL of the terms of service agreed to at registration. `eab_kid` is the key " +
+				"identifier of the External Account Binding when PBS still holds the binding the CA returned at " +
+				"registration; `eab_hmac_key_wo` is not needed after an import, as PBS uses the key only to register " +
+				"an account.\n\n" +
 				"~> **Destroying an imported account deactivates it at the CA, for good**, as destroying any " +
 				"`pbs_acme_account` does — and removing its resource block after the import plans exactly that. To " +
 				"stop managing an account, remove it from the state instead.\n\n" + listRequirementNote,

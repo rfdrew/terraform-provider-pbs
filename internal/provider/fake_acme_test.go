@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"maps"
@@ -31,9 +32,25 @@ import (
 //
 //   - registering, updating and deactivating an account answer a UPID, and
 //     the task does the work when it is first polled; "account 'x' already
-//     exists" is refused at once, a missing account fails the task. A CA
-//     that returns contacts, as Pebble does, is the default; caForgets
-//     makes it one that does not, as Let's Encrypt;
+//     exists" and an External Account Binding given half are refused at
+//     once, a missing account fails the task. A CA that returns contacts, as
+//     Pebble does, is the default; caForgets makes it one that does not, as
+//     Let's Encrypt;
+//   - the CA checks an External Account Binding as Pebble does, against the
+//     keys in eabKeys, after PBS decoded the key as PBS does; eabRequired
+//     makes it require one. It echoes the binding at registration, unless
+//     eabNotEchoed, and drops it on the next update of the account, as
+//     Pebble does;
+//   - refuseDeactivation makes the CA refuse to deactivate accounts: the
+//     task fails with the CA's answer, or, with force, logs it as a warning,
+//     ends "WARNINGS: 1" and deactivates the account all the same. Only
+//     such tasks have a log, which GET .../log serves. saveFailure makes
+//     the task fail where PBS saves the answer of a CA that accepted, force
+//     or not, as PBS 4.1.2 and later do: PBS keeps the account, deactivated
+//     at the CA, with the status it had. renameFailure makes the task fail
+//     after the CA's answer, force or not, where PBS renames the account's
+//     file: PBS keeps the account, deactivated at the CA when the CA
+//     accepted;
 //   - plugins carry the digest of plugins.cfg; the built-in standalone
 //     plugin always exists, cannot be created or updated, and deleting it
 //     changes nothing; data is taken base64-encoded and returned decoded;
@@ -76,6 +93,19 @@ type fakeACME struct {
 	orderFailure             string
 	orderFailureAfterInstall string
 	orderNothing             bool
+	// eabKeys are the External Account Binding keys the CA knows, by key
+	// identifier.
+	eabKeys      map[string][]byte
+	eabRequired  bool
+	eabNotEchoed bool
+	// refuseDeactivation is the CA's answer to deactivating an account,
+	// such as fakeAccountGone; empty for none. saveFailure is the error of
+	// saving the answer of a CA that accepted, such as "write failed: No
+	// space left on device", and renameFailure the error of renaming the
+	// account's file after the CA's answer, such as fakeNoFreeSlot.
+	refuseDeactivation string
+	saveFailure        string
+	renameFailure      string
 
 	plugins   map[string]fakeProperties
 	pluginGen int
@@ -93,6 +123,8 @@ type fakeACME struct {
 
 	tasks   map[string]func() string
 	taskGen int
+	// taskLogs are the log lines of the tasks that have a log, by UPID.
+	taskLogs map[string][]string
 }
 
 // fakeACMETaskNode is the node name the ACME fake's UPIDs carry, apart from
@@ -128,6 +160,8 @@ func newFakeACME(t *testing.T, fake *fakePBS) *fakeACME {
 		plugins:  map[string]fakeProperties{},
 		node:     map[string]string{"description": fakeNodeDescription},
 		tasks:    map[string]func() string{},
+		taskLogs: map[string][]string{},
+		eabKeys:  map[string][]byte{},
 
 		challengeSchema: fakeChallengeSchema,
 	}
@@ -314,6 +348,10 @@ func (a *fakeACME) startTaskLocked(workerType, workerID string, run func() strin
 
 func (a *fakeACME) taskStatus(w http.ResponseWriter, req *http.Request) {
 	rest := strings.TrimPrefix(req.URL.Path, fakeAPIPrefix+"/nodes/"+fakeACMETaskNode+"/tasks/")
+	if upid, ok := strings.CutSuffix(rest, "/log"); ok {
+		a.taskLog(w, req, upid)
+		return
+	}
 	upid, ok := strings.CutSuffix(rest, "/status")
 	if !ok {
 		writeFakeResponse(w, http.StatusNotFound, "Path '"+req.URL.Path+"' not found.")
@@ -327,6 +365,31 @@ func (a *fakeACME) taskStatus(w http.ResponseWriter, req *http.Request) {
 		delete(a.tasks, upid)
 	}
 	writeData(w, map[string]any{"status": "stopped", "exitstatus": exit, "upid": upid}, "")
+}
+
+// taskLog serves the log of a task that has one, as PBS does: the lines from
+// start on, at most limit of them (all with 0), each with its number and a
+// timestamp, and total next to data. Other tasks' logs are not found, as
+// the tests of the other ACME tasks expect.
+func (a *fakeACME) taskLog(w http.ResponseWriter, req *http.Request, upid string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	lines, ok := a.taskLogs[upid]
+	if !ok {
+		writeFakeResponse(w, http.StatusNotFound, "Path '"+req.URL.Path+"' not found.")
+		return
+	}
+	start, _ := strconv.Atoi(req.URL.Query().Get("start"))
+	limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+	data := []map[string]any{}
+	for i, line := range lines {
+		if i+1 < start || (limit > 0 && len(data) == limit) {
+			continue
+		}
+		data = append(data, map[string]any{"n": i + 1, "t": "2026-11-14T10:00:00+01:00: " + line})
+	}
+	body, _ := json.Marshal(map[string]any{"data": data, "total": len(lines), "active": false})
+	writeFakeResponse(w, http.StatusOK, string(body))
 }
 
 // contactsLocked turns contact into the CA's contacts the way PBS does:
@@ -365,6 +428,9 @@ func (a *fakeACME) accountJSON(props fakeProperties) map[string]any {
 	if contacts, ok := props["contact"].([]string); ok && len(contacts) > 0 {
 		account["contact"] = contacts
 	}
+	if kid, ok := props["eab_kid"].(string); ok && kid != "" {
+		account["externalAccountBinding"] = fakeEABEcho(kid)
+	}
 	out := map[string]any{"directory": props["directory"], "location": props["location"], "account": account}
 	if tos, ok := props["tos"].(string); ok && tos != "" {
 		out["tos"] = tos
@@ -372,9 +438,92 @@ func (a *fakeACME) accountJSON(props fakeProperties) map[string]any {
 	return out
 }
 
+// fakeEABEcho is an External Account Binding as Pebble echoes it in the
+// account object: a JWS whose protected header names the key identifier.
+func fakeEABEcho(kid string) map[string]any {
+	header, _ := json.Marshal(map[string]string{"alg": "HS256", "kid": kid, "url": "https://ca.test/acme/new-acct"})
+	return map[string]any{
+		"protected": base64.RawURLEncoding.EncodeToString(header),
+		"payload":   base64.RawURLEncoding.EncodeToString([]byte(`{"kty":"EC"}`)),
+		"signature": base64.RawURLEncoding.EncodeToString([]byte("signature")),
+	}
+}
+
+// The CA's answers to an External Account Binding, as Pebble 2.10.1 gives
+// them (wfe/wfe.go, verifyEAB) and PBS prints a CA's problem: "<type>:
+// <detail>". The text after Pebble's "verification error: " is go-jose's.
+const (
+	fakeEABRequired   = "urn:ietf:params:acme:error:externalAccountRequired: ACME server policy requires newAccount requests must include a value for the 'externalAccountBinding' field"
+	fakeEABUnknownKid = "urn:ietf:params:acme:error:unauthorized: the field 'kid' references a key that is not known to the ACME server"
+	fakeEABBadMAC     = "urn:ietf:params:acme:error:unauthorized: external account binding JWS verification error: go-jose/go-jose: error in cryptographic primitive"
+)
+
+// fakeNoFreeSlot is how PBS fails to deactivate an account whose file it
+// cannot rename, all of _deactivated_<name>_0 to _99 being taken
+// (proxmox-acme-api's account_config.rs, mark_account_deactivated).
+func fakeNoFreeSlot(name string) string {
+	return fmt.Sprintf(`No free slot to rename deactivated account "/etc/proxmox-backup/acme/accounts/%s", please cleanup "/etc/proxmox-backup/acme/accounts"`, name)
+}
+
+// The errors PBS fails a registration with when it cannot decode the
+// binding's key: proxmox-base64's DecodeError, which hides the base64
+// crate's message (proxmox-base64/src/error.rs).
+const (
+	fakeBase64Padding = "invalid padding in base64 encoded data"
+	fakeBase64Other   = "error decoding base64 data"
+)
+
+// decodeEABKeyLikePBS decodes an External Account Binding's HMAC key as
+// PBS does: standard base64, padding optional, for a key holding "+" or
+// "/", base64url without padding otherwise, with proxmox-base64's errors.
+func decodeEABKeyLikePBS(key string) ([]byte, string) {
+	if strings.ContainsAny(key, "+/") {
+		raw, err := base64.RawStdEncoding.Strict().DecodeString(strings.TrimRight(key, "="))
+		if err != nil || strings.ContainsAny(key, "\r\n") {
+			return nil, fakeBase64Other
+		}
+		return raw, ""
+	}
+	if strings.HasSuffix(key, "=") {
+		return nil, fakeBase64Padding
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(key)
+	if err != nil || strings.ContainsAny(key, "\r\n") {
+		return nil, fakeBase64Other
+	}
+	return raw, ""
+}
+
+// eabFailureLocked is how the CA, through PBS, answers the binding of a
+// registration: "" when it accepts it.
+func (a *fakeACME) eabFailureLocked(kid, key string) string {
+	if kid == "" {
+		if a.eabRequired {
+			return fakeEABRequired
+		}
+		return ""
+	}
+	raw, failure := decodeEABKeyLikePBS(key)
+	if failure != "" {
+		return failure
+	}
+	known, ok := a.eabKeys[kid]
+	switch {
+	case !ok:
+		return fakeEABUnknownKid
+	case string(known) != string(raw):
+		return fakeEABBadMAC
+	}
+	return ""
+}
+
 func (a *fakeACME) registerAccount(w http.ResponseWriter, req *http.Request) {
 	params := form(req)
 	if !checkRequired(w, params, "contact") {
+		return
+	}
+	if params.Has("eab_kid") != params.Has("eab_hmac_key") {
+		writeError(w, "either both or none of 'eab_kid' and 'eab_hmac_key' have to be set.")
 		return
 	}
 	name := params.Get("name")
@@ -401,6 +550,9 @@ func (a *fakeACME) registerAccount(w http.ResponseWriter, req *http.Request) {
 		if failure != "" {
 			return failure
 		}
+		if failure := a.eabFailureLocked(params.Get("eab_kid"), params.Get("eab_hmac_key")); failure != "" {
+			return failure
+		}
 		a.accountGen++
 		a.accounts[name] = fakeProperties{
 			"directory": directory,
@@ -408,6 +560,9 @@ func (a *fakeACME) registerAccount(w http.ResponseWriter, req *http.Request) {
 			"tos":       params.Get("tos_url"),
 			"contact":   contacts,
 			"status":    "valid",
+		}
+		if !a.eabNotEchoed && params.Get("eab_kid") != "" {
+			a.accounts[name]["eab_kid"] = params.Get("eab_kid")
 		}
 		return "OK"
 	})
@@ -443,17 +598,44 @@ func (a *fakeACME) serveAccount(w http.ResponseWriter, req *http.Request) {
 					props["contact"] = contacts
 				}
 			}
+			// The CA's answer replaces the account object PBS keeps, and
+			// Pebble leaves the binding out of it.
+			delete(props, "eab_kid")
 			return "OK"
 		})
 		writeData(w, upid, "")
 	case http.MethodDelete:
-		upid := a.startTaskLocked("acme-deactivate", name, func() string {
+		force := fakeBool(params.Get("force"))
+		var upid string
+		upid = a.startTaskLocked("acme-deactivate", name, func() string {
 			if _, ok := a.accounts[name]; !ok {
 				return missing
 			}
+			exit := "OK"
+			if refusal := a.refuseDeactivation; refusal != "" {
+				if !force {
+					return refusal
+				}
+				a.taskLogs[upid] = []string{
+					fmt.Sprintf("error deactivating account %s, proceedeing anyway - %s", name, refusal),
+					"TASK WARNINGS: 1",
+				}
+				exit = "WARNINGS: 1"
+			} else {
+				// PBS saves the CA's answer before it renames the file.
+				if failure := a.saveFailure; failure != "" {
+					a.taskLogs[upid] = append(a.taskLogs[upid], "TASK ERROR: "+failure)
+					return failure
+				}
+				a.accounts[name]["status"] = "deactivated"
+			}
+			if failure := a.renameFailure; failure != "" {
+				a.taskLogs[upid] = append(a.taskLogs[upid], "TASK ERROR: "+failure)
+				return failure
+			}
 			delete(a.accounts, name)
 			a.deactivated = append(a.deactivated, name)
-			return "OK"
+			return exit
 		})
 		writeData(w, upid, "")
 	}

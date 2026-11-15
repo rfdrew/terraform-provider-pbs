@@ -590,6 +590,89 @@ resource "pbs_realm_ad" "test" {
 	})
 }
 
+// Removing bind_dn removes the bind password PBS keeps as well, so that
+// setting bind_dn again needs password_wo: before, PBS bound with the old
+// password. Without bind_dn, PBS searches anonymously, which the stand's
+// server allows below cn=Subschema only. For an LDAP and an Active Directory
+// realm alike.
+func TestAccRealmDirectoryBindDNRemoved(t *testing.T) {
+	d := testAccLDAP(t)
+	ldapName, adName := testAccRealmName(), testAccRealmName()
+	config := func(baseDN, body string) string {
+		return providerConfig + fmt.Sprintf(`
+resource "pbs_realm_ldap" "test" {
+  realm     = %[1]q
+  server1   = %[3]q
+  base_dn   = %[4]q
+  user_attr = "uid"
+  %[5]s
+}
+
+resource "pbs_realm_ad" "test" {
+  realm   = %[2]q
+  server1 = %[3]q
+  base_dn = %[4]q
+  %[5]s
+}
+`, ldapName, adName, d.server, baseDN, body)
+	}
+	bindDN := fmt.Sprintf("bind_dn = %q", d.bindDN)
+	withPassword := bindDN + "\n  " + testAccPasswordWO(d.bindPassword, 1)
+	// realms checks both realms as PBS has them.
+	realms := func(baseDN, bindDN string) acc.TestCheckFunc {
+		check := func(r pbsclient.DirectoryRealm) error {
+			if r.BaseDN != baseDN || r.BindDN != bindDN {
+				return fmt.Errorf("realm = %+v, want base-dn %q and bind-dn %q", r, baseDN, bindDN)
+			}
+			return nil
+		}
+		return acc.ComposeAggregateTestCheckFunc(
+			testAccCheckDirectoryRealm(pbsclient.RealmTypeLDAP, ldapName, check),
+			testAccCheckDirectoryRealm(pbsclient.RealmTypeAD, adName, check),
+		)
+	}
+
+	acc.Test(t, acc.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		TerraformVersionChecks:   writeOnlyVersions,
+		CheckDestroy: acc.ComposeAggregateTestCheckFunc(
+			testAccCheckDirectoryRealmsDestroyed(pbsclient.RealmTypeLDAP, ldapName),
+			testAccCheckDirectoryRealmsDestroyed(pbsclient.RealmTypeAD, adName),
+		),
+		Steps: []acc.TestStep{
+			{
+				Config: config(d.baseDN, withPassword),
+				Check:  realms(d.baseDN, d.bindDN),
+			},
+			{
+				// Updated in place: bind_dn deleted, and then the password.
+				Config: config("cn=Subschema", ""),
+				ConfigPlanChecks: acc.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("pbs_realm_ldap.test", plancheck.ResourceActionUpdate),
+						plancheck.ExpectResourceAction("pbs_realm_ad.test", plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: acc.ComposeAggregateTestCheckFunc(
+					acc.TestCheckNoResourceAttr("pbs_realm_ldap.test", "bind_dn"),
+					acc.TestCheckNoResourceAttr("pbs_realm_ad.test", "password_wo_version"),
+					realms("cn=Subschema", ""),
+				),
+			},
+			{
+				// PBS no longer has a password to bind with.
+				Config:      config(d.baseDN, bindDN),
+				ExpectError: regexp.MustCompile(`PBS\s+has\s+no\s+password\s+for\s+bind_dn`),
+			},
+			{
+				Config: config(d.baseDN, withPassword),
+				Check:  realms(d.baseDN, d.bindDN),
+			},
+		},
+	})
+}
+
 // From Terraform 1.12, the realm imports by identity too. An import reads no
 // bind password, so the import plans to set password_wo_version, and with
 // it to send the password again: an update, never a replacement.

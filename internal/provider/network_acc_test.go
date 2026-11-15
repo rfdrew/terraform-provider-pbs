@@ -301,9 +301,18 @@ resource "pbs_network_interface" "vlan" {
 `, cidr)
 	}
 
+	// The data source reads the bridge after it is created, as PBS has it:
+	// pending, or applied.
+	readBridge := `
+data "pbs_network_interface" "bridge" {
+  name       = pbs_network_interface.bridge.name
+  depends_on = [pbs_network_interface.bridge]
+}
+`
+
 	first := root + bond("active-backup", fmt.Sprintf("bond_primary = %q", nics[1])) +
 		bridge("Terraform acceptance test\nsecond line", `cidr6 = "2001:db8:5100::2/64"`+"\n  bridge_vlan_aware = true") +
-		vlan("203.0.113.2/24") + apply("bond", "bridge", "vlan")
+		vlan("203.0.113.2/24") + apply("bond", "bridge", "vlan") + readBridge
 	second := root + bond("802.3ad", `bond_xmit_hash_policy = "layer3+4"`) + bridge("Changed by Terraform", "") +
 		vlan("203.0.113.3/24") + apply("bond", "bridge", "vlan")
 	third := root + bond("802.3ad", `bond_xmit_hash_policy = "layer3+4"`) + bridge("Changed by Terraform", "") +
@@ -328,6 +337,13 @@ resource "pbs_network_interface" "vlan" {
 					acc.TestCheckResourceAttr("pbs_network_interface.bond", "bond_primary", nics[1]),
 					acc.TestCheckResourceAttr("pbs_network_interface.vlan", "method", "static"),
 					acc.TestCheckNoResourceAttr("pbs_network_interface.vlan", "vlan_id"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "type", "bridge"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "bridge_ports.#", "1"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "bridge_ports.0", "tfaccbond0"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "cidr", "198.51.100.2/24"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "mtu", "1400"),
+					acc.TestCheckResourceAttr("data.pbs_network_interface.bridge", "comments",
+						"Terraform acceptance test\nsecond line"),
 					testAccCheckNetworkPending(!testAccNetworkReload()),
 					testAccCheckLink("tfaccbr0", 1400, "198.51.100.2/24", "2001:db8:5100::2/64"),
 					testAccCheckLink("tfaccbr0.20", 1400, "203.0.113.2/24"),

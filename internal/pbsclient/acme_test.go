@@ -63,14 +63,18 @@ func TestACMEAccountCalls(t *testing.T) {
 	if got := fake.lastCall(t, "PUT /config/acme/account/default").form.Get("contact"); got != "new@example.org" {
 		t.Fatalf("PUT contact = %q", got)
 	}
-	if err := c.DeactivateACMEAccount(ctx, "default", false); err != nil {
-		t.Fatalf("DeactivateACMEAccount() error = %v", err)
+	if refusal, err := c.DeactivateACMEAccount(ctx, "default", false); err != nil || refusal != "" {
+		t.Fatalf("DeactivateACMEAccount() = %q, %v", refusal, err)
 	}
 	if query := fake.lastCall(t, "DELETE /config/acme/account/default").query; query.Has("force") {
 		t.Fatalf("DELETE query = %v, want no force", query)
 	}
-	if err := c.DeactivateACMEAccount(ctx, "default", true); err != nil {
-		t.Fatalf("DeactivateACMEAccount(force) error = %v", err)
+	// Forced, and the CA did not refuse: no refusal, and no log read.
+	if refusal, err := c.DeactivateACMEAccount(ctx, "default", true); err != nil || refusal != "" {
+		t.Fatalf("DeactivateACMEAccount(force) = %q, %v", refusal, err)
+	}
+	if fake.count("GET /nodes/localhost/tasks/"+registerUPID+"/log") != 0 {
+		t.Fatal("a deactivation without warnings read the task's log")
 	}
 	if query := fake.lastCall(t, "DELETE /config/acme/account/default").query; query.Get("force") != "true" {
 		t.Fatalf("DELETE query = %v, want force", query)
@@ -89,8 +93,178 @@ func TestACMEAccountCalls(t *testing.T) {
 		t.Fatalf("UpdateACMEAccountContact() error = %v", err)
 	}
 	fake.reply("DELETE /config/acme/account/default", http.StatusForbidden, "permission check failed")
-	if err := c.DeactivateACMEAccount(ctx, "default", false); !IsForbidden(err) {
+	if _, err := c.DeactivateACMEAccount(ctx, "default", false); !IsForbidden(err) {
 		t.Fatalf("DeactivateACMEAccount() error = %v", err)
+	}
+}
+
+// eabProtected is the protected header of an External Account Binding as a
+// CA echoes it, base64url-encoded without padding.
+func eabProtected(header string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(header))
+}
+
+func TestACMEAccountEABKeyID(t *testing.T) {
+	account := func(binding string) ACMEAccount {
+		var a ACMEAccount
+		body := `{"directory":"https://ca/dir","location":"https://ca/acct/1","account":{"status":"valid"` + binding + `}}`
+		if err := json.Unmarshal([]byte(body), &a); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		return a
+	}
+	const header = `{"alg":"HS256","kid":"kid-1","url":"https://ca/new-acct"}`
+	for _, tc := range []struct {
+		name    string
+		binding string
+		want    string
+	}{
+		{"none", ``, ""},
+		{"unpadded", `,"externalAccountBinding":{"protected":"` + eabProtected(header) + `","payload":"e30","signature":"c2ln"}`, "kid-1"},
+		{"padded", `,"externalAccountBinding":{"protected":"` + base64.URLEncoding.EncodeToString([]byte(header+" ")) + `","payload":"e30","signature":"c2ln"}`, "kid-1"},
+		{"no kid", `,"externalAccountBinding":{"protected":"` + eabProtected(`{"alg":"HS256"}`) + `"}`, ""},
+		{"not base64url", `,"externalAccountBinding":{"protected":"not base64!"}`, ""},
+		{"not JSON", `,"externalAccountBinding":{"protected":"` + eabProtected("kid-1") + `"}`, ""},
+		{"not an object", `,"externalAccountBinding":"kid-1"`, ""},
+		{"null", `,"externalAccountBinding":null`, ""},
+	} {
+		if got := account(tc.binding).EABKeyID(); got != tc.want {
+			t.Errorf("%s: EABKeyID() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestEABHMACKey(t *testing.T) {
+	// 33 bytes: four characters for every three bytes, so no padding, and
+	// "+" and "/" in standard base64, "-" and "_" in base64url.
+	raw := []byte{0xfb, 0xff, 0xbf, 0x01, 0x02, 0x03, 0xfb, 0xff, 0xbf, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+		0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	stdKey, urlKey := base64.StdEncoding.EncodeToString(raw), base64.URLEncoding.EncodeToString(raw)
+	if !strings.ContainsAny(stdKey, "+/") || !strings.ContainsAny(urlKey, "-_") {
+		t.Fatalf("the sample key %q / %q holds no character of either alphabet", stdKey, urlKey)
+	}
+	// 32 bytes take padding.
+	padded := base64.URLEncoding.EncodeToString(raw[:32])
+	for _, tc := range []struct {
+		key        string
+		valid      bool
+		normalized string
+	}{
+		{stdKey, true, stdKey},
+		{urlKey, true, urlKey},
+		{padded, true, strings.TrimRight(padded, "=")},
+		{base64.StdEncoding.EncodeToString(raw[:32]), true, base64.RawStdEncoding.EncodeToString(raw[:32])},
+		{" " + urlKey + "\n", true, urlKey},
+		{"\t" + padded + "\r\n", true, strings.TrimRight(padded, "=")},
+		{"", false, ""},
+		{"====", false, ""},
+		{"  ", false, ""},
+		{"ab+c-d", false, "ab+c-d"},
+		{"ab/c_d", false, "ab/c_d"},
+		{urlKey[:20] + "\n" + urlKey[20:], false, urlKey[:20] + "\n" + urlKey[20:]},
+		{urlKey[:20] + " " + urlKey[20:], false, urlKey[:20] + " " + urlKey[20:]},
+		{"not a key!", false, "not a key!"},
+		{"é" + urlKey, false, "é" + urlKey},
+		// Five characters cannot be base64.
+		{"abcde", false, "abcde"},
+		// "QR" holds bits after its one byte, which PBS's decoder refuses;
+		// "QQ" does not.
+		{"QR", false, "QR"},
+		{"QQ", true, "QQ"},
+		{"QQ==", true, "QQ"},
+	} {
+		if got := ValidEABHMACKey(tc.key); got != tc.valid {
+			t.Errorf("ValidEABHMACKey(%q) = %v, want %v", tc.key, got, tc.valid)
+		}
+		if got := NormalizeEABHMACKey(tc.key); got != tc.normalized {
+			t.Errorf("NormalizeEABHMACKey(%q) = %q, want %q", tc.key, got, tc.normalized)
+		}
+	}
+}
+
+// The HMAC key never shows in an error, from the task or from the call.
+func TestRegisterACMEAccountRedactsTheEABKey(t *testing.T) {
+	ctx := context.Background()
+	const key = "c2VjcmV0LWhtYWMta2V5LXRoYXQtbXVzdC1ub3Qtc2hvdw"
+	params := url.Values{"name": {"zerossl"}, "contact": {"ops@example.org"}, "eab_kid": {"kid-1"}, "eab_hmac_key": {key}}
+
+	fake := newFakePBS()
+	fake.reply("POST /config/acme/account", http.StatusOK, `{"data":"`+registerUPID+`"}`)
+	fake.reply("GET /nodes/localhost/tasks/"+registerUPID+"/status", http.StatusOK,
+		`{"data":{"status":"stopped","exitstatus":"urn:ietf:params:acme:error:unauthorized: bad key `+key+`"}}`)
+	err := fake.client(t).RegisterACMEAccount(ctx, params)
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) || strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "unauthorized: bad key") {
+		t.Fatalf("RegisterACMEAccount() error = %v, want the task's without the key", err)
+	}
+	if got := fake.lastCall(t, "POST /config/acme/account").form; got.Get("eab_kid") != "kid-1" || got.Get("eab_hmac_key") != key {
+		t.Fatalf("POST form = %v", got)
+	}
+
+	fake = newFakePBS()
+	fake.reply("POST /config/acme/account", http.StatusBadRequest, "parameter verification failed - 'eab_hmac_key': "+key)
+	if err := fake.client(t).RegisterACMEAccount(ctx, params); err == nil || strings.Contains(err.Error(), key) {
+		t.Fatalf("RegisterACMEAccount() error = %v, want the call's without the key", err)
+	}
+}
+
+// A forced deactivation the CA refuses ends with a warning, whose text, the
+// CA's answer, is read from the task's log, in either spelling of PBS.
+func TestDeactivateACMEAccountRefusal(t *testing.T) {
+	ctx := context.Background()
+	const (
+		deactivateUPID = "UPID:localhost:00000A1B:00001C2D:00000006:6AE11CDF:acme-deactivate:le:tfacc@pbs!acc:"
+		statusRoute    = "GET /nodes/localhost/tasks/" + deactivateUPID + "/status"
+		logRoute       = "GET /nodes/localhost/tasks/" + deactivateUPID + "/log"
+		refusal        = "urn:ietf:params:acme:error:accountDoesNotExist: Account https://localhost:14000/my-account/gone not found."
+	)
+	deactivate := func(t *testing.T, force bool, exit string, log ...string) (*fakePBS, string, error) {
+		t.Helper()
+		fake := newFakePBS()
+		fake.reply("DELETE /config/acme/account/le", http.StatusOK, `{"data":"`+deactivateUPID+`"}`)
+		fake.reply(statusRoute, http.StatusOK, `{"data":{"status":"stopped","exitstatus":`+strconv.Quote(exit)+`}}`)
+		taskLog := &fakeTaskLog{}
+		taskLog.add(false, log...)
+		fake.handle(logRoute, taskLog.serve)
+		got, err := fake.client(t).DeactivateACMEAccount(ctx, "le", force)
+		return fake, got, err
+	}
+
+	for _, spelling := range []string{"proceedeing", "proceeding"} {
+		fake, got, err := deactivate(t, true, "WARNINGS: 1",
+			"Deactivating ACME account 'le'...",
+			"error deactivating account le, "+spelling+" anyway - "+refusal,
+			"TASK WARNINGS: 1")
+		if err != nil || got != refusal {
+			t.Errorf("%s: DeactivateACMEAccount() = %q, %v; want the CA's answer", spelling, got, err)
+		}
+		if fake.lastCall(t, "DELETE /config/acme/account/le").query.Get("force") != "true" {
+			t.Errorf("%s: DELETE without force", spelling)
+		}
+	}
+
+	// A log that does not say: the refusal points to it.
+	if _, got, err := deactivate(t, true, "WARNINGS: 1", "TASK WARNINGS: 1"); err != nil || !strings.Contains(got, "does not say") || !strings.Contains(got, deactivateUPID) {
+		t.Errorf("DeactivateACMEAccount() = %q, %v; want a pointer to the log", got, err)
+	}
+
+	// A log that cannot be read: the same, with the reason.
+	fake := newFakePBS()
+	fake.reply("DELETE /config/acme/account/le", http.StatusOK, `{"data":"`+deactivateUPID+`"}`)
+	fake.reply(statusRoute, http.StatusOK, `{"data":{"status":"stopped","exitstatus":"WARNINGS: 1"}}`)
+	fake.reply(logRoute, http.StatusForbidden, "permission check failed")
+	if got, err := fake.client(t).DeactivateACMEAccount(ctx, "le", true); err != nil || !strings.Contains(got, "could not be read") ||
+		!strings.Contains(got, "permission check failed") {
+		t.Errorf("DeactivateACMEAccount() = %q, %v; want a pointer to the log and why it could not be read", got, err)
+	}
+
+	// Without force, the refusal fails the task, and warnings are no refusal.
+	if _, got, err := deactivate(t, false, "Error: "+refusal); !strings.Contains(fmt.Sprint(err), "accountDoesNotExist") || got != "" {
+		t.Errorf("DeactivateACMEAccount() = %q, %v; want the task's error", got, err)
+	}
+	if fake, got, err := deactivate(t, false, "WARNINGS: 1", "error deactivating account le, proceedeing anyway - "+refusal); err != nil || got != "" ||
+		fake.count(logRoute) != 0 {
+		t.Errorf("DeactivateACMEAccount() = %q, %v after %d log reads; want nothing", got, err, fake.count(logRoute))
 	}
 }
 

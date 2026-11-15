@@ -63,7 +63,7 @@ func newFakeNamespaces(datastores *fakeDatastores) *fakeNamespaces {
 		hidden:      map[string]bool{},
 	}
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
-		datastores.fake.handlePrefix(method+" /admin/datastore/", n.serve)
+		datastores.handleAdmin(method, "namespace", n.serve)
 	}
 	return n
 }

@@ -63,6 +63,53 @@ type TaskStatus struct {
 	ExitStatus string `json:"exitstatus"`
 	Type       string `json:"type"`
 	User       string `json:"user"`
+	// UPID is the task's ID, as the request named it.
+	UPID string `json:"upid"`
+	// StartTime is when the task started, in seconds since the epoch.
+	StartTime int64 `json:"starttime"`
+	// EndTime is when a stopped task ended. PBS reports it from 4.2.1 on
+	// (commit 2683bca43), and not for a task it has no log of.
+	EndTime *int64 `json:"endtime,omitempty"`
+	// ID is the worker ID, unescaped; "" when the task has none.
+	ID string `json:"id"`
+	// TokenID is the name of the API token that started the task, if one
+	// did; User is then the token's user.
+	TokenID string `json:"tokenid,omitempty"`
+}
+
+// AuthID returns who started the task: User, or the token ID when an API
+// token did.
+func (s TaskStatus) AuthID() string {
+	if s.TokenID == "" {
+		return s.User
+	}
+	return TokenID(s.User, s.TokenID)
+}
+
+// How a task stands, as PBS's statusfilter names the ways a task ends
+// (TaskStateType in pbs-api-types), plus running.
+const (
+	TaskStateRunning = "running"
+	TaskStateOK      = "ok"
+	TaskStateWarning = "warning"
+	TaskStateError   = "error"
+	TaskStateUnknown = "unknown"
+)
+
+// TaskStateOf returns how a task ended from its exit status, as PBS
+// classifies it (tasktype, src/api2/node/tasks.rs): "OK" is
+// TaskStateOK, "WARNINGS: <n>" TaskStateWarning, "unknown"
+// TaskStateUnknown, and anything else, the error, TaskStateError.
+func TaskStateOf(exitStatus string) string {
+	switch {
+	case exitStatus == "OK":
+		return TaskStateOK
+	case strings.HasPrefix(exitStatus, "WARNINGS: "):
+		return TaskStateWarning
+	case exitStatus == "unknown":
+		return TaskStateUnknown
+	}
+	return TaskStateError
 }
 
 // Succeeded reports whether a stopped task ended without an error. Warnings

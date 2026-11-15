@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -151,8 +153,10 @@ func (r *directoryRealmResource) defaults() directoryModel {
 }
 
 // directoryRealmDeletable are the properties PBS lets an LDAP or Active
-// Directory realm update delete. password is among them, but the provider
-// leaves the bind password alone when password_wo goes.
+// Directory realm update delete, except password: Update removes the bind
+// password only in an update of its own, once the update removing bind_dn
+// went through; see removeBindPassword. The password stays when only
+// password_wo goes.
 var directoryRealmDeletable = []string{"bind-dn", "comment", "default", "filter", "mode", "port", "server2",
 	"sync-attributes", "sync-defaults-options", "user-classes", "verify"}
 
@@ -219,8 +223,10 @@ func (r *directoryRealmResource) Schema(_ context.Context, _ resource.SchemaRequ
 		stringvalidator.LengthAtLeast(1),
 		stringvalidator.AlsoRequires(path.MatchRoot("bind_dn")),
 	)
-	password.MarkdownDescription += " PBS needs it to create a realm with a `bind_dn`; removing it, with " +
-		"`password_wo_version`, keeps the password PBS has."
+	password.MarkdownDescription += " PBS needs it to create a realm with a `bind_dn`, and to set a `bind_dn` " +
+		"again after it was removed. Removing `password_wo` and `password_wo_version` keeps the password PBS has, " +
+		"which it binds with as long as the realm has a `bind_dn`; removing `bind_dn` removes it from PBS."
+	passwordVersion.MarkdownDescription += " Removing `bind_dn` as well removes the password from PBS."
 
 	attributes := map[string]schema.Attribute{
 		"id": schema.StringAttribute{
@@ -287,8 +293,9 @@ func (r *directoryRealmResource) Schema(_ context.Context, _ resource.SchemaRequ
 		"bind_dn": schema.StringAttribute{
 			Optional: true,
 			MarkdownDescription: "Account PBS binds as to look users up, such as " + r.bindDNExample() +
-				"; requires a password, `password_wo`, when the realm is created. When left out, PBS searches " +
-				"anonymously, which " + r.anonymousSearch() + ".",
+				"; requires a password, `password_wo`, when the realm is created, and when `bind_dn` is set again " +
+				"after it was removed. When left out, PBS searches anonymously, which " + r.anonymousSearch() + ". " +
+				"Removing it also removes the bind password PBS has.",
 			Validators: []validator.String{stringvalidator.LengthAtLeast(1), noControlOrPadding},
 		},
 		"password_wo":         password,
@@ -458,7 +465,10 @@ func (r *directoryRealmResource) description() string {
 		"until a new `password_wo_version` sends the new one. Destroying the realm connects to nothing.\n\n" +
 		"**The bind password** is write-only, `password_wo` with `password_wo_version`: PBS never returns it, " +
 		"so it stays out of the plan and state. PBS needs it to create a realm with a `bind_dn`, so creating " +
-		"one — or replacing one, after an import, say — without `password_wo` fails in the plan.\n\n" +
+		"one — or replacing one, after an import, say — without `password_wo` fails in the plan. Removing " +
+		"`bind_dn` removes the password from PBS too, in a second update once PBS has accepted the realm without " +
+		"`bind_dn`; setting `bind_dn` again then needs `password_wo`. Removing only `password_wo` and " +
+		"`password_wo_version` keeps the password PBS has.\n\n" +
 		"~> **Only one realm is the default.** `default = true` takes the flag from the realm that had it, the " +
 		"built-in `pam` and `pbs` and realms outside Terraform included. Set it on one realm only: two realms " +
 		"with `default = true` take it from each other on every apply.\n\n" +
@@ -699,7 +709,10 @@ func (r *directoryRealmResource) Read(ctx context.Context, req resource.ReadRequ
 // Update sends the properties that changed, and the bind password when its
 // version did, in one call, which PBS checks by connecting. PBS clears the
 // default flag of a realm on every update that does not set it again, so a
-// default realm's update always sends it.
+// default realm's update always sends it. When the plan removes bind_dn, a
+// second update then removes the bind password PBS keeps, which PBS would
+// otherwise keep in ldap_passwords.json; that update failing is a warning,
+// the realm being as planned.
 func (r *directoryRealmResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	plan, state := r.newModel(), r.newModel()
 	resp.Diagnostics.Append(req.Plan.Get(ctx, plan)...)
@@ -710,6 +723,8 @@ func (r *directoryRealmResource) Update(ctx context.Context, req resource.Update
 	p := plan.directory()
 	name := p.Realm.ValueString()
 	client := r.data.client
+	// The update then deletes bind-dn. An unknown bind_dn is not null.
+	removesBindDN := !state.directory().BindDN.IsNull() && p.BindDN.IsNull()
 
 	changes := newPropertyChanges(&resp.Diagnostics, directoryRealmDeletable...)
 	plan.changes(state, changes)
@@ -730,6 +745,7 @@ func (r *directoryRealmResource) Update(ctx context.Context, req resource.Update
 	}
 
 	var realm pbsclient.DirectoryRealm
+	var passwordErr error
 	readErr, err := writeRealm(client,
 		func() error {
 			if len(params) == 0 {
@@ -737,7 +753,15 @@ func (r *directoryRealmResource) Update(ctx context.Context, req resource.Update
 			}
 			return client.UpdateDirectoryRealm(ctx, r.kind.typ, name, params)
 		},
-		func() (err error) { realm, _, err = client.GetDirectoryRealm(ctx, r.kind.typ, name); return err })
+		func() error {
+			var digest string
+			var err error
+			realm, digest, err = client.GetDirectoryRealm(ctx, r.kind.typ, name)
+			if err == nil && removesBindDN && realm.BindDN == "" {
+				passwordErr = r.removeBindPassword(ctx, name, realm, digest)
+			}
+			return err
+		})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to update PBS "+r.kind.name+" realm",
 			r.directoryRealmErrorDetail(err, !p.BindDN.IsNull()))
@@ -750,14 +774,110 @@ func (r *directoryRealmResource) Update(ctx context.Context, req resource.Update
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 		setIdentity(ctx, resp.Identity, "realm", name, &resp.Diagnostics)
+		var password string
+		if removesBindDN {
+			password = fmt.Sprintf(" PBS also still has the bind password of the realm, which the provider removes "+
+				"only once it has read the realm back without bind_dn, and which no later apply removes: %s on the "+
+				"PBS host does, even when it then reports that the connection check failed.",
+				r.bindPasswordRemovalCommand(name, p.Default.ValueBool()))
+		}
 		resp.Diagnostics.AddError("Unable to read PBS "+r.kind.name+" realm back after update",
-			fmt.Sprintf("PBS updated realm %q, and the change was recorded in state, but reading it back failed. %s",
-				name, apiErrorDetail(client, realmReadPrivilege, err)))
+			fmt.Sprintf("PBS updated realm %q, and the change was recorded in state, but reading it back failed.%s %s",
+				name, password, apiErrorDetail(client, realmReadPrivilege, err)))
 		return
 	}
+	r.addBindPasswordWarning(&resp.Diagnostics, name, realm, passwordErr)
 	plan.fromRealm(name, realm, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 	setIdentity(ctx, resp.Identity, "realm", name, &resp.Diagnostics)
+}
+
+// bindDNSetAgainError is why removeBindPassword left the bind password: the
+// realm has a bind_dn again, which another client set after the update that
+// removed it.
+type bindDNSetAgainError struct {
+	bindDN string
+}
+
+func (e bindDNSetAgainError) Error() string {
+	return fmt.Sprintf("the realm has bind_dn %q again", e.bindDN)
+}
+
+// removeBindPassword removes the bind password PBS keeps for a realm in
+// ldap_passwords.json, after an update removed the realm's bind_dn: deleting
+// bind-dn leaves the password, which PBS would bind with again if bind_dn
+// were set again without one — to whatever server the realm then names.
+//
+// PBS removes the password as soon as it reads delete=password, before it
+// checks the connection, which saves the realm only when it passes; so an
+// update that removed bind_dn and the password together, and whose check
+// failed, would leave the realm with its bind_dn and no password, unable to
+// sign anyone in. The password therefore goes in an update of its own, sent
+// with the digest of the read, realm, that found the realm without bind_dn:
+// PBS checks the digest before it removes anything (update_ldap_realm in
+// src/api2/config/access/ldap.rs, and update_ad_realm in ad.rs,
+// proxmox-backup 7c86c5ad5, after 4.2.11). A conflict leaves the password,
+// and the realm is read again: the password goes only while the realm still
+// has no bind_dn, bindDNSetAgainError otherwise. A default realm sends default
+// = true again, which PBS clears otherwise. The update checks the connection
+// too, anonymously, as the update before did.
+func (r *directoryRealmResource) removeBindPassword(ctx context.Context, name string, realm pbsclient.DirectoryRealm, digest string) error {
+	client := r.data.client
+	reread := false
+	return client.RetryOnDigestConflict(ctx, func() error {
+		if reread {
+			var err error
+			if realm, digest, err = client.GetDirectoryRealm(ctx, r.kind.typ, name); err != nil {
+				return err
+			}
+		}
+		reread = true
+		if realm.BindDN != "" {
+			return bindDNSetAgainError{bindDN: realm.BindDN}
+		}
+		params := url.Values{pbsclient.DigestParam: {digest}}
+		pbsclient.AddDelete(params, "password")
+		if realm.Default != nil && *realm.Default {
+			params.Set("default", pbsclient.FormatBool(true))
+		}
+		return client.UpdateDirectoryRealm(ctx, r.kind.typ, name, params)
+	})
+}
+
+// bindPasswordRemovalCommand is the command that removes the bind password
+// of a realm on the PBS host. Like the API, it clears the default flag
+// unless it sets it again, and it removes the password before it checks the
+// connection.
+func (r *directoryRealmResource) bindPasswordRemovalCommand(name string, isDefault bool) string {
+	command := "proxmox-backup-manager " + r.kind.typ + " update " + name + " --delete password"
+	if isDefault {
+		command += " --default true"
+	}
+	return "`" + command + "`"
+}
+
+// addBindPasswordWarning warns when removeBindPassword, which err is the
+// error of, did not remove the bind password of realm, as PBS has it after
+// the update. The realm is as planned all the same.
+func (r *directoryRealmResource) addBindPasswordWarning(diags *diag.Diagnostics, name string, realm pbsclient.DirectoryRealm, err error) {
+	var again bindDNSetAgainError
+	switch {
+	case err == nil:
+	case errors.As(err, &again):
+		diags.AddWarning("PBS kept the bind password",
+			fmt.Sprintf("PBS removed bind_dn from %s realm %q, but before the provider removed the bind password "+
+				"PBS keeps for the realm, another client set bind_dn again, to %q: the provider left the password, "+
+				"which PBS binds with now. The next plan shows that bind_dn.", r.kind.name, name, again.bindDN))
+	default:
+		diags.AddWarning("PBS may still have the bind password",
+			fmt.Sprintf("PBS removed bind_dn from %s realm %q, but the update that then removes the bind password "+
+				"PBS keeps for the realm, in /etc/proxmox-backup/ldap_passwords.json on the PBS host, failed, so "+
+				"PBS may still have it. PBS binds with it only if bind_dn is set again without password_wo, and "+
+				"removes it with the realm; %s on the PBS host removes it now, even when it then reports that the "+
+				"connection check failed. The realm is as planned. %s", r.kind.name, name,
+				r.bindPasswordRemovalCommand(name, realm.Default != nil && *realm.Default),
+				apiErrorDetail(r.data.client, realmModifyPrivilege, err)))
+	}
 }
 
 // Delete deletes the realm, while it still has the resource's type; see

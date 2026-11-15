@@ -293,3 +293,27 @@ func TestACMEPluginListResourceListFails(t *testing.T) {
 	requireProtocolErrorContaining(t, results[0].diagnostics, "Unable to list PBS ACME plugins")
 	requireProtocolErrorContaining(t, results[0].diagnostics, parseFailed)
 }
+
+// An account registered with an External Account Binding the CA echoed
+// lists with its key identifier, which the generated configuration keeps,
+// with force_destroy = false, and plans nothing without the key.
+func TestACMEAccountListResourceEAB(t *testing.T) {
+	h, _, acme := newACMEHarness(t)
+	props := fakeACMEAccountProps("https://pebble.test:14000/dir", fakeToS["https://pebble.test:14000/dir"], 1, "tfacc@pbs.test")
+	props["eab_kid"] = "kid-1"
+	acme.addAccount("zerossl", props)
+
+	results := h.listedObjects(t, "pbs_acme_account", listRequest{includeResource: true})
+	if len(results) != 1 {
+		t.Fatalf("listed %d accounts", len(results))
+	}
+	h.requireListedLikeImport(t, "pbs_acme_account", results[0])
+	if stringAt(t, results[0].resource, "eab_kid") != "kid-1" || boolAt(t, results[0].resource, "force_destroy") {
+		t.Fatalf("listed %s", results[0].resource)
+	}
+	generated := h.planGenerated(t, "pbs_acme_account", results[0])
+	if stringAt(t, generated.config, "eab_kid") != "kid-1" || boolAt(t, generated.config, "force_destroy") ||
+		!isNullAt(t, generated.config, "eab_hmac_key_wo_version") {
+		t.Fatalf("generated %s", generated.config)
+	}
+}

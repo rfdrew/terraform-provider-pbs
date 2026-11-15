@@ -62,6 +62,33 @@ func (l TaskLogLine) Message() string {
 	return text
 }
 
+// Time returns the time the line starts with, and false for a line without
+// one, such as a continuation line of a message of several lines. It finds
+// the time as PBS does when it works out how a task ended
+// (upid_read_status, proxmox-rest-server worker_task.rs): what comes before
+// the first ": ", if that is a time in RFC 3339 format.
+func (l TaskLogLine) Time() (time.Time, bool) {
+	prefix, _, found := strings.Cut(l.Text, ": ")
+	if !found {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, prefix)
+	return t, err == nil
+}
+
+// TaskEndFromLog returns when a task ended from the end of its log, as PBS
+// works it out (upid_read_status): the time of the last line that has
+// one, in seconds since the epoch. It returns false when no line has one;
+// PBS then takes the task's start time.
+func TaskEndFromLog(lines []TaskLogLine) (int64, bool) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t, ok := lines[i].Time(); ok {
+			return t.Unix(), true
+		}
+	}
+	return 0, false
+}
+
 // TaskLog reads the lines of a task's log from line start on, at most limit
 // of them, or all to the end with limit 0. It also returns the number of
 // lines the log has and whether the task still runs.

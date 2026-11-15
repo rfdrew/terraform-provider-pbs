@@ -59,6 +59,8 @@ func (d *servicesDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			"PBS asks systemd, with `systemctl show`, and leaves out a service systemd cannot show. A node " +
 			"without systemd, such as PBS in a Docker container, therefore reports no services: `services` is an " +
 			"empty list then, not an error.\n\n" +
+			"The `pbs_service_reload`, `pbs_service_restart` and `pbs_service_start` actions control the " +
+			"services; none stops one.\n\n" +
 			"Needs `" + servicesPrivilege + "`.",
 		Attributes: map[string]schema.Attribute{
 			"node": schema.StringAttribute{
