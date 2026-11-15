@@ -42,7 +42,8 @@ func (a *datastoreGCAction) Schema(_ context.Context, _ action.SchemaRequest, re
 			"Collection** under Datastore → Prune & GC does, instead of waiting for its `gc_schedule`. Garbage " +
 			"collection frees the chunks that no backup uses any more, such as after a prune.\n\n" +
 			"Needs `Datastore.Modify` on the datastore. A removable datastore must be mounted, and the maintenance " +
-			"modes `read-only` and `offline` forbid it. PBS runs one garbage collection per datastore at a time: " +
+			"modes `read-only` and `offline` forbid it, as does PBS while it unmounts the datastore, refreshes it " +
+			"from S3 or deletes it. PBS runs one garbage collection per datastore at a time: " +
 			"while one runs, the action fails. The run counts as the datastore's last garbage collection, as a " +
 			"scheduled one does, and sends the same notification.\n\n" +
 			"~> PBS only removes chunks that no backup has used for longer than the datastore's " +

@@ -149,11 +149,16 @@ func TestNodeCertificateResourceChecksTheACMESettings(t *testing.T) {
 	acme.setNodeProperty("acme", "account=le")
 	acme.addAccount("le", fakeProperties{"directory": pbsclient.DefaultACMEDirectory, "status": "valid"})
 	acme.setNodeProperty("acmedomain1", "pbs.example.org,plugin=missing")
-	requireProtocolErrorContaining(t, apply(), "plugin 'missing' for domain 'pbs.example.org' not found!")
-	requireProtocolErrorContaining(t, apply(), "The task log in PBS")
+	missing := apply()
+	requireProtocolErrorContaining(t, missing, "plugin 'missing' for domain 'pbs.example.org' not found!")
+	requireProtocolErrorContaining(t, missing, `names ACME plugin "missing", which PBS does not have`)
+	requireProtocolErrorContaining(t, missing, "pbs_acme_plugin")
+	requireProtocolErrorContaining(t, missing, "The task's log: Administration → Tasks")
 	acme.setNodeProperty("acmedomain1", "pbs.example.org")
-	acme.orderFailure = "validation for pbs.example.org failed: connection refused"
-	requireProtocolErrorContaining(t, apply(), "connection refused")
+	acme.orderFailure = "validating challenge 'https://ca.test/chall/1' failed - status: Invalid"
+	invalid := apply()
+	requireProtocolErrorContaining(t, invalid, "could not validate a domain of the node — its challenge ended invalid")
+	requireProtocolErrorContaining(t, invalid, "status: Invalid")
 	if fake.count("DELETE /nodes/localhost/certificates/custom") != 0 {
 		t.Fatal("a failed order deleted the certificate")
 	}

@@ -3,12 +3,12 @@
 page_title: "pbs_acl Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Reads the access control list of a Proxmox Backup Server: which roles users and API tokens have on which paths. With Sys.Audit on /access/acl it shows every entry; without it, PBS shows only the entries of the API tokens of the user the provider signs in as.
+  Reads the access control list of a Proxmox Backup Server: which roles users and API tokens have on which paths. With Sys.Audit on /access/acl it shows every entry. Without it, PBS shows a user signed in with its password only the entries of its own API tokens, not its own, and an API token none at all, not even its own; it does so without an error, and the data source reads what PBS shows.
 ---
 
 # pbs_acl (Data Source)
 
-Reads the access control list of a Proxmox Backup Server: which roles users and API tokens have on which paths. With Sys.Audit on /access/acl it shows every entry; without it, PBS shows only the entries of the API tokens of the user the provider signs in as.
+Reads the access control list of a Proxmox Backup Server: which roles users and API tokens have on which paths. With Sys.Audit on /access/acl it shows every entry. Without it, PBS shows a user signed in with its password only the entries of its own API tokens, not its own, and an API token none at all, not even its own; it does so without an error, and the data source reads what PBS shows.
 
 ## Example Usage
 

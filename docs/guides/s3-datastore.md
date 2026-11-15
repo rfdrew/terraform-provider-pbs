@@ -354,17 +354,21 @@ PBS deletes, depends on the datastore's name and on a few settings:
   object store, with `reuse_datastore = true`. PBS then empties the local
   cache and reads the backups' indexes from the bucket, in maintenance mode
   `s3-refresh`, which takes a while for many backups; the provider waits for
-  it, up to its `task_timeout`. Meanwhile PBS keeps its datastore
-  configuration locked, which holds up the other datastores of the server
-  too: take a quiet time for it. **Without `reuse_datastore`, the new
-  datastore starts empty, and its next garbage collection deletes every
-  chunk under its name: the backups are lost.** The plan refuses a
-  replacement under the same name without it, but cannot tell whether a new
-  datastore's name already holds backups in the bucket. Should that happen,
-  run an S3 refresh before that garbage collection —
-  `proxmox-backup-manager datastore s3-refresh s3store1`, or S3 Refresh in
-  the datastore's content in the web interface —, which reads the indexes
-  from the bucket and should save the backups.
+  it, up to its `task_timeout`. From PBS 4.0.20, PBS keeps its datastore
+  configuration locked meanwhile, which holds up the other datastores of
+  the server too: the provider's own calls wait for the lock for about five
+  minutes, and backups, restores and jobs of the other datastores fail
+  after 10 seconds. Take a quiet time for it then. **Without
+  `reuse_datastore`, the new datastore starts empty, and its next garbage
+  collection deletes every chunk under its name: the backups are lost.** The
+  plan refuses a replacement under the same name without it, but cannot tell
+  whether a new datastore's name already holds backups in the bucket. Should
+  that happen, run an S3 refresh before that garbage collection — with the
+  `pbs_datastore_s3_refresh` action, with **Refresh contents from S3
+  bucket** under the datastore's Content → More in the web interface, or
+  with `proxmox-backup-manager datastore s3-refresh s3store1` on the host,
+  which PBS 4.0.20 to 4.1.1 end with a panic before refreshing anything —,
+  which reads the indexes from the bucket and should save the backups.
 * **`overwrite_in_use = true` only when the old PBS no longer uses the
   datastore.** A PBS marks a datastore in the bucket as in use by its host
   when it creates it, and removes the mark when it destroys it. After the

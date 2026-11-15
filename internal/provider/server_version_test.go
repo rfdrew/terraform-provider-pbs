@@ -47,4 +47,19 @@ func TestRequireRelease(t *testing.T) {
 	if got := (pbsRelease{4, 2, 4}).String(); got != "4.2.4" {
 		t.Errorf("String() = %q", got)
 	}
+
+	// A point release is compared by its release number: gc_on_unmount
+	// came with PBS 4.1.8.
+	gcOnUnmount := path.Root("gc_on_unmount")
+	for release, fails := range map[string]bool{"7": true, "8": false, "13": false} {
+		var diags diag.Diagnostics
+		version := pbsclient.Version{Version: "4.1", Release: release}
+		(&providerData{client: client, version: version}).requireRelease(&diags, gcOnUnmount, types.BoolValue(true), pbs418)
+		if diags.HasError() != fails {
+			t.Errorf("PBS %s: errors = %v, want failure %v", version, diags, fails)
+		}
+		if fails {
+			requireErrorContaining(t, diags, "gc_on_unmount needs PBS 4.1.8 or newer")
+		}
+	}
 }

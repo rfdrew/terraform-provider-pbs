@@ -93,7 +93,12 @@ type Client struct {
 	// WithConfigLock.
 	configLocks configLocks
 
-	// sleep waits between task polls; tests replace it.
+	// datastoreLock is the probe of PBS's lock of its datastore
+	// configuration, which calls PBS refuses for that lock share; see
+	// locks.go.
+	datastoreLock datastoreLockGate
+
+	// sleep waits between task polls and before retries; tests replace it.
 	sleep func(context.Context, time.Duration) error
 }
 
@@ -330,6 +335,11 @@ func (c *Client) Delete(ctx context.Context, path string, params url.Values, out
 // With a password session, a 401 means the ticket expired or the server lost
 // it, before the handler ran, so the request is signed in again and retried
 // once, whatever its method.
+//
+// A call PBS refuses because a task holds the lock of its datastore
+// configuration (IsDatastoreConfigLocked) is tried again for about five
+// minutes, one call at a time probing for the others; locks.go has the
+// details. When it gives up, it returns PBS's *Error as it came.
 func (c *Client) Call(ctx context.Context, method, path string, params url.Values, out any) (*Envelope, error) {
 	return c.call(ctx, method, path, params, out, true)
 }
@@ -342,11 +352,22 @@ func (c *Client) Call(ctx context.Context, method, path string, params url.Value
 // does not trust is tried once more when the client was changing the
 // server's certificate meanwhile and has come to trust a new one since: the
 // handshake failed before anything was sent, so nothing happened twice.
+//
+// A request PBS refuses for the lock of its datastore configuration is sent
+// again as retryDatastoreLock decides, with the same ticket while it is
+// valid: PBS refused it before it changed anything. The other retries keep
+// their own bounds across those tries.
 func (c *Client) call(ctx context.Context, method, path string, params url.Values, out any, retryUnauthorized bool) (*Envelope, error) {
 	signedInAgain, triedNewCertificate := false, false
 	// rejected is the generation of a ticket PBS rejected: a try after a
 	// certificate change must not send it again.
 	var rejected uint64
+	// lock is this call's part in waiting for PBS's lock of its datastore
+	// configuration. A probe that ends without PBS's answer about the lock —
+	// a request that failed, a sign-in that did — lets a call that waits for
+	// it probe on from its count.
+	var lock datastoreLockRetry
+	defer c.endDatastoreLockProbe(&lock, datastoreLockLeft)
 	for {
 		// Read first: a sign-in, too, may meet a certificate the client
 		// comes to trust only when a change ends.
@@ -386,7 +407,18 @@ func (c *Client) call(ctx context.Context, method, path string, params url.Value
 			continue
 		}
 
-		return c.decode(method, path, resp, raw, out)
+		env, err := c.decode(method, path, resp, raw, out)
+		if IsDatastoreConfigLocked(err) {
+			if c.retryDatastoreLock(ctx, &lock, method, path) {
+				continue
+			}
+			return nil, err
+		}
+		c.endDatastoreLockProbe(&lock, datastoreLockThrough)
+		if err == nil {
+			c.datastoreLockSucceeded(method, path)
+		}
+		return env, err
 	}
 }
 

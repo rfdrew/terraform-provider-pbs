@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -460,6 +462,145 @@ data "pbs_permissions" "token" {
 			},
 		},
 	})
+}
+
+// Without Sys.Audit on /access/acl, PBS shows an API token no ACL entry at
+// all and a user signed in with its password only the entries of its own API
+// tokens, and lets only that user change those; asking about another user's
+// or token's privileges is refused with a 400. The fake
+// (fakeAccess.hideACL) and pbs_acl's refresh assume that, which this test
+// checks with pbsclient on a user of its own and its token, each with
+// DatastoreBackup on the stand's datastore and no role on /, /access or
+// /access/acl, where a role with Sys.Audit, propagating from / as roles do
+// by default, would let them read every entry.
+func TestAccACLVisibilityWithoutAudit(t *testing.T) {
+	admin := testAccNodeClient(t)
+	ctx := context.Background()
+	userID, password := testAccUserID(), testAccPassword()
+	tokenID := pbsclient.TokenID(userID, "ci")
+	path := "/datastore/" + testAccDatastore(t)
+
+	if err := admin.CreateUser(ctx, url.Values{
+		"userid": {userID}, "password": {password}, "comment": {"terraform-provider-pbs acceptance tests"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// PBS deletes the entries of the user's tokens with the user, but
+		// not the user's own.
+		if err := admin.UpdateACL(ctx, pbsclient.ACLChange{Path: path, AuthID: userID, Role: "DatastoreBackup", Delete: true}); err != nil {
+			t.Errorf("removing the ACL entry of %s: %v", userID, err)
+		}
+		if err := admin.DeleteUser(ctx, userID); err != nil && !pbsclient.IsNotFound(err) {
+			t.Errorf("deleting %s: %v", userID, err)
+		}
+		if err := testAccCheckAccessDestroyed(userID)(nil); err != nil {
+			t.Error(err)
+		}
+	})
+	_, secret, err := admin.CreateAPIToken(ctx, userID, "ci", url.Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, authID := range []string{userID, tokenID} {
+		if err := admin.UpdateACL(ctx, pbsclient.ACLChange{Path: path, AuthID: authID, Role: "DatastoreBackup"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testAccWaitForACLCache()
+
+	token, err := testAccClientAs(func(o *pbsclient.Options) { o.APIToken = tokenID + ":" + secret })
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := testAccClientAs(func(o *pbsclient.Options) { o.Username, o.Password = userID, password })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither has Sys.Audit on /access/acl. PBS leaves out a path without
+	// privileges, so the check is for the privilege, as removeUserACL's.
+	for name, client := range map[string]*pbsclient.Client{"the token": token, "the user": user} {
+		permissions, err := client.Permissions(ctx, "", "/access/acl")
+		if err != nil {
+			t.Fatalf("reading the privileges of %s: %v", name, err)
+		}
+		if _, ok := permissions["/access/acl"]["Sys.Audit"]; ok {
+			t.Fatalf("%s has Sys.Audit on /access/acl: %v", name, permissions)
+		}
+	}
+
+	// The token sees no entry, not even its own; the user its token's, not
+	// its own.
+	if entries, _, err := token.ListACL(ctx, "", false); err != nil || len(entries) != 0 {
+		t.Fatalf("the token reads %+v, %v, want no entry", entries, err)
+	}
+	entries, _, err := user.ListACL(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, aclID(e.Path, e.UGID, e.RoleID))
+	}
+	if want := []string{aclID(path, tokenID, "DatastoreBackup")}; !slices.Equal(got, want) {
+		t.Fatalf("the user reads %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		who    string
+		client *pbsclient.Client
+		authID string
+		want   bool
+	}{
+		{"the token", token, tokenID, false},
+		{"the user", user, tokenID, true},
+		{"the user", user, userID, false},
+	} {
+		if visible, err := aclEntriesVisible(ctx, tc.client, tc.authID); err != nil || visible != tc.want {
+			t.Errorf("aclEntriesVisible(%s, %s) = %v, %v, want %v", tc.who, tc.authID, visible, err, tc.want)
+		}
+	}
+
+	// The token may change no entry; the user only its token's.
+	if err := token.UpdateACL(ctx, pbsclient.ACLChange{Path: path, AuthID: tokenID, Role: "DatastoreReader"}); !pbsclient.IsUnprivilegedACLChange(err) {
+		t.Errorf("the token granting itself a role: %v, want PBS's 400 \"Unprivileged ...\"", err)
+	}
+	if err := user.UpdateACL(ctx, pbsclient.ACLChange{Path: path, AuthID: userID, Role: "DatastoreReader"}); !pbsclient.IsUnprivilegedACLChange(err) {
+		t.Errorf("the user granting itself a role: %v, want PBS's 400 \"Unprivileged ...\"", err)
+	}
+	for _, remove := range []bool{false, true} {
+		if err := user.UpdateACL(ctx, pbsclient.ACLChange{Path: path, AuthID: tokenID, Role: "DatastoreReader", Delete: remove}); err != nil {
+			t.Errorf("the user changing its token's entry (delete=%t): %v", remove, err)
+		}
+	}
+
+	// The user may read its token's privileges; the token not its user's.
+	if _, err := user.Permissions(ctx, tokenID, ""); err != nil {
+		t.Errorf("the user reading its token's privileges: %v", err)
+	}
+	if _, err := token.Permissions(ctx, userID, ""); !pbsclient.IsListPermissionsRefused(err) {
+		t.Errorf("the token reading its user's privileges: %v, want PBS's 400 \"not allowed to list permissions of ...\"", err)
+	}
+
+	// ListACL reads "/" without exact as every entry, with the paths PBS
+	// stores. Asked for path "/", PBS itself names the entries below the
+	// root "//datastore/...", which this logs.
+	all, _, err := admin.ListACL(ctx, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(all, func(e pbsclient.ACLEntry) bool { return e.Path == path && e.UGID == tokenID }) {
+		t.Errorf("ListACL(\"/\", false) has no entry of %s on %s: %+v", tokenID, path, all)
+	}
+	var raw []pbsclient.ACLEntry
+	if _, err := admin.Get(ctx, "/access/acl", url.Values{"path": {"/"}}, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range raw {
+		if e.UGID == tokenID {
+			t.Logf("GET /access/acl?path=/ names the entry of %s on %s %q", tokenID, path, e.Path)
+		}
+	}
 }
 
 func TestAccAccessDataSources(t *testing.T) {

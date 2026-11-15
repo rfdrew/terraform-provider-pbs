@@ -3,13 +3,13 @@
 page_title: "pbs_permissions Data Source - Proxmox Backup Server"
 subcategory: ""
 description: |-
-  Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access.
+  Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access, except that a user signed in with its password may read those of its own API tokens.
   -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an ACL entry changes. Read in the same apply that changes pbs_acl resources, this data source may then still show the privileges from before.
 ---
 
 # pbs_permissions (Data Source)
 
-Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access.
+Reads the privileges a Proxmox Backup Server user or API token has, as PBS works them out from its roles: whether a token can back up to a datastore, say. For an API token, these are what it can actually do — the privileges of its own ACL entries that its user has too. Every user and token may read its own; reading another's needs Sys.Audit on /access, except that a user signed in with its password may read those of its own API tokens.
 
 -> Before PBS 4.2.6, PBS caches privileges for up to 5 seconds and does not drop them when an ACL entry changes. Read in the same apply that changes `pbs_acl` resources, this data source may then still show the privileges from before.
 
@@ -38,4 +38,4 @@ output "pve_can_back_up_to_store1" {
 
 ### Read-Only
 
-- `permissions` (Map of Map of Boolean) Privileges by path: for each path, a map from privilege, such as `Datastore.Backup`, to whether it also applies below the path. A path where the user or token has no privilege has an empty map or is missing, so test with `lookup()` or `try()`.
+- `permissions` (Map of Map of Boolean) Privileges by path: for each path, a map from privilege, such as `Datastore.Backup`, to whether it also applies below the path. PBS leaves out a path where the user or token has no privilege, so test with `lookup()` or `try()`.

@@ -139,3 +139,49 @@ func TestIsOfOtherType(t *testing.T) {
 		}
 	}
 }
+
+// PBS's answers when the lock of a configuration or state file stays taken
+// for its 10 s, from proxmox-sys' open_file_locked: only the lock of the
+// datastore configuration is IsDatastoreConfigLocked, and a job's lock stays
+// IsTaskAlreadyRunning.
+const (
+	datastoreConfigLockedText = `Unable to acquire lock "/etc/proxmox-backup/.datastore.lck" - Interrupted system call (os error 4)`
+	jobLockedText             = `Unable to acquire lock "/var/lib/proxmox-backup/jobstates/syncjob-pull-offsite.lck" - Interrupted system call (os error 4)`
+)
+
+func TestIsDatastoreConfigLocked(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		err            error
+		want           bool
+		alreadyRunning bool
+	}{
+		{"datastore configuration", apiError(400, datastoreConfigLockedText), true, false},
+		{"without the wrapping", &Error{StatusCode: http.StatusBadRequest, Message: datastoreConfigLockedText}, true, false},
+		{"job state", apiError(400, jobLockedText), false, true},
+		{"other status", apiError(500, datastoreConfigLockedText), false, false},
+		{"maintenance mode", apiError(400, "datastore 'store1' is unavailable: S3 refresh maintenance mode: "), false, false},
+		{"not an API error", errors.New(datastoreConfigLockedText), false, false},
+		{"nil", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsDatastoreConfigLocked(tc.err); got != tc.want {
+				t.Errorf("IsDatastoreConfigLocked(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+			if got := IsTaskAlreadyRunning(tc.err); got != tc.alreadyRunning {
+				t.Errorf("IsTaskAlreadyRunning(%v) = %v, want %v", tc.err, got, tc.alreadyRunning)
+			}
+		})
+	}
+
+	// Nothing else takes the datastore configuration's lock for its own.
+	locked := apiError(400, datastoreConfigLockedText)
+	for name, is := range map[string]func(error) bool{
+		"IsNotFound": IsNotFound, "IsDatastoreUnavailable": IsDatastoreUnavailable, "IsDatastoreNotMounted": IsDatastoreNotMounted,
+		"IsDigestConflict": IsDigestConflict, "IsAlreadyExists": IsAlreadyExists, "IsEndpointMissing": IsEndpointMissing,
+	} {
+		if is(locked) {
+			t.Errorf("%s accepted the lock of the datastore configuration", name)
+		}
+	}
+}

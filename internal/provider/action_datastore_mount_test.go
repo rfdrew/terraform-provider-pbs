@@ -141,14 +141,44 @@ func TestDatastoreUnmountActionUnmounts(t *testing.T) {
 	}
 }
 
-// A datastore that is not mounted is where the action would leave it.
+// A datastore that is not mounted is where the action would leave it. The
+// unmount's own check answers with a capital D; the garbage collection that
+// gc_on_unmount starts answers without when the disk went away in between.
 func TestDatastoreUnmountActionNotMounted(t *testing.T) {
+	for _, answer := range []string{"Datastore 'store1' is not mounted", "datastore 'store1' is not mounted"} {
+		t.Run(answer, func(t *testing.T) {
+			fake := newFakePBS()
+			fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, answer)
+			h := newProtocolHarness(t, fake)
+			got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
+			requireNoProtocolErrors(t, got.diagnostics)
+			requireProgressContaining(t, got, `PBS datastore "store1" is not mounted; there is nothing to unmount`)
+		})
+	}
+}
+
+// A maintenance mode's refusal ends with the mode's message, which may end
+// like PBS's answer for a datastore that is not mounted: the unmount that
+// gc_on_unmount kept from happening must fail, not pass for one with nothing
+// to unmount.
+func TestDatastoreUnmountActionMaintenanceMessageEndsLikeNotMounted(t *testing.T) {
 	fake := newFakePBS()
-	fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, "Datastore 'store1' is not mounted")
+	fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest,
+		"datastore 'store1' is unavailable: read-only maintenance mode: disk 'usb2' is not mounted")
+	fake.reply("GET /config/datastore/store1", http.StatusOK,
+		`{"data":{"name":"store1","path":"store1","backing-device":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",`+
+			`"gc-on-unmount":true,"maintenance-mode":"type=read-only,message=\"disk 'usb2' is not mounted\""}}`)
 	h := newProtocolHarness(t, fake)
 	got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
-	requireNoProtocolErrors(t, got.diagnostics)
-	requireProgressContaining(t, got, `PBS datastore "store1" is not mounted`)
+	requireProtocolErrorContaining(t, got.diagnostics, "Unable to unmount PBS datastore store1")
+	requireProtocolErrorContaining(t, got.diagnostics, "could not start the garbage collection")
+	requireProtocolErrorContaining(t, got.diagnostics, "Clear maintenance mode read-only")
+	requireProtocolErrorContaining(t, got.diagnostics, "gc_on_unmount = false")
+	for _, message := range got.progress {
+		if strings.Contains(message, "nothing to unmount") {
+			t.Fatalf("the refused unmount was reported as one with nothing to do: %q", got.progress)
+		}
+	}
 }
 
 // An unmount that waits for the datastore's operations would block the
@@ -228,10 +258,36 @@ func TestDatastoreUnmountActionAbortedElsewhere(t *testing.T) {
 	got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
 	requireProtocolErrorContaining(t, got.diagnostics, "aborted, due to user request")
 	for _, d := range got.diagnostics {
-		if strings.Contains(d.Summary, "maintenance mode") {
+		if strings.Contains(d.Summary, "maintenance mode") || strings.Contains(d.Detail, "could not check that mode") {
 			t.Fatalf("unexpected diagnostic %q: %s", d.Summary, d.Detail)
 		}
 	}
+}
+
+// maintenanceLockLogLine is what PBS logs when an unmount or an S3 refresh
+// that waited for the datastore's operations could not take the lock of
+// datastore.cfg to reset its maintenance mode after the wait ended.
+const maintenanceLockLogLine = "maintenance mode was not as expected: " + datastoreConfigLockedText
+
+// PBS ends an unmount that waits for the datastore's operations as if it had
+// been stopped when it cannot take the lock of datastore.cfg to check its
+// maintenance mode, and leaves the mode when it cannot take it to reset the
+// mode either, which its log shows: the action explains that.
+func TestDatastoreUnmountActionWaitFailsOnTheDatastoreConfigLock(t *testing.T) {
+	h, fake, _ := newRemovableActionHarness(t, "unmount", func() *fakeTask {
+		return &fakeTask{exit: "aborted, due to user request", log: []string{
+			"waiting for active operations to finsish before continuing: read 0, write 1", maintenanceLockLogLine,
+		}}
+	})
+	fake.reply("GET /config/datastore/store1", http.StatusOK,
+		`{"data":{"name":"store1","path":"store1","backing-device":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","maintenance-mode":"type=unmount"}}`)
+	got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
+	requireProtocolErrorContaining(t, got.diagnostics, `Unmounting PBS datastore "store1" failed`)
+	requireProtocolErrorContaining(t, got.diagnostics, "aborted, due to user request. Unless someone stopped the task")
+	requireProtocolErrorContaining(t, got.diagnostics, "could not check that mode while the task waited for the datastore's operations")
+	requireProtocolErrorContaining(t, got.diagnostics, datastoreConfigLockHolders)
+	requireProtocolErrorContaining(t, got.diagnostics, maintenanceLockLogLine)
+	requireProtocolWarningContaining(t, got.diagnostics, "left in maintenance mode unmount")
 }
 
 // With gc_on_unmount, PBS starts a garbage collection through its proxy
@@ -271,15 +327,89 @@ func TestDatastoreUnmountActionGCDidNotStart(t *testing.T) {
 }
 
 // PBS answers with the context of its garbage collection call only when it
-// cannot reach its proxy.
+// cannot reach its proxy, and with that of the step before when it cannot
+// set up the connection.
 func TestDatastoreUnmountActionGCProxyUnreachable(t *testing.T) {
+	for _, answer := range []string{"unable to start garbage collection before unmount", "failed to connect to localhost for starting GC"} {
+		t.Run(answer, func(t *testing.T) {
+			fake := newFakePBS()
+			fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, answer)
+			h := newProtocolHarness(t, fake)
+			got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
+			requireProtocolErrorContaining(t, got.diagnostics, "Unable to unmount PBS datastore store1")
+			requireProtocolErrorContaining(t, got.diagnostics, "proxmox-backup-proxy")
+			requireProtocolErrorContaining(t, got.diagnostics, "gc_on_unmount = false")
+			requireProtocolErrorContaining(t, got.diagnostics, answer)
+		})
+	}
+}
+
+// Every maintenance mode refuses the garbage collection of gc_on_unmount,
+// and what to do about it depends on the mode, which PBS's reason names: a
+// user clears read-only and offline, while PBS's own tasks behind unmount,
+// s3-refresh and delete are waited for.
+func TestDatastoreUnmountActionGCMaintenanceModes(t *testing.T) {
+	const config = `{"data":{"name":"store1","path":"store1","backing-device":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","gc-on-unmount":true}}`
+	for _, tc := range []struct {
+		name, reason  string
+		want, notWant []string
+	}{
+		{"offline", "offline maintenance mode: disk swap",
+			[]string{"Clear maintenance mode offline", "--delete maintenance-mode", "gc_on_unmount = false"}, nil},
+		{"unmount", "datastore is being unmounted",
+			[]string{"an unmount that is still running", "unmount-device", "clearing the mode stops it", "A failed unmount"},
+			[]string{"Clear maintenance mode"}},
+		{"s3-refresh", "S3 refresh maintenance mode: ",
+			[]string{"a refresh of the datastore from S3", "clearing the mode stops it", "A failed refresh", "--delete maintenance-mode"},
+			[]string{"gc_on_unmount = false"}},
+		{"delete", "datastore is being deleted",
+			[]string{"a deletion of the datastore", "delete-datastore", "there is nothing to unmount", "deleting the datastore again"},
+			[]string{"--delete maintenance-mode", "gc_on_unmount = false"}},
+		// A reason a later release words differently gets the advice for
+		// every mode.
+		{"unknown", "datastore is being renamed",
+			[]string{"read-only and offline", "--delete maintenance-mode", "wait for it to end"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakePBS()
+			fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, "datastore 'store1' is unavailable: "+tc.reason)
+			fake.reply("GET /config/datastore/store1", http.StatusOK, config)
+			h := newProtocolHarness(t, fake)
+			got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
+			requireProtocolErrorContaining(t, got.diagnostics, "could not start the garbage collection")
+			for _, want := range tc.want {
+				requireProtocolErrorContaining(t, got.diagnostics, want)
+			}
+			for _, d := range got.diagnostics {
+				for _, notWant := range tc.notWant {
+					if strings.Contains(d.Detail, notWant) {
+						t.Errorf("the advice for mode %s says %q: %s", tc.name, notWant, d.Detail)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The explanation of a maintenance mode that kept gc_on_unmount's garbage
+// collection from starting follows a maintenance refusal only, never PBS's
+// answer for a datastore that is not mounted, which IsDatastoreUnavailable
+// reports too.
+func TestUnmountErrorDetailNotMounted(t *testing.T) {
 	fake := newFakePBS()
-	fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, "unable to start garbage collection before unmount")
-	h := newProtocolHarness(t, fake)
-	got := h.invokeAction(t, "pbs_datastore_unmount", map[string]any{"store": "store1"})
-	requireProtocolErrorContaining(t, got.diagnostics, "Unable to unmount PBS datastore store1")
-	requireProtocolErrorContaining(t, got.diagnostics, "proxmox-backup-proxy")
-	requireProtocolErrorContaining(t, got.diagnostics, "gc_on_unmount = false")
+	fake.reply("GET /config/datastore/store1", http.StatusOK,
+		`{"data":{"name":"store1","path":"store1","backing-device":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","gc-on-unmount":true}}`)
+	client := fake.configured(t).client
+	for _, answer := range []string{"Datastore 'store1' is not mounted", "datastore 'store1' is not mounted"} {
+		fake.reply("POST /admin/datastore/store1/unmount", http.StatusBadRequest, answer)
+		_, err := client.UnmountDatastore(context.Background(), "store1")
+		if err == nil {
+			t.Fatalf("%q: no error", answer)
+		}
+		if detail := unmountErrorDetail(context.Background(), client, "store1", err); strings.Contains(detail, "could not start the garbage collection") {
+			t.Errorf("%q is explained as a maintenance mode: %s", answer, detail)
+		}
+	}
 }
 
 // With gc_on_unmount, the maintenance mode unmount that a failed umount

@@ -178,8 +178,14 @@ func (p *pbsProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *
 				Optional: true,
 				MarkdownDescription: "Time limit for each HTTP request to the server, as a Go duration such as " +
 					"`30s` or `2m`. Defaults to `30s`. PBS finishes a request even when the provider has stopped " +
-					"waiting for it, so a write that timed out may still have taken effect. May also be set with " +
-					"the `" + envRequestTimeout + "` environment variable.",
+					"waiting for it, so a write that timed out may still have taken effect. Keep it well above 10 " +
+					"seconds: PBS waits up to 10 seconds for the lock of a configuration file before it answers, and " +
+					"the provider tries a call PBS refused for the lock of its datastore configuration again — for " +
+					"about five minutes, while a task such as an S3 refresh holds it — only when it gets that answer. " +
+					"PBS waits for that lock each time a call opens a datastore, though, and the call of " +
+					"`pbs_datastore_status` opens every datastore of the server but removable ones that are not " +
+					"mounted: while a task holds the lock, it takes 10 seconds per datastore, and can outlast this " +
+					"limit. May also be set with the `" + envRequestTimeout + "` environment variable.",
 				Validators: []validator.String{positiveDurationValidator()},
 			},
 			"task_timeout": schema.StringAttribute{
@@ -669,7 +675,9 @@ func providerDataFrom(raw any, diags interface {
 }
 
 // apiErrorDetail explains a failed API call, with advice for the failures
-// that depend on how the provider signs in rather than on the call.
+// that depend on how the provider signs in rather than on the call, and for
+// a call PBS refused because a task held the lock of its datastore
+// configuration, which any call may meet.
 func apiErrorDetail(client *pbsclient.Client, privilege string, err error) string {
 	if pbsclient.IsForbidden(err) {
 		detail := strconv.Quote(client.AuthID()) + " lacks the privilege for this call"
@@ -683,5 +691,41 @@ func apiErrorDetail(client *pbsclient.Client, privilege string, err error) strin
 		}
 		return detail + " " + err.Error()
 	}
+	if pbsclient.IsDatastoreConfigLocked(err) {
+		return datastoreConfigLockAdvice + " " + err.Error()
+	}
 	return err.Error()
 }
+
+// datastoreConfigLockAdvice explains a call PBS refused because a task held
+// the lock of its datastore configuration, which the client tried again for
+// about five minutes, or not at all in the cool-off after it gave up
+// (pbsclient.IsDatastoreConfigLocked and locks.go have the details), and
+// says what to do.
+const datastoreConfigLockAdvice = "A PBS task held the lock of PBS's datastore configuration (" +
+	pbsclient.DatastoreConfigLockFile + ") for longer than PBS waits for it, 10 seconds, and the provider " +
+	"tried the call again for about five minutes — or not at all, when it had given up on the lock already: it " +
+	"then fails the calls PBS refuses for the lock at once, until PBS has refused none for a minute, or one of " +
+	"them succeeds when made again. " + datastoreConfigLockHolders
+
+// taskLockAdvice explains a task that failed because it could not take
+// PBS's lock of its datastore configuration in the 10 seconds PBS waits for
+// it — a sync, verification, prune, garbage collection, unmount, S3 refresh
+// or datastore creation that opens a datastore while another task holds the
+// lock —, or returns "" for any other exit status.
+func taskLockAdvice(exitStatus string) string {
+	if !strings.Contains(exitStatus, pbsclient.DatastoreConfigLockFile) {
+		return ""
+	}
+	return " The task could not take the lock of PBS's datastore configuration within the 10 seconds PBS waits " +
+		"for it, as another PBS task held it. " + datastoreConfigLockHolders
+}
+
+// datastoreConfigLockHolders says why PBS's lock of its datastore
+// configuration matters, which tasks hold it for long, and what to do: for
+// a call PBS refused for it, and for a task that failed on it.
+const datastoreConfigLockHolders = "PBS needs that lock to open any datastore and to change the settings of " +
+	"any. From PBS 4.0.20, an S3 refresh holds it for as long as it reads the bucket — task s3-refresh, or a " +
+	"create-datastore task of a datastore on S3 taken over with `reuse_datastore` —, and in any PBS 4 release a " +
+	"create-datastore task holds it while it creates the chunk store. Wait for the s3-refresh or " +
+	"create-datastore task to end (Administration → Tasks in the web interface), then run Terraform again."

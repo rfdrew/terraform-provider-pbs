@@ -64,9 +64,29 @@ func splitACLID(id string) (path, authID, role string, ok bool) {
 	return id[:first], id[first+1 : last], id[last+1:], true
 }
 
-// aclReadPrivilege is what reading every ACL entry needs: without it, PBS
-// shows a caller only the entries of its own API tokens.
+// aclReadPrivilege is what reading every ACL entry needs. Without it, PBS
+// shows a user signed in with its password only the entries of its own API
+// tokens, neither its own nor a group's, and an API token none at all, not
+// even its own; it answers with what it shows, as a success, never a 403
+// (src/api2/access/acl.rs, read_acl and extract_acl_node_data,
+// proxmox-backup 7c86c5ad5, after 4.2.11).
 const aclReadPrivilege = "Sys.Audit on /access/acl"
+
+// rootUserID is the superuser, which always has every privilege. PBS takes
+// an ACL entry for it without an error but leaves it out when it saves
+// acl.cfg ("no need to save, because root is always 'Administrator'",
+// pbs-config/src/acl.rs, write_node_config, proxmox-backup 7c86c5ad5, after
+// 4.2.11); the entries of its API tokens it keeps.
+const rootUserID = "root@pam"
+
+// aclAuthIDNotRoot refuses an entry for root@pam itself, which PBS would
+// never store: every refresh would find it gone and every apply create it
+// again.
+var aclAuthIDNotRoot = stringCheck{
+	description: "must not be root@pam: it always has every privilege, and PBS stores no ACL entry for it, so " +
+		"the entry would be created again on every apply (root@pam's API tokens, such as root@pam!ci, are fine)",
+	check: func(s string) bool { return s != rootUserID },
+}
 
 func (r *aclResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_acl"
@@ -88,9 +108,12 @@ func (r *aclResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"changes, so a new role may take that long to work after the apply, and a removed one to stop " +
 			"working.\n\n" +
 			"Creating an entry that already exists fails, so that Terraform does not take over, and later delete, " +
-			"an entry it did not create: import it instead. Managing ACL entries needs " + aclModifyPrivilege +
-			", and reading them all " + aclReadPrivilege + "; without it, PBS shows only the entries of the " +
-			"caller's own API tokens, and the others would appear deleted.",
+			"an entry it did not create: import it instead.\n\n" +
+			"Managing ACL entries needs " + aclModifyPrivilege + ", which only the `Admin` role grants, and " +
+			"reading them all " + aclReadPrivilege + ", which `Admin` includes. Without them, PBS lets a user " +
+			"signed in with its password see and change only the entries of its own API tokens, and an API " +
+			"token none at all. Refreshing an entry the provider cannot see then fails rather than drop it " +
+			"from state, and so does importing one.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true,
@@ -111,9 +134,10 @@ func (r *aclResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"auth_id": schema.StringAttribute{
 				Required: true,
 				MarkdownDescription: "User ID, such as `alice@pbs`, or API token ID, such as `alice@pbs!ci` — the " +
-					"`tokenid` of a `pbs_api_token` — the role is granted to. The user or token must exist. " +
-					"Changing it replaces the entry.",
-				Validators:    authIDValidators(),
+					"`tokenid` of a `pbs_api_token` — the role is granted to. The user or token must exist. Not " +
+					"`root@pam`, which always has every privilege and for which PBS stores no entry; its API " +
+					"tokens are fine. Changing it replaces the entry.",
+				Validators:    append(authIDValidators(), aclAuthIDNotRoot),
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"role": schema.StringAttribute{
@@ -257,14 +281,30 @@ func (r *aclResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 	recordACLIdentity(ctx, resp.Identity, state, &resp.Diagnostics)
 	aclPath, authID, role := state.Path.ValueString(), state.AuthID.ValueString(), state.Role.ValueString()
 
-	entries, _, err := r.data.client.ListACL(ctx, aclPath, true)
+	client := r.data.client
+	entries, _, err := client.ListACL(ctx, aclPath, true)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to read PBS ACL entries", apiErrorDetail(r.data.client, aclReadPrivilege, err))
+		// PBS lets everyone read the ACL, so this is not about privileges.
+		resp.Diagnostics.AddError("Unable to read PBS ACL entries", err.Error())
 		return
 	}
 	entry, ok := findACLEntry(entries, aclPath, authID, role)
 	if !ok {
-		resp.State.RemoveResource(ctx)
+		// PBS leaves out, as a success, the entries a caller without
+		// Sys.Audit on /access/acl may not see, so an entry it does not list
+		// is gone only if the provider may see it.
+		visible, err := aclEntriesVisible(ctx, client, authID)
+		switch {
+		case err != nil:
+			resp.Diagnostics.AddError("Unable to read PBS ACL entries",
+				fmt.Sprintf("PBS did not list the role %s of %s on %s. It does not show every caller every entry, so "+
+					"the provider reads its own privileges on /access/acl to tell whether the entry is gone, and that "+
+					"failed. %s", role, authID, aclPath, err))
+		case !visible:
+			resp.Diagnostics.AddError("Unable to read PBS ACL entry", aclHiddenDetail(client, aclPath, authID, role, state.Propagate.IsNull()))
+		default:
+			resp.State.RemoveResource(ctx)
+		}
 		return
 	}
 	state.ID = types.StringValue(aclID(aclPath, authID, role))
@@ -310,7 +350,7 @@ func (r *aclResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 	}
 	err := client.WithConfigLock(pbsclient.ConfigACL, func() error { return client.UpdateACL(ctx, change) })
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to delete PBS ACL entry", apiErrorDetail(client, aclModifyPrivilege, err))
+		resp.Diagnostics.AddError("Unable to delete PBS ACL entry", aclModifyErrorDetail(client, err))
 	}
 }
 
@@ -321,7 +361,59 @@ func aclErrorDetail(client *pbsclient.Client, authID string, err error) string {
 	if pbsclient.IsNotFound(err) {
 		return fmt.Sprintf("PBS has no user or API token %q to grant the role to. %s", authID, err)
 	}
+	return aclModifyErrorDetail(client, err)
+}
+
+// aclModifyErrorDetail explains a failed change of an ACL entry. PBS refuses
+// a caller without Permissions.Modify on /access/acl with a 400 "Unprivileged
+// ...", not a 403, which the detail turns into the privilege it lacks.
+func aclModifyErrorDetail(client *pbsclient.Client, err error) string {
+	if pbsclient.IsUnprivilegedACLChange(err) {
+		return fmt.Sprintf("%q lacks %s, which only the Admin role grants: without it, PBS lets a user signed in "+
+			"with its password change only the ACL entries of its own API tokens, and an API token none at all. %s",
+			client.AuthID(), aclModifyPrivilege, err)
+	}
 	return apiErrorDetail(client, aclModifyPrivilege, err)
+}
+
+// aclEntriesVisible reports whether PBS shows the client the ACL entries of
+// authID. With Sys.Audit on /access/acl it shows every entry. Without it, it
+// shows a user signed in with its password the entries of its own API
+// tokens, which needs no call to know, and an API token none at all
+// (src/api2/access/acl.rs, read_acl, proxmox-backup 7c86c5ad5, after
+// 4.2.11). GET /access/permissions of the client itself on /access/acl
+// answers the very privileges read_acl looks up, and every caller may ask it.
+func aclEntriesVisible(ctx context.Context, client *pbsclient.Client, authID string) (bool, error) {
+	if !client.UsesAPIToken() {
+		if owner, _, ok := pbsclient.SplitTokenID(authID); ok && owner == client.AuthID() {
+			return true, nil
+		}
+	}
+	permissions, err := client.Permissions(ctx, "", "/access/acl")
+	if err != nil {
+		return false, err
+	}
+	_, ok := permissions["/access/acl"]["Sys.Audit"]
+	return ok, nil
+}
+
+// aclHiddenDetail explains why the provider cannot tell whether an entry PBS
+// did not list still exists: PBS hides it from the client.
+func aclHiddenDetail(client *pbsclient.Client, path, authID, role string, importing bool) string {
+	outcome := "The entry stays in state as it was, rather than be planned for creation again, which PBS would refuse."
+	if importing {
+		outcome = "The entry is not imported."
+	}
+	grantee := strconv.Quote(client.AuthID())
+	if client.UsesAPIToken() {
+		grantee += " and to its user"
+	}
+	return fmt.Sprintf("PBS did not list the role %s of %s on %s, but it hides that entry from %q whether it exists "+
+		"or not: without %s, PBS shows a user signed in with its password only the ACL entries of its own API "+
+		"tokens, and an API token none at all. So the provider cannot tell whether the entry still exists. %s "+
+		"Managing ACL entries needs %s, which only the Admin role grants, and %s, which Admin includes: grant "+
+		"Admin on /access/acl to %s, or manage the entry with a provider that has it.",
+		role, authID, path, client.AuthID(), aclReadPrivilege, outcome, aclModifyPrivilege, aclReadPrivilege, grantee)
 }
 
 // recordACLIdentity records the entry's identity.
@@ -333,7 +425,8 @@ func recordACLIdentity(ctx context.Context, identity *tfsdk.ResourceIdentity, m 
 
 // ImportState imports an entry by its ID, path|auth_id|role, or from
 // Terraform 1.12 by the identity of an import block. Read drops an entry
-// that does not exist, which Terraform reports.
+// that does not exist, which Terraform reports, and fails for one PBS does
+// not show the provider, saying why.
 func (r *aclResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	id, values, byIdentity := importedID(ctx, req, &resp.Diagnostics, "path", "auth_id", "role")
 	if resp.Diagnostics.HasError() {

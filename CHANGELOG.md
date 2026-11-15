@@ -9,7 +9,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Actions, which need Terraform 1.14.1 or later, and list resources, which need
 Terraform 1.14 or later; OpenTofu supports neither yet. With older Terraform
 and with OpenTofu the provider works as in 0.4.0, apart from the changes and
-fixes below, and configurations written for 0.4.0 work unchanged.
+fixes below, and configurations written for 0.4.0 work unchanged, except a
+`pbs_acl` for `root@pam` itself, which PBS never stored (see Changed).
 
 ### Added
 
@@ -36,15 +37,25 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   it starts; unmounting a datastore that is not mounted succeeds, and an
   unmount that still waits for the datastore's operations when the action
   stops waiting is stopped, which leaves the datastore mounted. With
-  `gc_on_unmount`, the unmount explains a maintenance mode that keeps PBS
-  from starting the garbage collection it runs first.
+  `gc_on_unmount`, an unmount that a maintenance mode keeps PBS from
+  starting the garbage collection it runs first fails, whatever the mode's
+  message says, and says what to do about that mode: clear `read-only` or
+  `offline`, or wait for the unmount, refresh from S3 or deletion PBS runs.
 - `pbs_datastore_s3_refresh` action: reads a datastore's contents from its S3
   bucket into its local cache, empty namespaces from PBS 4.1.5. It refuses a
   datastore that is not on S3, which PBS would leave in maintenance mode
   `s3-refresh`, and says how to clear that mode after a failed refresh. Its
   page describes the cases PBS supports — objects removed from the bucket by
   hand, a damaged cache — and warns that two PBS must never share one
-  datastore.
+  datastore. The provider's refreshes run one at a time, and a `pbs_datastore`
+  on S3 created with `reuse_datastore` waits for them: from PBS 4.0.20 the
+  task of a refresh started while another one reads its bucket can fail on
+  PBS's lock and leave its datastore in maintenance mode `s3-refresh`. A
+  refresh with `wait = false`, past its `timeout`, or started outside
+  Terraform is not waited for. Other datastores the provider creates do not
+  wait for refreshes: one whose creation holds PBS's lock for more than 10
+  seconds can make a refresh that still waits for its datastore's operations
+  fail and leave `s3-refresh`.
 - `pbs_s3_endpoint_check` action: has PBS reach a bucket through an S3
   endpoint and write, read and delete a test object, and explains the step
   that failed, which is all PBS reports.
@@ -58,7 +69,9 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   It always waits for the renewal, so that, like `pbs_node_certificate`, it
   trusts the new certificate for the rest of the run; it says when
   `tls_cert_fingerprint` or fingerprints pinned by Proxmox VE need the new
-  one, and fails when the PBS proxy keeps serving the previous certificate.
+  one. It fails when the PBS proxy keeps serving the certificate it served
+  before, and warns when that was not the one PBS reported then; a failed
+  renewal names the cause PBS's task reports.
 - `pbs_apt_update` action: refreshes the node's package lists, as
   **Refresh** under Updates does, and reports the updates PBS then lists.
   Failures of `apt-get update` are warnings: those that make apt-get fail,
@@ -109,6 +122,45 @@ fixes below, and configurations written for 0.4.0 work unchanged.
 
 ### Changed
 
+- `pbs_acl` refuses `auth_id = "root@pam"` at validation: remove such a
+  resource from the configuration. PBS accepts the entry but never stores it,
+  since `root@pam` always has every privilege, so every apply created it
+  again. Entries for `root@pam`'s API tokens work as before.
+- `pbs_datastore`: `gc_on_unmount` plans on PBS 4.1.8 and later, the release
+  that added it, instead of only from PBS 4.2.
+- Calls PBS refuses because a task holds the lock of its datastore
+  configuration — 400 `Unable to acquire lock
+  "/etc/proxmox-backup/.datastore.lck"`, which PBS answers after waiting 10
+  seconds — are tried again for about five minutes instead of failing, so
+  such a call can now take minutes. PBS needs that lock to open any datastore
+  and to change the settings of any: from PBS 4.0.20 an S3 refresh holds it
+  for as long as it reads its bucket — `pbs_datastore_s3_refresh`, a
+  `pbs_datastore` on S3 created with `reuse_datastore`, or a refresh started
+  outside Terraform —, and in any PBS 4 release a datastore's creation holds
+  it while it creates the chunk store. One request at a time checks whether
+  the lock is free, and the calls that take turns at it give up together,
+  after about five minutes. Once the provider gave up, calls PBS refuses for
+  the lock fail at once until a minute passes without such a refusal, or one
+  of them succeeds when made again; other calls, which PBS answers without
+  the lock, do not end that. When the task outlasts the retries, and when a
+  task fails on the lock, the error names the kinds of task that hold it —
+  `s3-refresh` and `create-datastore` — and says to wait for them under
+  Administration → Tasks. That includes an unmount or S3 refresh that PBS ends
+  with "aborted, due to user request" when its log shows that it could not
+  take the lock to check, and then to reset, the maintenance mode while it
+  waited for the datastore's operations.
+  A `pbs_datastore` whose create task fails on the lock — PBS had saved the
+  datastore by then, on S3 with `reuse_datastore` in maintenance mode
+  `s3-refresh` — is recorded in state with a warning, also when reading it
+  back fails. Keep `request_timeout` well above 10 seconds for the retry to
+  see PBS's answer.
+- `pbs_datastore_status`: PBS opens every datastore of the server for it,
+  waiting 10 seconds for the lock of its datastore configuration for each
+  while a task such as an S3 refresh holds it. A datastore it could not open
+  for that lock has PBS's refusal as `error`, now with a warning that says
+  which tasks hold the lock, and a read that timed out says the lock can be
+  why. The not-found error says that PBS leaves out a datastore it cannot
+  open for a caller with privileges on its namespaces only.
 - `pbs_notification_endpoint_webhook`: a JSON `body` that differs from the
   one PBS holds only in its layout — spacing, the order of keys, escapes —
   is no change. Terraform writes a JSON body as `jsonencode(…)` when it
@@ -136,6 +188,85 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   upload then fails, the warning says how to update the provider's TLS
   settings, such as a pinned `tls_cert_fingerprint`, instead of saying that
   the next apply would warn, which no apply did.
+- `pbs_node_certificate`: ordering an ACME certificate fails, and records
+  nothing, when PBS's proxy still serves the certificate it served before the
+  order, as uploading a custom certificate already did. PBS writes the new
+  certificate and ends its task OK even when its proxy cannot load it — keys
+  too weak for a raised `@SECLEVEL` in `ciphers_tls_1_2`, say —; the proxy
+  only logs "error reloading certificate", and does not start again at its
+  next restart. The apply used to record the new certificate and say how to
+  pin or trust it, though the node did not serve it. Destroying the resource
+  fails the same way, and keeps it in state. While the proxy serves the
+  certificate state recorded, a refresh keeps it, with a warning, instead of
+  recording the one PBS wrote: after a failed order, upload or destroy, the
+  next apply therefore tries again, and fails again until the proxy loads the
+  certificate — before, a custom certificate the proxy had not loaded was
+  recorded on the next refresh and planned no change —; after a renewal of
+  PBS's daily update that the proxy could not load, nothing is planned, and
+  each refresh warns until the proxy is reloaded. When the certificate the proxy served before the change was neither
+  the one PBS reported then nor the one state recorded — behind a TLS front
+  end, say —, the order, upload or destroy warns, naming both, instead of
+  saying how to trust the new one. A custom certificate the proxy did not load
+  on creation no longer comes with the advice to destroy a resource that was
+  never recorded. Behind an HTTPS forward proxy — an `https://` URL in
+  `HTTPS_PROXY` —, the provider looks at PBS's certificate through the proxy,
+  whose own certificate it verifies as for any other call.
+- `pbs_node_certificate`: a failed order names the cause PBS's task reports —
+  the CA could not validate a domain, refused the order or rate-limited it;
+  PBS could not reach the CA, which it never reaches through the node's
+  `http_proxy`; the node's DNS plugin failed; another service or order holds
+  port 80; a domain names a plugin PBS does not have; the node's ACME account
+  went away, or the CA does not know it or refuses it as deactivated or
+  revoked; PBS could not write the certificate the CA issued — instead of
+  always saying that the CA issued none, and ends with the end of the task's
+  log. When the provider stops waiting for the order, after `task_timeout` or
+  when Terraform is interrupted, the error says that the task goes on in PBS,
+  and that the next apply orders another certificate, which counts against
+  the CA's rate limits. Uploading a custom certificate whose request failed
+  after PBS wrote it warns that the proxy may need
+  `systemctl reload proxmox-backup-proxy`, with PBS's error, instead of
+  failing with a message about a certificate the proxy could not load. The
+  documentation of `pbs_node_config`'s `http_proxy` says that PBS orders and
+  renews ACME certificates without it.
+- `pbs_acl`: refreshing or importing an entry PBS hides from the provider
+  fails with an explanation instead of reporting the entry deleted. Without
+  `Sys.Audit` on `/access/acl`, PBS shows an API token no ACL entries at all
+  and a user signed in with its password only those of its own API tokens.
+  Before, the plan created the entry again, which PBS refused, and the entry
+  fell out of state. The documentation of the resource and the data source
+  says what PBS shows without `Sys.Audit`.
+- `pbs_acl` and `pbs_user`: when PBS refuses to change an ACL entry because
+  the provider lacks `Permissions.Modify` on `/access/acl`, the error names
+  that privilege, which only the `Admin` role grants. PBS answers with a 400
+  "Unprivileged …", not a 403, so the error used to show only PBS's text.
+  Likewise `pbs_permissions` names `Sys.Audit` on `/access` when PBS refuses
+  to read another user's or token's privileges with a 400 "not allowed to
+  list permissions of …", and its documentation adds that a user signed in
+  with its password may read its own API tokens' privileges without it.
+- `pbs_acl` data source with `path = "/"` and no `exact`: entries below the
+  root keep their paths, such as `/datastore/store1`, instead of the
+  `//datastore/store1` PBS answers when asked for that path.
+- `pbs_namespace`: destroying a namespace whose datastore a maintenance mode
+  closes reports the maintenance mode also when the mode's message contains
+  the words PBS uses for a namespace that still holds backups.
+  `pbs_namespace`, `pbs_namespaces` and `pbs_gc_status` name every
+  maintenance mode that keeps PBS from reading a datastore,
+  including those PBS sets while it unmounts, refreshes from S3 or deletes
+  one, not only `offline`.
+- `pbs_datastore`: a destroy whose delete-datastore task failed on PBS's lock
+  of its datastore configuration no longer claims that PBS keeps the
+  datastore in maintenance mode `delete` when the task could not start
+  deleting: the error says what PBS did — it had already deleted the
+  datastore's jobs and ACL entries unless `keep_job_configs` is set — and
+  which tasks to wait for.
+- The provider: an `endpoint` whose host name has capital letters, such as
+  `https://PBS.example.com:8007`, no longer has its TLS handshake taken for an
+  HTTPS proxy's and verified against the system's CAs, which failed every call
+  with `tls_cert_fingerprint` and new connections after a certificate change.
+- `pbs_datastore` and the guide **Back up to S3 object storage**: after a
+  failed S3 refresh, the advice names the `pbs_datastore_s3_refresh` action
+  and the web interface first, as `proxmox-backup-manager datastore
+  s3-refresh` ends with a panic on PBS 4.0.20 to 4.1.1.
 
 ## [0.4.0] - 2026-11-08
 

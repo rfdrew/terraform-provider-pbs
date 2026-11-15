@@ -112,7 +112,12 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"the provider may not read, and a namespace it cannot see is planned to be created again. While a " +
 			"removable datastore is not mounted, or a maintenance mode closes the datastore, its namespaces " +
 			"cannot be read — a refresh keeps them as they are in state, with a warning — nor created, imported " +
-			"or destroyed.",
+			"or destroyed. From PBS 4.0.20, while PBS refreshes a datastore on S3 from its bucket — the " +
+			"`pbs_datastore_s3_refresh` action, a `pbs_datastore` taken over with `reuse_datastore`, or a refresh " +
+			"started outside Terraform —, it cannot open any datastore: reading, creating, importing and destroying " +
+			"namespaces wait for it, as the provider tries again for about five minutes, then fail, naming the " +
+			"kinds of task that hold PBS's lock of its datastore configuration — an S3 refresh (`s3-refresh`) or a " +
+			"datastore's creation (`create-datastore`) — to wait for.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -210,7 +215,10 @@ func (r *namespaceResource) Create(ctx context.Context, req resource.CreateReque
 	// Opening a datastore takes PBS's lock on datastore.cfg, which a datastore
 	// on S3 holds while PBS reads its backups from the bucket — for minutes,
 	// when a pbs_datastore takes one over — and PBS gives up after 10
-	// seconds: the provider's own lock waits for that instead.
+	// seconds: the provider's own lock waits for a datastore this provider
+	// takes over, and the client tries a call PBS refused for the lock again
+	// for about five minutes (pbsclient.IsDatastoreConfigLocked), which
+	// covers refreshes from elsewhere.
 	var existed bool
 	err := client.WithConfigLock(pbsclient.ConfigDatastores, func() error {
 		var err error
@@ -254,8 +262,9 @@ func namespaceErrorDetail(client *pbsclient.Client, store, ns, privilege string,
 	case pbsclient.IsNotFound(err):
 		return fmt.Sprintf("PBS has no datastore %q. %s", store, err)
 	case pbsclient.IsDatastoreUnavailable(err):
-		return fmt.Sprintf("PBS cannot open datastore %q: a removable datastore must be mounted, and a maintenance "+
-			"mode may forbid the operation — \"offline\" any, \"read-only\" changes. %s", store, err)
+		return fmt.Sprintf("PBS cannot open datastore %q: a removable datastore must be mounted, and its maintenance "+
+			"mode may forbid the operation — \"offline\" any, \"read-only\" changes, and PBS blocks the datastore "+
+			"while it unmounts it, refreshes it from S3 or deletes it. %s", store, err)
 	case strings.Contains(message, "doesn't already exist"):
 		parent, _ := pbsclient.SplitNamespace(ns)
 		return fmt.Sprintf("PBS creates a namespace only below a parent that exists, and datastore %q has no "+
@@ -286,15 +295,17 @@ func (r *namespaceResource) Read(ctx context.Context, req resource.ReadRequest, 
 		// Only an import leaves the options that exist in Terraform alone
 		// null: a namespace that cannot be looked up is not imported.
 		resp.Diagnostics.AddError("Unable to import PBS namespace",
-			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in "+
-				"maintenance mode \"offline\" —, so whether it has namespace %q cannot be checked. Mount the "+
+			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in a "+
+				"maintenance mode that forbids reading: \"offline\", or one PBS sets while it unmounts the datastore, "+
+				"refreshes it from S3 or deletes it —, so whether it has namespace %q cannot be checked. Mount the "+
 				"datastore or end the maintenance, and import again. %s", store, ns, err))
 		return
 	case pbsclient.IsDatastoreUnavailable(err):
 		tflog.Info(ctx, "PBS cannot open the datastore of the namespace", map[string]any{"store": store, "error": err.Error()})
 		resp.Diagnostics.AddWarning("Unable to check PBS namespace",
-			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in "+
-				"maintenance mode \"offline\" — so whether namespace %q still exists is unknown; it stays in "+
+			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in a "+
+				"maintenance mode that forbids reading: \"offline\", or one PBS sets while it unmounts the datastore, "+
+				"refreshes it from S3 or deletes it — so whether namespace %q still exists is unknown; it stays in "+
 				"state as it was. %s", store, ns, err))
 		state.fillDefaults()
 		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -355,6 +366,16 @@ func (r *namespaceResource) Delete(ctx context.Context, req resource.DeleteReque
 	case pbsclient.IsNotFound(err):
 		// The datastore is gone, and the namespace with it.
 		return
+	case pbsclient.IsDatastoreUnavailable(err):
+		// Before the texts below: a maintenance refusal ends with the mode's
+		// free-text message, which may say anything.
+		resp.Diagnostics.AddError("Unable to delete PBS namespace",
+			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in a "+
+				"maintenance mode — to delete namespace %q from it. Mount the datastore or end the maintenance. "+
+				"If the disk of a removable datastore is not coming back, take the namespace out of state, with "+
+				"`terraform state rm` or a removed block with destroy = false: PBS deletes the datastore itself "+
+				"without its disk, as long as destroy_data is false. %s", store, ns, err))
+		return
 	case strings.Contains(message, "due to existing groups"):
 		resp.Diagnostics.AddError("Unable to delete PBS namespace",
 			fmt.Sprintf("Namespace %q of datastore %q, or a namespace below it, holds backups, and PBS deletes "+
@@ -363,14 +384,6 @@ func (r *namespaceResource) Delete(ctx context.Context, req resource.DeleteReque
 				"namespace. To keep them — when the namespace is replaced because its datastore is renamed with "+
 				"reuse_datastore, which keeps them anyway, except on S3 —, take the namespace out of state instead, with "+
 				"`terraform state rm` or a removed block with destroy = false. %s", ns, store, err))
-		return
-	case pbsclient.IsDatastoreUnavailable(err):
-		resp.Diagnostics.AddError("Unable to delete PBS namespace",
-			fmt.Sprintf("PBS cannot open datastore %q — a removable datastore that is not mounted, or one in a "+
-				"maintenance mode — to delete namespace %q from it. Mount the datastore or end the maintenance. "+
-				"If the disk of a removable datastore is not coming back, take the namespace out of state, with "+
-				"`terraform state rm` or a removed block with destroy = false: PBS deletes the datastore itself "+
-				"without its disk, as long as destroy_data is false. %s", store, ns, err))
 		return
 	case strings.Contains(message, "protected snapshots"):
 		resp.Diagnostics.AddError("Unable to delete PBS namespace",
