@@ -138,7 +138,8 @@ func TestServicesDataSourceExplainsAMissingPrivilege(t *testing.T) {
 var servicesOrder = []string{"proxmox-backup", "proxmox-backup-proxy", "sshd", "systemd-journald", "cron", "postfix", "chrony"}
 
 // The services the data source reads are those the client reads, in the same
-// order — none on a stand without systemd, such as the Docker image — and
+// order — none on a stand without systemd, such as the Docker image, and
+// some on the packages stand, which runs systemd and D-Bus — and
 // in the order the documentation gives.
 func TestAccServicesDataSource(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
@@ -157,7 +158,13 @@ func TestAccServicesDataSource(t *testing.T) {
 	for _, s := range listed {
 		ids = append(ids, s.Service)
 	}
-	if len(ids) == 0 {
+	switch {
+	case len(ids) == 0 && os.Getenv(envAccVariant) == "packages":
+		// The packages stand boots systemd, with D-Bus, which PBS's proxy
+		// needs to read the state of services as user backup.
+		t.Fatal("PBS lists no services on the packages stand, which boots systemd: is dbus installed and running " +
+			"in the container?")
+	case len(ids) == 0:
 		t.Log("the stand lists no services: it runs without systemd")
 	}
 

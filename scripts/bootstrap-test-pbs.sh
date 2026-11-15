@@ -413,12 +413,16 @@ build_packages_image() {
   # so that the log also tells which releases the repository still serves.
   # proxmox-backup-client comes along to write test backups, e2fsprogs to
   # make the file system for removable datastores, and ifupdown2, which PBS
-  # only recommends, to apply network changes.
+  # only recommends, to apply network changes. dbus, which systemd only
+  # recommends, as a node has it: PBS's proxy, which runs as user backup,
+  # reads the state of services with `systemctl show`, which reaches systemd
+  # over D-Bus unless it runs as root; without it, PBS lists no services and
+  # the service actions find none.
   cat >"$ctx/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends ca-certificates curl systemd systemd-sysv \\
+ && apt-get install -y --no-install-recommends ca-certificates curl systemd systemd-sysv dbus \\
  && curl -fsSL -o /usr/share/keyrings/proxmox-archive-keyring.gpg \\
       https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \\
  && printf '%s\n' 'Types: deb' 'URIs: http://download.proxmox.com/debian/pbs' 'Suites: trixie' \\

@@ -193,18 +193,21 @@ func TestServiceActionsCheckTheStateFirst(t *testing.T) {
 }
 
 // Without systemd — PBS in a Docker container — the state cannot be read,
-// and the action says why before PBS runs a command that would fail.
+// and the action says why before PBS runs a command that would fail. A null
+// state — systemd there, but out of reach of PBS's proxy without D-Bus —
+// names both causes.
 func TestServiceActionsWithoutSystemd(t *testing.T) {
 	h, _, services, _ := newServiceHarness(t)
 	services.configure(func(s *fakeServices) { s.noSystemd = true })
 	got := h.invokeAction(t, "pbs_service_restart", map[string]any{"service": "postfix"})
 	requireProtocolErrorContaining(t, got.diagnostics, "Unable to read the state of service postfix on PBS node localhost")
 	requireProtocolErrorContaining(t, got.diagnostics, "systemctl show failed with exit status: 1")
-	requireProtocolErrorContaining(t, got.diagnostics, "such as PBS in a Docker container")
+	requireProtocolErrorContaining(t, got.diagnostics, "as PBS in a Docker container may")
 
 	services.configure(func(s *fakeServices) { s.noSystemd, s.nullState = false, true })
 	got = h.invokeAction(t, "pbs_service_start", map[string]any{"service": "chrony"})
 	requireProtocolErrorContaining(t, got.diagnostics, "PBS answered no state")
+	requireProtocolErrorContaining(t, got.diagnostics, "without D-Bus")
 	requireCommands(t, services)
 }
 

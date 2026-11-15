@@ -8,9 +8,11 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"testing"
+	"time"
 
 	acc "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -33,8 +35,8 @@ import (
 // name in the directory that holds the stand's datastore, which PBS refuses
 // in the task, "nested datastores not allowed". Should PBS ever create it,
 // the test fails, and the datastore's configuration is removed without its
-// data: the directory is the stand's.
-func testAccFailingTask(t *testing.T, name string) {
+// data: the directory is the stand's. It returns the task's UPID.
+func testAccFailingTask(t *testing.T, name string) string {
 	t.Helper()
 	client, err := testAccClient()
 	if err != nil {
@@ -54,7 +56,7 @@ func testAccFailingTask(t *testing.T, name string) {
 	var taskErr *pbsclient.TaskError
 	switch {
 	case errors.As(err, &taskErr):
-		return
+		return upid.Raw
 	case err == nil:
 		if err := client.DeleteDatastore(ctx, name, pbsclient.DatastoreDeletion{}); err != nil {
 			t.Errorf("removing the configuration of datastore %s: %v", name, err)
@@ -64,6 +66,68 @@ func testAccFailingTask(t *testing.T, name string) {
 	default:
 		t.Fatalf("creating datastore %s in %s: %v", name, parent, err)
 	}
+	return ""
+}
+
+// testAccLogTaskListings logs, without failing, how PBS lists the task upid
+// right now: with the filters of the test's data source of failed tasks, and
+// with fewer of them, and the first tasks of the unfiltered list in PBS's
+// order with how they ended. On the packages stands, CI once saw that data
+// source find the task in one step and lose it seconds later; these lines
+// say which filter drops it.
+func testAccLogTaskListings(t *testing.T, upid, tokenID string) {
+	t.Helper()
+	client, err := testAccClient()
+	if err != nil {
+		t.Logf("task listings: %v", err)
+		return
+	}
+	ctx := context.Background()
+	since := time.Now().Add(-time.Hour).Unix()
+	variants := []struct {
+		name string
+		f    pbsclient.TaskListFilter
+	}{
+		{"as the data source", pbsclient.TaskListFilter{TypeFilter: "create-datastore", UserFilter: tokenID,
+			Statuses: []string{"error"}, Since: &since}},
+		{"without since", pbsclient.TaskListFilter{TypeFilter: "create-datastore", UserFilter: tokenID,
+			Statuses: []string{"error"}}},
+		{"without status", pbsclient.TaskListFilter{TypeFilter: "create-datastore", UserFilter: tokenID, Since: &since}},
+		{"since only", pbsclient.TaskListFilter{Since: &since}},
+		{"no filter", pbsclient.TaskListFilter{}},
+	}
+	for _, v := range variants {
+		tasks, err := client.ListTasks(ctx, client.Node(), v.f)
+		if err != nil {
+			t.Logf("task listings, %s: %v", v.name, err)
+			continue
+		}
+		found := "missing"
+		for i, task := range tasks {
+			if task.UPID == upid {
+				found = fmt.Sprintf("at %d, status %s", i, testAccTaskStatusText(task))
+			}
+		}
+		t.Logf("task listings, %s: %d tasks, the failed creation %s", v.name, len(tasks), found)
+		if v.name == "no filter" {
+			for i, task := range tasks[:min(len(tasks), 40)] {
+				end := "running"
+				if task.EndTime != nil {
+					end = time.Unix(*task.EndTime, 0).UTC().Format(time.RFC3339)
+				}
+				t.Logf("  %2d %s start %s end %s status %s", i, task.UPID,
+					time.Unix(task.StartTime, 0).UTC().Format(time.RFC3339), end, testAccTaskStatusText(task))
+			}
+		}
+	}
+}
+
+// testAccTaskStatusText is a listed task's status, or "running".
+func testAccTaskStatusText(task pbsclient.TaskListItem) string {
+	if task.Status == nil {
+		return "running"
+	}
+	return *task.Status
 }
 
 // testAccTaskUser creates a user with an API token, neither with a role
@@ -210,12 +274,19 @@ data "pbs_tasks" "limited" {
   limit    = 0
 }
 `, limitedTokenID+":"+limitedSecret)
+	// The failed creation is named by its UPID, not looked up in
+	// data.pbs_tasks.failed: that data source found it in step 2 but, on the
+	// packages stands, lost it seconds later (see testAccLogTaskListings).
+	// Step 2 writes the UPID to a file, which the configuration reads when
+	// it is planned: it is built before the task exists.
+	var failUPID string
+	upidFile := filepath.Join(t.TempDir(), "failed-task-upid")
 	denied := limitedReads + fmt.Sprintf(`
 data "pbs_task" "denied" {
   provider = pbs.limited
-  upid     = one([for t in data.pbs_tasks.failed.tasks : t.upid if t.worker_id == %q])
+  upid     = trimspace(file(%q))
 }
-`, failName)
+`, upidFile)
 
 	acc.Test(t, acc.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -226,7 +297,10 @@ data "pbs_task" "denied" {
 			{
 				PreConfig: func() {
 					testAccDatastoreTask(t, name, "gc")
-					testAccFailingTask(t, failName)
+					failUPID = testAccFailingTask(t, failName)
+					if err := os.WriteFile(upidFile, []byte(failUPID), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				},
 				Config: reads,
 				Check: acc.ComposeAggregateTestCheckFunc(
@@ -280,9 +354,11 @@ data "pbs_task" "denied" {
 				// creation of a datastore is no job's, and the token's user
 				// did not start it.
 				PreConfig: func() {
+					testAccLogTaskListings(t, failUPID, tokenID)
 					testAccMustGrant(t, "/datastore/"+name, userID, "DatastoreAdmin")
 					testAccMustGrant(t, "/datastore/"+name, limitedTokenID, "DatastoreAdmin")
 					testAccWaitForACLCache()
+					testAccLogTaskListings(t, failUPID, tokenID)
 				},
 				Config:      denied,
 				ExpectError: regexp.MustCompile(`may\s+not\s+read\s+task|task\s+access\s+not\s+allowed`),
@@ -290,7 +366,8 @@ data "pbs_task" "denied" {
 			// Last, so that the destroy, which reads the data sources
 			// first, does not meet the failing one.
 			{
-				Config: limitedReads,
+				PreConfig: func() { testAccLogTaskListings(t, failUPID, tokenID) },
+				Config:    limitedReads,
 				Check: acc.ComposeAggregateTestCheckFunc(
 					acc.TestCheckResourceAttr(limited, "sees_all_tasks", "false"),
 					acc.TestCheckTypeSetElemNestedAttrs(limited, "tasks.*", map[string]string{

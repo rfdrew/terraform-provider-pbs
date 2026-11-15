@@ -23,7 +23,8 @@ import (
 // should its reload break the stand, the tests after it fail too.
 
 // testAccServiceStand skips the test without TF_ACC, and returns a client
-// and the services the stand lists: none without systemd.
+// and the services the stand lists: none without systemd, or without the
+// D-Bus PBS's proxy needs to read their state.
 func testAccServiceStand(t *testing.T) (*pbsclient.Client, []pbsclient.Service) {
 	t.Helper()
 	if os.Getenv("TF_ACC") == "" {
@@ -42,10 +43,16 @@ func testAccServiceStand(t *testing.T) (*pbsclient.Client, []pbsclient.Service) 
 }
 
 // testAccSystemdStand is testAccServiceStand for a test that needs systemd.
+// The packages stand boots systemd, with D-Bus, so PBS must list services
+// there: a test that skipped on it would hide a stand that lost either.
 func testAccSystemdStand(t *testing.T) (*pbsclient.Client, []pbsclient.Service) {
 	t.Helper()
 	client, services := testAccServiceStand(t)
 	if len(services) == 0 {
+		if os.Getenv(envAccVariant) == "packages" {
+			t.Fatal("PBS lists no services on the packages stand, which boots systemd: its proxy cannot read them " +
+				"with `systemctl show` — is dbus installed and running in the container?")
+		}
 		t.Skip("the stand lists no services: it runs without systemd")
 	}
 	return client, services

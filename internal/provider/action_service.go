@@ -188,7 +188,9 @@ const (
 
 	serviceSystemdNote = "Services are systemd units, and PBS controls them through systemd only: PBS in a " +
 		"container without systemd, such as the community Docker images, has none to control, and the action " +
-		"fails, saying so. There is no action that stops a service: PBS cannot disable one, so it starts again at " +
+		"fails, saying so. It fails the same way where PBS's proxy, which reads the state of services as user " +
+		"`backup`, cannot reach systemd: without D-Bus, which `systemctl` needs when it does not run as root. " +
+		"There is no action that stops a service: PBS cannot disable one, so it starts again at " +
 		"boot; stopping the proxy takes the API away until someone starts it on the host; and PBS refuses to stop " +
 		"its API daemon."
 )
@@ -426,9 +428,19 @@ func (s *serviceInvocation) readState() (pbsclient.Service, bool) {
 	return pbsclient.Service{}, false
 }
 
-// serviceNoSystemd explains what PBS needs to control services.
-const serviceNoSystemd = "PBS controls services through systemd only: a node without it, such as PBS in a Docker " +
-	"container, has no services the provider can control."
+// serviceNoSystemd explains what PBS needs to control services. PBS reads
+// their state in its proxy, as user backup, with `systemctl show`, whose
+// output it parses without looking at its exit status
+// (src/api2/node/services.rs, get_full_service_state; proxmox-backup
+// 7c86c5ad5, after 4.2.11): systemctl reaches systemd over D-Bus unless it
+// runs as root, so without D-Bus PBS reads nothing, as without systemd, and
+// answers no state, while the commands, which its API daemon runs as root,
+// would work.
+const serviceNoSystemd = "PBS controls services through systemd only, and reads their state in its proxy, as " +
+	"user backup, with `systemctl show`. Either the node runs without systemd, as PBS in a Docker container may, " +
+	"and has no services the provider can control; or systemctl cannot reach systemd for that user — without " +
+	"D-Bus, which systemctl needs when it does not run as root (install the `dbus` package, as Debian does by " +
+	"default, or run `systemctl status dbus` on the host)."
 
 // precheck decides from the state of the service whether to run the
 // command, and says why not.

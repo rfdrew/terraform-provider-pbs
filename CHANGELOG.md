@@ -111,7 +111,8 @@ fixes below, and configurations written for 0.4.0 work unchanged.
   wait up to two minutes for the reloaded proxy to answer again. A service that is not
   installed or is masked is refused, a reload of a stopped service, which
   does nothing, warns, and a node without systemd, such as PBS in a Docker
-  container, is explained. Restarting the API daemon, `proxmox-backup`, is
+  container, or without the D-Bus PBS's proxy needs to read the state of
+  services, is explained. Restarting the API daemon, `proxmox-backup`, is
   refused, since PBS would kill the command with every task the daemon runs:
   reload it instead. There is no action that stops a service.
 - List resources for `terraform query`, one for each of these resources,
